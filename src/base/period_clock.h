@@ -12,7 +12,7 @@
 
 namespace puppet_master
 {
-namespace tools
+namespace base
 {
 
 class PeriodClock

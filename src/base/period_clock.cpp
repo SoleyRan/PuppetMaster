@@ -2,7 +2,7 @@
 
 namespace puppet_master
 {
-namespace tools
+namespace base
 {
 
 void PeriodClock::CreatTime(int offset) noexcept 
