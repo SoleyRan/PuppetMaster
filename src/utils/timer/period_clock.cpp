@@ -1,9 +1,6 @@
 #include "period_clock.h"
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 void PeriodClock::CreatTime(int offset) noexcept 
 {
@@ -83,5 +80,4 @@ void PeriodClock::DeleteTime() noexcept
     return;
 }
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END

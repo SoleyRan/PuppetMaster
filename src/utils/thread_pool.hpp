@@ -8,11 +8,9 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <common/namespace_macros.h>
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 class ThreadPool 
 {
@@ -111,7 +109,6 @@ inline void ThreadPool::wait()
     finished_condition.wait(lock, [this] { return tasks.empty() && active_tasks == 0; });
 }
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END
 
 #endif

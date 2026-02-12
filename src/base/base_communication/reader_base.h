@@ -3,11 +3,9 @@
 
 #include <iostream>
 #include <functional>
+#include <common/namespace_macros.h>
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_BASE_NS_BEGIN
 
 class ReaderBase
 {
@@ -21,7 +19,6 @@ protected:
     int64_t last_time_ {0}; // 上次读取的时间戳
 };
 
-}   //base
-}   //puppet_master
+PUPPET_MASTER_BASE_NS_END
 
 #endif

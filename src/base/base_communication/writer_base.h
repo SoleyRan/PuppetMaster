@@ -2,11 +2,9 @@
 #define WRITER_BASE_H
 
 #include <iostream>
+#include <common/namespace_macros.h>
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_BASE_NS_BEGIN
 
 class WriterBase
 {
@@ -14,7 +12,6 @@ public:
     virtual int write(void* data, size_t len){ return -1;}
 };
 
-}   //base
-}   //puppet_master
+PUPPET_MASTER_BASE_NS_END
 
 #endif  //  WRITER_BASE_H

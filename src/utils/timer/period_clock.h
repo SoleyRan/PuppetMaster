@@ -9,11 +9,9 @@
 #include <signal.h>
 #include <cstring>
 #include <logger/log.hpp>
+#include <common/namespace_macros.h>
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 class PeriodClock
 {
@@ -38,7 +36,6 @@ private:
     struct itimerspec m_its;
 };
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END
 
 # endif

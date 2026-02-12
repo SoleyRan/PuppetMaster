@@ -26,10 +26,9 @@
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
 
-namespace puppet_master
-{
-namespace logger
-{
+#include <common/namespace_macros.h>
+
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 namespace logging = boost::log;
 namespace attrs = boost::log::attributes;
@@ -141,7 +140,6 @@ static inline void logInit(std::string log_path_str, int in_console_level, int i
     LOG_Warn() << "New Log Init";  //用于标识新建日志
 }
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END
 
 #endif

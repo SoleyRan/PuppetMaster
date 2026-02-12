@@ -4,12 +4,10 @@
 #include <atomic>
 
 #include "base_queue.h"
-#include "time_stamp.hpp"
+#include <time_stamp.hpp>
+#include <common/namespace_macros.h>
 
-namespace puppet_master 
-{
-namespace base 
-{
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 template <typename T>
 class BoundedQueue : public BaseQueue
@@ -179,7 +177,6 @@ private:
     const size_t max_size_;  // 0 表示无限制
 };
 
-}  
-}  
+PUPPET_MASTER_UTILS_NS_END
 
 #endif 

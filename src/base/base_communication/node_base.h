@@ -1,29 +1,35 @@
-#ifndef COMM_BASE_H
-#define COMM_BASE_H
+#ifndef NODE_BASE_H
+#define NODE_BASE_H
 
 #include <string>
+#include <boost/shared_ptr.hpp>
 #include <common/attributes.h>
-#include <memory>
+#include <common/namespace_macros.h>
 #include "reader_base.h"
 #include "writer_base.h"
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_BASE_NS_BEGIN
 
-class CommBase
+class NodeBase
 {
 public:
-    CommBase() = default;
+    NodeBase(const NodeBase&) = delete;
+    NodeBase& operator=(const NodeBase&) = delete;
+
     // 如果之后有新的通信方式在创建节点时需要初始化参数，可以修改init函数
     virtual void init() = 0;
 
     virtual std::shared_ptr<WriterBase> create_writer(std::string topic_name, void* data, void* attribute) = 0;
     virtual std::shared_ptr<ReaderBase> create_reader(std::string topic_name, void* data, void* attribute) = 0;
+
+protected:
+    NodeBase() = default;
+    ~NodeBase() = default;
+
+    NodeBase(NodeBase&&) = default;
+    NodeBase& operator=(NodeBase&&) = default;
 };
 
-}   //base
-}   //puppet_master
+PUPPET_MASTER_BASE_NS_END
 
 #endif  //  COMM_BASE_H
