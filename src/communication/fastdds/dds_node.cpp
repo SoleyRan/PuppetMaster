@@ -1,9 +1,8 @@
-#include "dds_node_impl.h"
+#include "dds_node.h"
 
 PUPPET_MASTER_COMMUNICATION_NS_BEGIN
 
-DDSNodeImpl::DDSNodeImpl(const std::string& node_name, TransType trans_type)
-    : m_node_name(node_name), m_trans_type(trans_type) 
+DDSNodeImpl::DDSNodeImpl(const std::string& node_name, TransType trans_type) : node_name_(node_name)
 {
     eprosima::fastdds::dds::DomainParticipantQos participant_qos;
     
@@ -15,67 +14,67 @@ DDSNodeImpl::DDSNodeImpl(const std::string& node_name, TransType trans_type)
     discovery_config.leaseDuration = eprosima::fastdds::dds::c_TimeInfinite;
 
     participant_qos.entity_factory().autoenable_created_entities = true;
-    participant_qos.name(m_node_name);
+    participant_qos.name(node_name_);
     participant_qos.transport().use_builtin_transports = false;
 
     InitTransports(participant_qos, trans_type);
 
-    m_participant = eprosima::fastdds::dds::DomainParticipantFactory::get_instance()
+    participant_ = eprosima::fastdds::dds::DomainParticipantFactory::get_instance()
         ->create_participant(DEFAULT_DOMAIN_ID, participant_qos);
-    if (m_participant == nullptr) 
+    if (participant_ == nullptr) 
     {
         throw std::runtime_error("Failed to create DomainParticipant!");
     }
-    m_participant->enable();
-    LOG_Info() << "Created DomainParticipant: " << m_node_name;
+    participant_->enable();
+    LOG_Info() << "Created DomainParticipant: " << node_name_;
 
     eprosima::fastdds::dds::PublisherQos pub_qos = eprosima::fastdds::dds::PUBLISHER_QOS_DEFAULT;
     pub_qos.entity_factory().autoenable_created_entities = false;
-    m_reusable_publisher = m_participant->create_publisher(pub_qos);
-    if (m_reusable_publisher == nullptr) 
+    reusable_publisher_ = participant_->create_publisher(pub_qos);
+    if (reusable_publisher_ == nullptr) 
     {
         throw std::runtime_error("Failed to create reusable Publisher!");
     }
-    m_reusable_publisher->enable();
+    reusable_publisher_->enable();
     LOG_Info() << "Created reusable Publisher";
 
     eprosima::fastdds::dds::SubscriberQos sub_qos = eprosima::fastdds::dds::SUBSCRIBER_QOS_DEFAULT;
     sub_qos.entity_factory().autoenable_created_entities = false;
-    m_reusable_subscriber = m_participant->create_subscriber(sub_qos);
-    if (m_reusable_subscriber == nullptr) 
+    reusable_subscriber_ = participant_->create_subscriber(sub_qos);
+    if (reusable_subscriber_ == nullptr) 
     {
         throw std::runtime_error("Failed to create reusable Subscriber!");
     }
-    m_reusable_subscriber->enable();
+    reusable_subscriber_->enable();
     LOG_Info() << "Created reusable Subscriber";
 }
 
 DDSNodeImpl::~DDSNodeImpl() 
 {
-    std::lock_guard<std::mutex> lg(m_topic_mutex);
+    std::lock_guard<std::mutex> lg(topic_mutex_);
 
-    for (auto& [topic_name, topic] : m_topic_cache) 
+    for (auto& [topic_name, topic] : topic_cache_) 
     {
         if (topic != nullptr) 
-            m_participant->delete_topic(topic);
+            participant_->delete_topic(topic);
     }
-    m_topic_cache.clear();
+    topic_cache_.clear();
 
-    if (m_reusable_publisher != nullptr) 
+    if (reusable_publisher_ != nullptr) 
     {
-        m_participant->delete_publisher(m_reusable_publisher);
-        m_reusable_publisher = nullptr;
+        participant_->delete_publisher(reusable_publisher_);
+        reusable_publisher_ = nullptr;
     }
-    if (m_reusable_subscriber != nullptr) 
+    if (reusable_subscriber_ != nullptr) 
     {
-        m_participant->delete_subscriber(m_reusable_subscriber);
-        m_reusable_subscriber = nullptr;
+        participant_->delete_subscriber(reusable_subscriber_);
+        reusable_subscriber_ = nullptr;
     }
 
-    if (m_participant != nullptr) 
+    if (participant_ != nullptr) 
     {
-        eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->delete_participant(m_participant);
-        m_participant = nullptr;
+        eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->delete_participant(participant_);
+        participant_ = nullptr;
     }
     LOG_Info() << "DDSNodeImpl destroyed successfully";
 }
@@ -88,7 +87,7 @@ void DDSNodeImpl::InitTransports(eprosima::fastdds::dds::DomainParticipantQos& p
         shm_transport->segment_size(SHM_SEGMENT_SIZE);
         shm_transport->healthy_check_timeout_ms(1000);
         participant_qos.transport().user_transports.push_back(shm_transport);
-        LOG_Info("Added SHM transport (segment size: 160MB)");
+        LOG_Info() << "Added SHM transport, segment size: " << SHM_SEGMENT_SIZE << "MB";
     }
 
     if (trans_type == TransType_UDP || trans_type == TransType_BOTH) 
@@ -97,38 +96,36 @@ void DDSNodeImpl::InitTransports(eprosima::fastdds::dds::DomainParticipantQos& p
         udp_transport->sendBufferSize = UDP_BUFFER_SIZE;
         udp_transport->receiveBufferSize = UDP_BUFFER_SIZE;
         participant_qos.transport().user_transports.push_back(udp_transport);
-        LOG_Info("Added UDP transport (buffer size: 16MB)");
+        LOG_Info() << "Added UDP transport, buffer size: " << UDP_BUFFER_SIZE << "MB";
     }
 }
 
 bool DDSNodeImpl::RegisterTopic(const std::string& topic_name, 
                                 std::shared_ptr<eprosima::fastdds::dds::TypeSupport> type_support) 
 {
-    std::lock_guard<std::mutex> lg(m_topic_mutex);
+    std::lock_guard<std::mutex> lg(topic_mutex_);
 
-    if (m_topic_cache.find(topic_name) != m_topic_cache.end())
+    if (topic_cache_.find(topic_name) != topic_cache_.end())
         return true;
 
-    type_support->register_type(m_participant);
+    type_support->register_type(participant_);
 
     eprosima::fastdds::dds::TopicQos topic_qos = eprosima::fastdds::dds::TOPIC_QOS_DEFAULT;
-    auto topic = m_participant->create_topic(topic_name, 
+    auto topic = participant_->create_topic(topic_name, 
                                              type_support->get_type_name(), 
                                              topic_qos);
     if (topic == nullptr) 
     {
-        LOG_Error(("Failed to create Topic: " + topic_name).c_str());
+        LOG_Error() << "Failed to create Topic: " << topic_name;
         return false;
     }
 
-    m_topic_cache[topic_name] = topic;
+    topic_cache_[topic_name] = topic;
     LOG_Info() << "Registered Topic: " << topic_name;
     return true;
 }
 
-std::shared_ptr<TGPub> DDSNodeImpl::CreateWriter(const std::string& topic_name, 
-                                                 void* data_type, 
-                                                 void* attribute) 
+std::shared_ptr<WriterBase> DDSNodeImpl::CreateWriter(std::string topic_name, void* data, void* attribute)
 {
     if (data_type == nullptr || attribute == nullptr) 
     {
@@ -159,8 +156,8 @@ std::shared_ptr<TGPub> DDSNodeImpl::CreateWriter(const std::string& topic_name,
     writer_qos.publish_mode().kind = eprosima::fastdds::dds::ASYNCHRONOUS_PUBLISH_MODE;
     writer_qos.publish_mode().thread_pool_size = 8;  // 适配多Writer并发
 
-    auto writer = m_reusable_publisher->create_datawriter(
-        m_topic_cache[topic_name], 
+    auto writer = reusable_publisher_->create_datawriter(
+        topic_cache_[topic_name], 
         writer_qos
     );
     if (writer == nullptr) 
@@ -175,9 +172,8 @@ std::shared_ptr<TGPub> DDSNodeImpl::CreateWriter(const std::string& topic_name,
     return puber;
 }
 
-std::shared_ptr<DDSReaderBase> DDSNodeImpl::CreateReader(const std::string& topic_name, 
-                                                         void* data_type, 
-                                                         void* attribute) {
+std::shared_ptr<ReaderBase> CreateReader(std::string topic_name, void* data, void* attribute)
+{
     if (data_type == nullptr || attribute == nullptr) 
     {
         throw std::invalid_argument("data_type or attribute is nullptr!");
@@ -204,8 +200,8 @@ std::shared_ptr<DDSReaderBase> DDSNodeImpl::CreateReader(const std::string& topi
     reader_qos.resource_limits().max_instances = 10;
     reader_qos.resource_limits().max_samples_per_instance = 100;
     reader_qos.representation().m_value.push_back(eprosima::fastdds::dds::DataRepresentationId::XCDR_DATA_REPRESENTATION);
-    auto reader = m_reusable_subscriber->create_datareader(
-        m_topic_cache[topic_name], 
+    auto reader = reusable_subscriber_->create_datareader(
+        topic_cache_[topic_name], 
         reader_qos
     );
     if (reader == nullptr) 
@@ -214,17 +210,18 @@ std::shared_ptr<DDSReaderBase> DDSNodeImpl::CreateReader(const std::string& topi
     }
 
     std::shared_ptr<DDSReaderBase> suber;
-    if (dds_attr->attr == nullptr) 
+    if (dds_attr->dds_reader == nullptr) 
     {
-        suber = std::make_shared<DDSReaderBase>();
+        LOG_Error() << "No legal reader created.";
+        return nullptr;
     } 
     else 
     {
-        suber = std::shared_ptr<DDSReaderBase>(static_cast<DDSReaderBase*>(dds_attr->attr));
+        suber = std::shared_ptr<DDSReaderBase>(static_cast<DDSReaderBase*>(dds_attr->dds_reader));
     }
     suber->set_reader(reader, dds_attr->is_fresh);
 
-    LOG_Info << "Created DataReader for Topic: " << topic_name;
+    LOG_Info() << "Created DataReader for Topic: " << topic_name;
     return suber;
 }
 

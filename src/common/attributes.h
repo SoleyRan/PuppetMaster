@@ -67,7 +67,7 @@ struct DDSAttribute
     TransType trans_type {TransType_UDP}; // 传输方式
     bool is_fresh {true}; // 是否指取最新的数据
     QosProfile qos_profile; // qos 配置，一般采用默认配置
-    void* attr {nullptr}; //支持 zero copy，不需要赋值
+    void* dds_reader {nullptr}; 
 };
 
 #endif
