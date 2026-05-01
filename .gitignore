@@ -39,3 +39,19 @@
 
 # debug information files
 *.dwo
+
+# CMake build trees and generated files
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# IDE metadata
+.vs/
+.vscode/
+.idea/

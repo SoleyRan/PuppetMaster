@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/PuppetMasterTargets.cmake")
+
+check_required_components(PuppetMaster)
