@@ -7,10 +7,9 @@
 #include <memory>
 #include <limits>
 
-namespace puppet_master 
-{
-namespace base 
-{
+#include <common/namespace_macros.h>
+
+PUPPET_MASTER_UTILS_NS_BEGIN
 
 class BaseQueue
 {
@@ -27,7 +26,6 @@ public:
 
 };
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END
 
 #endif

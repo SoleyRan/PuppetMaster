@@ -2,11 +2,10 @@
 #define TIME_STAMP_HPP
 
 #include <chrono>  
+#include <common/namespace_macros.h>
 
-namespace puppet_master
-{
-namespace base
-{
+PUPPET_MASTER_UTILS_NS_BEGIN
+
 class TimeStamp
 {
 public:
@@ -40,7 +39,6 @@ public:
     }
 };
 
-}
-}
+PUPPET_MASTER_UTILS_NS_END
 
 #endif
