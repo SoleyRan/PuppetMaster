@@ -1,5 +1,7 @@
 #pragma once
 
+#include <puppet_master/core/message_policy.h>
+#include <puppet_master/core/result.h>
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
 #include <puppet_master/export.h>

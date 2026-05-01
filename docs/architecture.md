@@ -20,6 +20,13 @@ Core owns stable concepts such as status codes, topic names, task names,
 transport kinds, trigger kinds, queue policies, and time-related metadata. It
 must not include FastDDS, ZMQ, IPC, or platform-specific headers.
 
+The current public core is header-only and includes:
+
+- `Status` and `Result<T>` for recoverable failures.
+- Strong named values for topics, tasks, components, and transports.
+- Middleware-neutral message delivery and retention policies.
+- Trigger metadata used later by the scheduler.
+
 ### Transport
 
 Transport adapters implement a common reader/writer/node contract. FastDDS,
@@ -72,6 +79,9 @@ The first refactor branch builds only the stable skeleton:
 Existing files under `src/communication/fastdds` are treated as migration
 material. They will be cleaned up and connected in a dedicated FastDDS adapter
 branch after the transport interface is finalized.
+
+The core API added after the skeleton milestone remains public and
+transport-neutral under `include/puppet_master/core`.
 
 ## Intended Public CMake Contract
 
