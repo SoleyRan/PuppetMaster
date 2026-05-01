@@ -9,6 +9,8 @@ configure_file(
 set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/puppet_master.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/export.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"

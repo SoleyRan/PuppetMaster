@@ -5,13 +5,14 @@ details that are not part of the public API.
 
 ## Current Build Boundary
 
-The first skeleton milestone builds only:
+The compiled library currently builds only:
 
 - `CMakeLists.txt`
 - `puppet_master.cpp`
 
 Public headers live under `../include/puppet_master` so downstream projects get
-a stable include path independent of internal refactors.
+a stable include path independent of internal refactors. The core API is
+currently header-only.
 
 ## Migration Areas
 

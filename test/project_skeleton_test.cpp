@@ -9,7 +9,7 @@ int main()
     assert(puppet_master::Version()[0] != '\0');
     assert(puppet_master::kVersionMajor == 0);
 
-    puppet_master::core::Status ok;
+    const puppet_master::core::Status ok;
     assert(ok.ok());
 
     const auto invalid =

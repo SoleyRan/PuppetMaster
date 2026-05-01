@@ -13,10 +13,12 @@ CMake package that downstream projects can consume.
 This branch intentionally keeps the default build small:
 
 - `include/puppet_master/...` contains the public API surface for new code.
+- `include/puppet_master/core` contains transport-neutral core types, message
+  policies, and the common error model.
 - `src/communication/fastdds` is kept as an adapter migration area and is not
   built by default yet.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
-- A minimal demo and smoke test verify the project skeleton.
+- Minimal demos and smoke tests verify the project skeleton and core API.
 
 ## Goals
 
@@ -68,11 +70,13 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 
 ## Roadmap
 
-1. Project skeleton and public CMake package.
-2. Core types, status model, and transport abstraction.
-3. In-memory transport for tests and local pipelines.
-4. FastDDS adapter as an optional backend.
-5. Runtime registry, component lifecycle, and scheduler.
-6. Configuration, observability, and production demos.
+1. Project skeleton and public CMake package. Done.
+2. Core types and error model. In progress.
+3. Transport abstraction.
+4. In-memory transport for tests and local pipelines.
+5. FastDDS adapter as an optional backend.
+6. Runtime registry, component lifecycle, and scheduler.
+7. Configuration, observability, and production demos.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
+See [Core API](docs/core.md) for the current public core model.
