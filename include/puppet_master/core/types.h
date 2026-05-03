@@ -208,11 +208,25 @@ struct TopicSpec {
     TopicName name;
     TransportKind transport {TransportKind::kInMemory};
     MessagePolicy message_policy;
+
+    Status Validate() const
+    {
+        auto status = ValidateName("topic name", name.view());
+        if (!status.ok()) {
+            return status;
+        }
+        return message_policy.Validate();
+    }
 };
 
 struct EndpointSpec {
     EndpointKind kind {EndpointKind::kReader};
     TopicName topic;
+
+    Status Validate() const
+    {
+        return ValidateName("topic name", topic.view());
+    }
 };
 
 struct TriggerSpec {
@@ -221,6 +235,14 @@ struct TriggerSpec {
     DependencyPolicy dependency_policy {DependencyPolicy::kAll};
     std::vector<TopicName> data_dependencies;
     std::vector<TaskName> task_dependencies;
+
+    Status Validate() const
+    {
+        if (kind == TriggerKind::kPeriodic && period <= Nanoseconds::zero()) {
+            return Status::InvalidArgument("periodic trigger period must be greater than zero");
+        }
+        return Status::Ok();
+    }
 };
 
 }  // namespace puppet_master::core

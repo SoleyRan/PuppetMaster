@@ -29,10 +29,15 @@ The current public core is header-only and includes:
 
 ### Transport
 
-Transport adapters implement a common reader/writer/node contract. FastDDS,
+Transport adapters implement a common reader/writer/transport contract. FastDDS,
 ZMQ, IPC, and in-memory queues should live behind this boundary. The runtime
 selects a transport by configuration or registration, but it should not depend
 on concrete middleware headers.
+
+The public transport abstraction now lives under `include/puppet_master/transport`.
+It exposes byte-oriented messages, endpoint configuration, reader/writer
+interfaces, transport capabilities, and a lightweight registry. Concrete
+backends remain separate implementation milestones.
 
 ### Runtime
 

@@ -12,7 +12,7 @@ The compiled library currently builds only:
 
 Public headers live under `../include/puppet_master` so downstream projects get
 a stable include path independent of internal refactors. The core API is
-currently header-only.
+currently header-only, and the public transport abstraction is also header-only.
 
 ## Migration Areas
 

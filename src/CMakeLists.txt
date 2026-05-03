@@ -13,6 +13,9 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"
 )
 
