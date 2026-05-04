@@ -16,6 +16,9 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/policy_mapping.h"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"
 )
 
@@ -38,8 +41,6 @@ target_include_directories(puppet_master
 target_compile_definitions(puppet_master
     PRIVATE
         PUPPET_MASTER_EXPORTS
-    PUBLIC
-        "$<$<BOOL:${PUPPETMASTER_ENABLE_FASTDDS}>:PUPPETMASTER_HAS_FASTDDS=1>"
 )
 
 if(NOT BUILD_SHARED_LIBS)
@@ -68,6 +69,10 @@ install(
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if(PUPPETMASTER_ENABLE_FASTDDS)
+    add_subdirectory(transport/fastdds)
+endif()
 
 install(
     DIRECTORY "${PROJECT_SOURCE_DIR}/include/"

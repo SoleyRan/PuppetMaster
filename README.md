@@ -58,8 +58,8 @@ cmake -S . -B build -DPUPPETMASTER_BUILD_TESTS=OFF
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
 ```
 
-`PUPPETMASTER_ENABLE_FASTDDS` is reserved for the upcoming FastDDS adapter
-branch. It does not pull the staging adapter into the default build yet.
+`PUPPETMASTER_ENABLE_FASTDDS` builds the optional FastDDS adapter target. The
+default build remains transport-neutral and does not require FastDDS.
 
 ## Downstream Usage
 
@@ -76,10 +76,11 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 2. Core types and error model. In progress.
 3. Transport abstraction. In progress.
 4. In-memory transport for tests and local pipelines.
-5. FastDDS adapter as an optional backend.
+5. FastDDS adapter as an optional backend. In progress.
 6. Runtime registry, component lifecycle, and scheduler.
 7. Configuration, observability, and production demos.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
 See [Transport Abstraction](docs/transport.md) for the backend contract.
+See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.

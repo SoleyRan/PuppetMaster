@@ -36,6 +36,7 @@ Future branches should move code into these implementation layers:
 
 - `core`: internal helpers behind the public core API.
 - `transport`: backend-neutral transport interfaces and adapters.
+- `transport/fastdds`: optional FastDDS adapter implementation.
 - `runtime`: registries, lifecycle, and executor ownership.
 - `component`: implementation support for user-facing components.
 - `scheduler`: trigger evaluation and task dispatch.

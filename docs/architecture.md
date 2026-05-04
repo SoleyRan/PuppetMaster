@@ -39,6 +39,10 @@ It exposes byte-oriented messages, endpoint configuration, reader/writer
 interfaces, transport capabilities, and a lightweight registry. Concrete
 backends remain separate implementation milestones.
 
+The optional FastDDS adapter is built as `PuppetMaster::FastDdsAdapter` when
+`PUPPETMASTER_ENABLE_FASTDDS=ON`. DDS-specific QoS and transport settings stay
+inside that adapter boundary.
+
 ### Runtime
 
 Runtime owns registries and lifecycle orchestration:

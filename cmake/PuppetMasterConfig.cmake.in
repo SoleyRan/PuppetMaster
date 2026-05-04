@@ -1,5 +1,16 @@
 @PACKAGE_INIT@
 
+set(PUPPETMASTER_WITH_FASTDDS @PUPPETMASTER_ENABLE_FASTDDS@)
+
+if(PUPPETMASTER_WITH_FASTDDS)
+    include(CMakeFindDependencyMacro)
+    find_dependency(fastcdr CONFIG REQUIRED)
+    find_dependency(fastdds CONFIG QUIET)
+    if(NOT fastdds_FOUND)
+        find_dependency(fastrtps CONFIG REQUIRED)
+    endif()
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/PuppetMasterTargets.cmake")
 
 check_required_components(PuppetMaster)
