@@ -22,7 +22,7 @@ endif()
 
 option(PUPPETMASTER_BUILD_DEMOS "Build PuppetMaster example programs." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_BUILD_TESTS "Build PuppetMaster tests." ${PUPPETMASTER_IS_TOP_LEVEL})
-option(PUPPETMASTER_ENABLE_FASTDDS "Enable FastDDS integration hooks. The adapter build lands in a later branch." OFF)
+option(PUPPETMASTER_ENABLE_FASTDDS "Build the optional FastDDS transport adapter." OFF)
 
 # Compatibility aliases for the first public refactor branch. New integrations
 # should prefer the PUPPETMASTER_* option names because they remain scoped to

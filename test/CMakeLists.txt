@@ -39,3 +39,17 @@ add_test(
     NAME puppet_master.transport_abstraction
     COMMAND puppet_master_transport_abstraction_test
 )
+
+add_executable(puppet_master_fastdds_policy_mapping_test
+    fastdds_policy_mapping_test.cpp
+)
+
+target_link_libraries(puppet_master_fastdds_policy_mapping_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.fastdds_policy_mapping
+    COMMAND puppet_master_fastdds_policy_mapping_test
+)
