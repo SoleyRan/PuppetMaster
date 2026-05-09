@@ -16,6 +16,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/inmemory/inmemory_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/policy_mapping.h"
@@ -24,6 +25,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
 
 add_library(puppet_master
     puppet_master.cpp
+    transport/inmemory/inmemory_transport.cpp
     ${PUPPETMASTER_PUBLIC_HEADERS}
 )
 

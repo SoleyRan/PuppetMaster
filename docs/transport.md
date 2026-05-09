@@ -15,8 +15,9 @@ This milestone adds only abstractions:
 - endpoint configuration
 - a lightweight transport registry
 
-Concrete transports such as in-memory queues and FastDDS adapters are planned
-for later branches.
+Concrete transports live behind this interface. The in-memory backend is the
+reference local implementation, while FastDDS and other adapters can provide
+external middleware integration without changing component code.
 
 ## Message Model
 
@@ -53,6 +54,11 @@ identifies the payload contract used by a reader or writer.
 
 Backends should report unsupported behavior through `core::Status::Unsupported`
 instead of silently pretending to provide stronger delivery guarantees.
+
+The in-memory backend is intentionally strict about this contract: it supports
+callbacks, blocking reads, reliable local delivery, bounded queues, and
+unbounded reader mailboxes. See [In-Memory Transport](inmemory-transport.md) for
+the concrete semantics.
 
 ## Registry
 
