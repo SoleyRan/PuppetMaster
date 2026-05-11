@@ -13,6 +13,9 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/component.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/context.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
@@ -25,6 +28,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
 
 add_library(puppet_master
     puppet_master.cpp
+    runtime/context.cpp
     transport/inmemory/inmemory_transport.cpp
     ${PUPPETMASTER_PUBLIC_HEADERS}
 )
