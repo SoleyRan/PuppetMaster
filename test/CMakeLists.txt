@@ -54,6 +54,20 @@ add_test(
     COMMAND puppet_master_inmemory_transport_test
 )
 
+add_executable(puppet_master_runtime_context_test
+    runtime_context_test.cpp
+)
+
+target_link_libraries(puppet_master_runtime_context_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.runtime_context
+    COMMAND puppet_master_runtime_context_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )
