@@ -48,11 +48,14 @@ inside that adapter boundary.
 Runtime owns registries and lifecycle orchestration:
 
 - transport registry
-- topic registry
 - component registry
-- task registry
-- executor ownership
-- startup and shutdown sequencing
+- default local transport assembly
+- reader and writer creation through registered transports
+- startup and shutdown sequencing for transports
+
+The current runtime milestone adds `RuntimeContext`, `ComponentSpec`, and
+`ComponentRegistry`. Task registries, executor ownership, and component
+lifecycle callbacks remain future scheduler/runtime work.
 
 The runtime should expose explicit phases such as configure, initialize, start,
 stop, and shutdown.

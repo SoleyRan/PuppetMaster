@@ -19,11 +19,13 @@ This branch intentionally keeps the default build small:
   message, and registry abstractions.
 - `include/puppet_master/transport/inmemory` contains the first concrete local
   pub/sub backend for scheduler and component tests.
+- `include/puppet_master/runtime` contains the runtime context and component
+  registry used to assemble middleware participants.
 - `src/communication/fastdds` is kept as an adapter migration area and is not
   built by default yet.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
 - Minimal demos and smoke tests verify the project skeleton, core API, transport
-  abstraction, and in-memory pub/sub behavior.
+  abstraction, in-memory pub/sub behavior, and runtime assembly.
 
 ## Goals
 
@@ -78,14 +80,16 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 1. Project skeleton and public CMake package. Done.
 2. Core types and error model. Done.
 3. Transport abstraction. Done.
-4. In-memory transport for tests and local pipelines. In progress.
+4. In-memory transport for tests and local pipelines. Done.
 5. FastDDS adapter as an optional backend. In progress.
-6. Runtime registry, component lifecycle, and scheduler.
-7. Configuration, observability, and production demos.
+6. Runtime context and component registry. In progress.
+7. Component lifecycle and scheduler.
+8. Configuration, observability, and production demos.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
 See [Transport Abstraction](docs/transport.md) for the backend contract.
 See [In-Memory Transport](docs/inmemory-transport.md) for the local pub/sub
 backend.
+See [Runtime Context](docs/runtime.md) for runtime assembly and registries.
 See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
