@@ -68,6 +68,20 @@ add_test(
     COMMAND puppet_master_runtime_context_test
 )
 
+add_executable(puppet_master_component_model_test
+    component_model_test.cpp
+)
+
+target_link_libraries(puppet_master_component_model_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.component_model
+    COMMAND puppet_master_component_model_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )

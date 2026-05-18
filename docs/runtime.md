@@ -10,12 +10,14 @@ readers, and writers.
 This milestone adds:
 
 - `ComponentSpec`
+- `Component`
+- `ComponentContext`
 - `ComponentRegistry`
 - `RuntimeOptions`
 - `RuntimeContext`
 
-It does not execute tasks yet. Component lifecycle, scheduling policy, timers,
-and dependency resolution remain separate milestones.
+It does not execute tasks automatically yet. Scheduling policy, timers, and
+dependency resolution remain separate milestones.
 
 ## ComponentSpec
 
@@ -31,6 +33,11 @@ The spec is deliberately data-oriented. Later code can bind real task bodies
 and lifecycle callbacks to this declaration without changing the public
 transport API.
 
+`Component` is the executable algorithm module interface. A component returns
+its `ComponentSpec` from `Describe()`, then receives explicit lifecycle calls
+such as `Configure()`, `Initialize()`, `Start()`, `Execute()`, `Stop()`, and
+`Shutdown()`.
+
 ## ComponentRegistry
 
 `ComponentRegistry` stores component declarations by name. It is thread-safe and
@@ -45,10 +52,12 @@ Duplicate names return `StatusCode::kAlreadyExists`. Missing names return
 `RuntimeContext` is the shared runtime assembly point:
 
 - owns the component registry
+- owns component instances and lifecycle states
 - owns the transport registry
 - installs a default in-memory transport
 - opens and closes registered transports
 - creates readers and writers from `EndpointConfig`
+- drives explicit component lifecycle calls
 
 Endpoint creation is still routed through the transport abstraction. The context
 only selects the backend from `TopicSpec::transport`; it does not know how a DDS,
