@@ -28,6 +28,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
 
 add_library(puppet_master
     puppet_master.cpp
+    runtime/component.cpp
     runtime/context.cpp
     transport/inmemory/inmemory_transport.cpp
     ${PUPPETMASTER_PUBLIC_HEADERS}

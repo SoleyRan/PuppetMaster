@@ -49,13 +49,15 @@ Runtime owns registries and lifecycle orchestration:
 
 - transport registry
 - component registry
+- component instance and state registry
 - default local transport assembly
 - reader and writer creation through registered transports
-- startup and shutdown sequencing for transports
+- startup and shutdown sequencing for transports and components
 
-The current runtime milestone adds `RuntimeContext`, `ComponentSpec`, and
-`ComponentRegistry`. Task registries, executor ownership, and component
-lifecycle callbacks remain future scheduler/runtime work.
+The current runtime and component milestones add `RuntimeContext`,
+`ComponentSpec`, `Component`, `ComponentContext`, and `ComponentRegistry`. Task
+registries, executor ownership, and automatic trigger dispatch remain future
+scheduler/runtime work.
 
 The runtime should expose explicit phases such as configure, initialize, start,
 stop, and shutdown.
@@ -65,6 +67,11 @@ stop, and shutdown.
 Component APIs are the main user-facing layer. A component should declare its
 inputs, outputs, trigger policy, and lifecycle callbacks without manually
 creating DDS readers, writers, or scheduler internals.
+
+The current component model exposes `Describe()`, lifecycle callbacks, and an
+`Execute()` hook. Components use `ComponentContext` to create readers and
+writers from declared endpoints, which keeps algorithm modules independent from
+the selected transport backend.
 
 ### Scheduler
 
