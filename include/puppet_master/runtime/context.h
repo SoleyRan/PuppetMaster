@@ -47,8 +47,18 @@ public:
     std::vector<core::TransportName> ListTransportNames() const;
 
     core::Status RegisterComponent(ComponentSpec spec);
+    core::Status RegisterComponent(ComponentPtr component);
     core::Result<ComponentSpec> FindComponent(const core::ComponentName& name) const;
+    core::Result<ComponentPtr> FindComponentInstance(const core::ComponentName& name) const;
+    core::Result<ComponentState> GetComponentState(const core::ComponentName& name) const;
     std::vector<core::ComponentName> ListComponentNames() const;
+
+    core::Status ConfigureComponent(const core::ComponentName& name);
+    core::Status InitializeComponent(const core::ComponentName& name);
+    core::Status StartComponent(const core::ComponentName& name);
+    core::Status ExecuteComponent(const core::ComponentName& name);
+    core::Status StopComponent(const core::ComponentName& name);
+    core::Status ShutdownComponent(const core::ComponentName& name);
 
     core::Result<transport::ReaderPtr> CreateReader(const transport::EndpointConfig& endpoint);
     core::Result<transport::WriterPtr> CreateWriter(const transport::EndpointConfig& endpoint);

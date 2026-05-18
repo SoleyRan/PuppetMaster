@@ -1,5 +1,6 @@
 #include <puppet_master/runtime/context.h>
 
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <string>
@@ -23,6 +24,27 @@ core::Status OpenTransportIfNeeded(const transport::TransportPtr& transport)
     }
 
     return transport->Open();
+}
+
+bool IsOneOf(ComponentState state, std::initializer_list<ComponentState> allowed_states)
+{
+    for (const auto allowed : allowed_states) {
+        if (state == allowed) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+core::Status InvalidTransition(
+    const core::ComponentName& name,
+    const char* operation,
+    ComponentState state)
+{
+    return core::Status::FailedPrecondition(
+        std::string("cannot ") + operation + " component " + name.str()
+        + " from state " + ToString(state));
 }
 
 }  // namespace
@@ -164,10 +186,72 @@ struct RuntimeContext::Impl {
         return transports.Find(found->second);
     }
 
+    core::Status RegisterComponentInstance(ComponentPtr component)
+    {
+        if (!component) {
+            return core::Status::InvalidArgument("component must not be null");
+        }
+
+        auto spec = component->Describe();
+        auto status = spec.Validate();
+        if (!status.ok()) {
+            return status;
+        }
+
+        const auto name = spec.name;
+        status = components.Register(std::move(spec));
+        if (!status.ok()) {
+            return status;
+        }
+
+        std::lock_guard<std::mutex> lock(mutex);
+        component_instances.emplace(name.str(), std::move(component));
+        component_states.emplace(name.str(), ComponentState::kCreated);
+        return core::Status::Ok();
+    }
+
+    core::Result<ComponentPtr> FindComponentInstance(const core::ComponentName& name) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = component_instances.find(name.str());
+        if (found == component_instances.end()) {
+            return core::Result<ComponentPtr>::FromStatus(
+                core::Status::NotFound("component instance is not registered: " + name.str()));
+        }
+
+        return found->second;
+    }
+
+    core::Result<ComponentState> GetComponentState(const core::ComponentName& name) const
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = component_states.find(name.str());
+        if (found == component_states.end()) {
+            return core::Result<ComponentState>::FromStatus(
+                core::Status::NotFound("component state is not registered: " + name.str()));
+        }
+
+        return found->second;
+    }
+
+    core::Status SetComponentState(const core::ComponentName& name, ComponentState state)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto found = component_states.find(name.str());
+        if (found == component_states.end()) {
+            return core::Status::NotFound("component state is not registered: " + name.str());
+        }
+
+        found->second = state;
+        return core::Status::Ok();
+    }
+
     RuntimeOptions options;
     ComponentRegistry components;
     transport::TransportRegistry transports;
     std::map<core::TransportKind, core::TransportName> transport_by_kind;
+    std::map<std::string, ComponentPtr> component_instances;
+    std::map<std::string, ComponentState> component_states;
     mutable std::mutex mutex;
     bool open {false};
 };
@@ -242,14 +326,169 @@ core::Status RuntimeContext::RegisterComponent(ComponentSpec spec)
     return impl_->components.Register(std::move(spec));
 }
 
+core::Status RuntimeContext::RegisterComponent(ComponentPtr component)
+{
+    return impl_->RegisterComponentInstance(std::move(component));
+}
+
 core::Result<ComponentSpec> RuntimeContext::FindComponent(const core::ComponentName& name) const
 {
     return impl_->components.Find(name);
 }
 
+core::Result<ComponentPtr> RuntimeContext::FindComponentInstance(const core::ComponentName& name) const
+{
+    return impl_->FindComponentInstance(name);
+}
+
+core::Result<ComponentState> RuntimeContext::GetComponentState(const core::ComponentName& name) const
+{
+    return impl_->GetComponentState(name);
+}
+
 std::vector<core::ComponentName> RuntimeContext::ListComponentNames() const
 {
     return impl_->components.ListNames();
+}
+
+core::Status RuntimeContext::ConfigureComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(state.value(), {ComponentState::kCreated, ComponentState::kStopped})) {
+        return InvalidTransition(name, "configure", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Configure(context);
+    impl_->SetComponentState(name, status.ok() ? ComponentState::kConfigured : ComponentState::kError);
+    return status;
+}
+
+core::Status RuntimeContext::InitializeComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(state.value(), {ComponentState::kConfigured})) {
+        return InvalidTransition(name, "initialize", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Initialize(context);
+    impl_->SetComponentState(name, status.ok() ? ComponentState::kInitialized : ComponentState::kError);
+    return status;
+}
+
+core::Status RuntimeContext::StartComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(state.value(), {ComponentState::kInitialized, ComponentState::kStopped})) {
+        return InvalidTransition(name, "start", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Start(context);
+    impl_->SetComponentState(name, status.ok() ? ComponentState::kStarted : ComponentState::kError);
+    return status;
+}
+
+core::Status RuntimeContext::ExecuteComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(state.value(), {ComponentState::kStarted})) {
+        return InvalidTransition(name, "execute", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Execute(context);
+    if (!status.ok()) {
+        impl_->SetComponentState(name, ComponentState::kError);
+    }
+    return status;
+}
+
+core::Status RuntimeContext::StopComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(state.value(), {ComponentState::kStarted})) {
+        return InvalidTransition(name, "stop", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Stop(context);
+    impl_->SetComponentState(name, status.ok() ? ComponentState::kStopped : ComponentState::kError);
+    return status;
+}
+
+core::Status RuntimeContext::ShutdownComponent(const core::ComponentName& name)
+{
+    auto component = FindComponentInstance(name);
+    if (!component.ok()) {
+        return component.status();
+    }
+
+    auto state = GetComponentState(name);
+    if (!state.ok()) {
+        return state.status();
+    }
+
+    if (!IsOneOf(
+            state.value(),
+            {ComponentState::kCreated,
+             ComponentState::kConfigured,
+             ComponentState::kInitialized,
+             ComponentState::kStopped,
+             ComponentState::kError})) {
+        return InvalidTransition(name, "shutdown", state.value());
+    }
+
+    ComponentContext context(name, *this);
+    auto status = component.value()->Shutdown(context);
+    impl_->SetComponentState(name, status.ok() ? ComponentState::kShutdown : ComponentState::kError);
+    return status;
 }
 
 core::Result<transport::ReaderPtr> RuntimeContext::CreateReader(
