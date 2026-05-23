@@ -33,3 +33,12 @@ target_link_libraries(puppet_master_component_model_demo
     PRIVATE
         PuppetMaster::PuppetMaster
 )
+
+add_executable(puppet_master_scheduler_triggers_demo
+    scheduler_triggers_demo.cpp
+)
+
+target_link_libraries(puppet_master_scheduler_triggers_demo
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)

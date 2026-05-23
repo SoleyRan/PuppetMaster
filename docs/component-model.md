@@ -84,7 +84,7 @@ instance.
 
 ## What This Milestone Does Not Do
 
-This milestone does not implement the scheduler. It does not automatically
-invoke `Execute()` from timers or data callbacks. That remains the next natural
-step: the scheduler can read registered component specs, observe their triggers,
-and call `ExecuteComponent()` when a component becomes ready.
+The scheduler layer builds on this model by reading registered component specs,
+observing their triggers, and calling `ExecuteComponent()` when a component
+becomes ready. Component code still only implements lifecycle callbacks and
+`Execute()`; it does not need to know which scheduler policy triggered it.
