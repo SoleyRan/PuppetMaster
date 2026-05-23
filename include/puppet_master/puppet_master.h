@@ -8,6 +8,7 @@
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/context.h>
 #include <puppet_master/runtime/registry.h>
+#include <puppet_master/scheduler/scheduler.h>
 #include <puppet_master/transport/message.h>
 #include <puppet_master/transport/registry.h>
 #include <puppet_master/transport/inmemory/inmemory_transport.h>
