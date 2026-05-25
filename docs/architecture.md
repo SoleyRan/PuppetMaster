@@ -55,9 +55,8 @@ Runtime owns registries and lifecycle orchestration:
 - startup and shutdown sequencing for transports and components
 
 The current runtime and component milestones add `RuntimeContext`,
-`ComponentSpec`, `Component`, `ComponentContext`, and `ComponentRegistry`. Task
-registries, executor ownership, and automatic trigger dispatch remain future
-scheduler/runtime work.
+`ComponentSpec`, `Component`, `ComponentContext`, and `ComponentRegistry`.
+Automatic trigger dispatch lives in the scheduler layer.
 
 The runtime should expose explicit phases such as configure, initialize, start,
 stop, and shutdown.
@@ -78,6 +77,12 @@ the selected transport backend.
 Scheduler converts periodic timers, data availability, task dependencies, and
 manual triggers into executor work. Its behavior must define deadline handling,
 queue overflow, trigger coalescing, and dependency semantics.
+
+The current scheduler milestone supports manual, periodic, and data-driven
+trigger dispatch through `scheduler::Scheduler`. Events pass through a
+serialized dispatcher queue and call `RuntimeContext::ExecuteComponent()`.
+Task dependency graphs, executor pools, priorities, deadlines, and trigger
+coalescing policies remain future work.
 
 ### Tooling
 

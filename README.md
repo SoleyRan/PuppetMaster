@@ -22,11 +22,14 @@ This branch intentionally keeps the default build small:
 - `include/puppet_master/runtime` contains the runtime context, component
   registry, and algorithm module interface used to assemble middleware
   participants.
+- `include/puppet_master/scheduler` contains trigger dispatch for manual,
+  periodic, and data-driven component execution.
 - `src/communication/fastdds` is kept as an adapter migration area and is not
   built by default yet.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
 - Minimal demos and smoke tests verify the project skeleton, core API, transport
-  abstraction, in-memory pub/sub behavior, and runtime assembly.
+  abstraction, in-memory pub/sub behavior, runtime assembly, and scheduler
+  triggers.
 
 ## Goals
 
@@ -84,8 +87,8 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 4. In-memory transport for tests and local pipelines. Done.
 5. FastDDS adapter as an optional backend. In progress.
 6. Runtime context and component registry. Done.
-7. Component model and algorithm module interface. In progress.
-8. Scheduler.
+7. Component model and algorithm module interface. Done.
+8. Scheduler triggers. In progress.
 9. Configuration, observability, and production demos.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
@@ -96,4 +99,5 @@ backend.
 See [Runtime Context](docs/runtime.md) for runtime assembly and registries.
 See [Component Model](docs/component-model.md) for the algorithm module
 interface.
+See [Scheduler](docs/scheduler.md) for trigger dispatch and component execution.
 See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
