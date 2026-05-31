@@ -96,6 +96,20 @@ add_test(
     COMMAND puppet_master_scheduler_triggers_test
 )
 
+add_executable(puppet_master_configuration_system_test
+    configuration_system_test.cpp
+)
+
+target_link_libraries(puppet_master_configuration_system_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.configuration_system
+    COMMAND puppet_master_configuration_system_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )
