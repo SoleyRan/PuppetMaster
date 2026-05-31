@@ -24,12 +24,15 @@ This branch intentionally keeps the default build small:
   participants.
 - `include/puppet_master/scheduler` contains trigger dispatch for manual,
   periodic, and data-driven component execution.
+- `include/puppet_master/configuration` contains the code-first project
+  configuration model used to declare topics, components, and triggers in one
+  place.
 - `src/communication/fastdds` is kept as an adapter migration area and is not
   built by default yet.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
 - Minimal demos and smoke tests verify the project skeleton, core API, transport
-  abstraction, in-memory pub/sub behavior, runtime assembly, and scheduler
-  triggers.
+  abstraction, in-memory pub/sub behavior, runtime assembly, scheduler triggers,
+  and configuration assembly.
 
 ## Goals
 
@@ -88,8 +91,9 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 5. FastDDS adapter as an optional backend. In progress.
 6. Runtime context and component registry. Done.
 7. Component model and algorithm module interface. Done.
-8. Scheduler triggers. In progress.
-9. Configuration, observability, and production demos.
+8. Scheduler triggers. Done.
+9. Code-first configuration system. In progress.
+10. Observability and production demos.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -101,3 +105,5 @@ See [Component Model](docs/component-model.md) for the algorithm module
 interface.
 See [Scheduler](docs/scheduler.md) for trigger dispatch and component execution.
 See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
+See [Configuration System](docs/configuration.md) for code-first project
+assembly.

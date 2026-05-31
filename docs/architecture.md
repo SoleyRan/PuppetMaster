@@ -84,6 +84,17 @@ serialized dispatcher queue and call `RuntimeContext::ExecuteComponent()`.
 Task dependency graphs, executor pools, priorities, deadlines, and trigger
 coalescing policies remain future work.
 
+### Configuration
+
+Configuration is the assembly layer above core, transport, runtime, component,
+and scheduler contracts. It gives applications one place to declare topics,
+message policies, component endpoints, and trigger metadata.
+
+The current configuration milestone is code-first: applications build a
+`ProjectConfig` directly in C++ and then ask it to produce `EndpointConfig`,
+`ComponentSpec`, and `RuntimeOptions` objects. YAML, JSON, TOML, or command-line
+loaders can be added later without changing the runtime contracts.
+
 ### Tooling
 
 Tooling includes examples, configuration validation, metrics exporters, trace
