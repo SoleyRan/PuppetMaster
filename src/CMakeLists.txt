@@ -9,6 +9,7 @@ configure_file(
 set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/puppet_master.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/export.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/compat/itage_facade.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/configuration.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
@@ -30,6 +31,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
 
 add_library(puppet_master
     puppet_master.cpp
+    compat/itage_facade.cpp
     configuration/configuration.cpp
     runtime/component.cpp
     runtime/context.cpp

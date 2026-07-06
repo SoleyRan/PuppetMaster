@@ -1,5 +1,6 @@
 #pragma once
 
+#include <puppet_master/compat/itage_facade.h>
 #include <puppet_master/configuration/configuration.h>
 #include <puppet_master/core/message_policy.h>
 #include <puppet_master/core/result.h>
