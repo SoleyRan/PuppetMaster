@@ -51,3 +51,12 @@ target_link_libraries(puppet_master_configuration_system_demo
     PRIVATE
         PuppetMaster::PuppetMaster
 )
+
+add_executable(puppet_master_compatibility_facade_demo
+    compatibility_facade_demo.cpp
+)
+
+target_link_libraries(puppet_master_compatibility_facade_demo
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)

@@ -110,6 +110,20 @@ add_test(
     COMMAND puppet_master_configuration_system_test
 )
 
+add_executable(puppet_master_compatibility_facade_test
+    compatibility_facade_test.cpp
+)
+
+target_link_libraries(puppet_master_compatibility_facade_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.compatibility_facade
+    COMMAND puppet_master_compatibility_facade_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )

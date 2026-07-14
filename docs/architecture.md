@@ -95,6 +95,18 @@ The current configuration milestone is code-first: applications build a
 `ComponentSpec`, and `RuntimeOptions` objects. YAML, JSON, TOML, or command-line
 loaders can be added later without changing the runtime contracts.
 
+### Compatibility
+
+Compatibility APIs are migration bridges for existing `itage_engine` users.
+They may preserve old names and call shapes, but they must route into the new
+runtime and transport contracts instead of reintroducing backend-specific
+dependencies into the public API.
+
+The current facade exposes `compat::itage::Node`, `WriterBase`, and
+`ReaderBase`. It supports fixed-size struct payloads and explicit byte buffers
+through the current byte-oriented transport layer. New code should still prefer
+the native component, scheduler, and configuration APIs.
+
 ### Tooling
 
 Tooling includes examples, configuration validation, metrics exporters, trace
