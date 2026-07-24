@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,6 +55,7 @@ struct Event {
     std::size_t bytes {0};
     std::size_t queue_depth {0};
     core::Nanoseconds duration {0};
+    bool duration_available {false};
     core::Nanoseconds deadline {0};
     bool success {true};
 };
@@ -131,7 +133,7 @@ public:
     void RecordTopicReceived(
         const core::TopicName& topic,
         std::size_t bytes,
-        core::Nanoseconds latency);
+        std::optional<core::Nanoseconds> latency = std::nullopt);
     void RecordQueueDepth(const core::TopicName& topic, std::size_t queue_depth);
     void RecordTaskExecution(
         const core::ComponentName& component,

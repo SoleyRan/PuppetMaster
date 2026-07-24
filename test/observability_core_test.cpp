@@ -1,5 +1,6 @@
 #include <cassert>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -49,6 +50,7 @@ void AggregatesTopicAndTaskMetrics()
     observer.RecordTopicPublished(topic, 64);
     observer.RecordTopicPublished(topic, 32);
     observer.RecordTopicReceived(topic, 64, std::chrono::microseconds(250));
+    observer.RecordTopicReceived(topic, 16, std::nullopt);
     observer.RecordQueueDepth(topic, 3);
     observer.RecordQueueDepth(topic, 1);
     observer.RecordTaskExecution(
@@ -64,7 +66,9 @@ void AggregatesTopicAndTaskMetrics()
     const auto& topic_metrics = snapshot.topics.front();
     assert(topic_metrics.messages_published == 2);
     assert(topic_metrics.bytes_published == 96);
-    assert(topic_metrics.messages_received == 1);
+    assert(topic_metrics.messages_received == 2);
+    assert(topic_metrics.bytes_received == 80);
+    assert(topic_metrics.latency_samples == 1);
     assert(topic_metrics.queue_depth == 1);
     assert(topic_metrics.max_queue_depth == 3);
     assert(topic_metrics.average_latency == std::chrono::microseconds(250));

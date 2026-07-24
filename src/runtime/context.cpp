@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -53,16 +54,19 @@ core::TimePoint Now()
     return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
 }
 
-core::Nanoseconds MessageLatency(const transport::MessageMetadata& metadata)
+std::optional<core::Nanoseconds> MessageLatency(
+    const transport::MessageMetadata& metadata)
 {
     if (metadata.source_timestamp == core::TimePoint {}) {
-        return core::Nanoseconds::zero();
+        return std::nullopt;
     }
 
     const auto now = Now();
-    return now >= metadata.source_timestamp
-        ? now - metadata.source_timestamp
-        : core::Nanoseconds::zero();
+    if (now < metadata.source_timestamp) {
+        return std::nullopt;
+    }
+
+    return now - metadata.source_timestamp;
 }
 
 void LogEndpointFailure(

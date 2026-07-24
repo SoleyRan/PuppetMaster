@@ -132,7 +132,7 @@ struct Observer::Impl {
                 topic.metrics.topic_name = event.resource;
                 ++topic.metrics.messages_received;
                 topic.metrics.bytes_received += event.bytes;
-                if (event.duration >= core::Nanoseconds::zero()) {
+                if (event.duration_available) {
                     ++topic.metrics.latency_samples;
                     topic.metrics.last_latency = event.duration;
                     topic.total_latency += event.duration;
@@ -291,13 +291,16 @@ void Observer::RecordTopicPublished(const core::TopicName& topic, std::size_t by
 void Observer::RecordTopicReceived(
     const core::TopicName& topic,
     std::size_t bytes,
-    core::Nanoseconds latency)
+    std::optional<core::Nanoseconds> latency)
 {
     Event event;
     event.kind = EventKind::kTopicReceived;
     event.resource = topic.str();
     event.bytes = bytes;
-    event.duration = latency;
+    if (latency.has_value()) {
+        event.duration = std::max(latency.value(), core::Nanoseconds::zero());
+        event.duration_available = true;
+    }
     Emit(std::move(event));
 }
 
@@ -320,6 +323,7 @@ void Observer::RecordTaskExecution(
     execution.kind = EventKind::kTaskExecution;
     execution.resource = component.str();
     execution.duration = duration;
+    execution.duration_available = true;
     execution.deadline = deadline;
     execution.success = success;
     Emit(execution);
