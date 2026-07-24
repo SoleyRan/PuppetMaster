@@ -195,6 +195,18 @@ struct Scheduler::Impl {
             return status;
         }
 
+        if (const auto observer = runtime.observer()) {
+            observer->Log(observability::LogRecord {
+                observability::LogLevel::kInfo,
+                "scheduler",
+                "scheduler_started",
+                "scheduler is accepting trigger events",
+                {
+                    {"components", std::to_string(Stats().registered_components)},
+                },
+            });
+        }
+
         return core::Status::Ok();
     }
 
@@ -239,6 +251,19 @@ struct Scheduler::Impl {
         }
 
         idle.notify_all();
+
+        if (const auto observer = runtime.observer()) {
+            observer->Log(observability::LogRecord {
+                observability::LogLevel::kInfo,
+                "scheduler",
+                "scheduler_stopped",
+                "scheduler stopped after draining pending events",
+                {
+                    {"dispatched_events", std::to_string(Stats().dispatched_events)},
+                },
+            });
+        }
+
         return core::Status::Ok();
     }
 

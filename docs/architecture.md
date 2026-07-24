@@ -107,6 +107,18 @@ The current facade exposes `compat::itage::Node`, `WriterBase`, and
 through the current byte-oriented transport layer. New code should still prefer
 the native component, scheduler, and configuration APIs.
 
+### Observability
+
+Observability is a transport-neutral event and metrics layer shared by the
+runtime, transports, and scheduler. It records topic throughput, message
+latency, queue depth, task execution time, failures, and deadline misses.
+
+The core `Observer` exposes event, metrics, and structured log callbacks without
+depending on a monitoring product. GoodLog is integrated through the optional
+`PuppetMaster::GoodLogAdapter` target. Prometheus, JSON logging, and Chrome
+trace support can be added as sibling adapters instead of expanding the core
+dependency surface.
+
 ### Tooling
 
 Tooling includes examples, configuration validation, metrics exporters, trace
@@ -132,11 +144,18 @@ transport-neutral under `include/puppet_master/core`.
 
 ## Intended Public CMake Contract
 
-Downstream projects should link only against:
+Most downstream projects should link against:
 
 ```cmake
 PuppetMaster::PuppetMaster
 ```
 
-This keeps the external contract stable even if internal source directories are
-reorganized during later refactor steps.
+Optional integrations are separate targets:
+
+```cmake
+PuppetMaster::FastDdsAdapter
+PuppetMaster::GoodLogAdapter
+```
+
+This keeps the core contract stable while allowing applications to opt into
+backend-specific dependencies.
