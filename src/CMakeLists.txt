@@ -15,6 +15,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/goodlog_sink.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/observability.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/component.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/context.h"
@@ -87,6 +88,52 @@ install(
 
 if(PUPPETMASTER_ENABLE_FASTDDS)
     add_subdirectory(transport/fastdds)
+endif()
+
+if(PUPPETMASTER_ENABLE_GOODLOG)
+    add_library(puppet_master_goodlog_adapter
+        observability/goodlog_sink.cpp
+        "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/goodlog_sink.h"
+    )
+
+    add_library(PuppetMaster::GoodLogAdapter ALIAS puppet_master_goodlog_adapter)
+
+    target_compile_features(puppet_master_goodlog_adapter PUBLIC cxx_std_17)
+
+    target_link_libraries(puppet_master_goodlog_adapter
+        PUBLIC
+            PuppetMaster::PuppetMaster
+        PRIVATE
+            GoodLog::good_log
+    )
+
+    target_compile_definitions(puppet_master_goodlog_adapter
+        PRIVATE
+            PUPPET_MASTER_EXPORTS
+    )
+
+    if(MSVC)
+        target_compile_options(puppet_master_goodlog_adapter PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(puppet_master_goodlog_adapter PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    set_target_properties(puppet_master_goodlog_adapter
+        PROPERTIES
+            EXPORT_NAME GoodLogAdapter
+            OUTPUT_NAME puppet_master_goodlog_adapter
+            POSITION_INDEPENDENT_CODE ON
+            VERSION "${PROJECT_VERSION}"
+            SOVERSION "${PROJECT_VERSION_MAJOR}"
+    )
+
+    install(
+        TARGETS puppet_master_goodlog_adapter
+        EXPORT PuppetMasterTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    )
 endif()
 
 install(

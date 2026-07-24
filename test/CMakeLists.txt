@@ -152,6 +152,22 @@ add_test(
     COMMAND puppet_master_transport_observability_test
 )
 
+if(PUPPETMASTER_ENABLE_GOODLOG)
+    add_executable(puppet_master_goodlog_sink_test
+        goodlog_sink_test.cpp
+    )
+
+    target_link_libraries(puppet_master_goodlog_sink_test
+        PRIVATE
+            PuppetMaster::GoodLogAdapter
+    )
+
+    add_test(
+        NAME puppet_master.goodlog_sink
+        COMMAND puppet_master_goodlog_sink_test
+    )
+endif()
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )
