@@ -15,6 +15,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/observability.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/component.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/context.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/registry.h"
@@ -33,6 +34,7 @@ add_library(puppet_master
     puppet_master.cpp
     compat/itage_facade.cpp
     configuration/configuration.cpp
+    observability/observability.cpp
     runtime/component.cpp
     runtime/context.cpp
     scheduler/scheduler.cpp
