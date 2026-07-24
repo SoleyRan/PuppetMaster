@@ -115,6 +115,11 @@ struct Scheduler::Impl {
     };
 
     struct ScheduledComponent {
+        explicit ScheduledComponent(runtime::ComponentSpec component_spec)
+            : spec(std::move(component_spec))
+        {
+        }
+
         runtime::ComponentSpec spec;
         std::vector<transport::ReaderPtr> data_trigger_readers;
         std::shared_ptr<std::mutex> execute_mutex {std::make_shared<std::mutex>()};
@@ -275,8 +280,6 @@ struct Scheduler::Impl {
 
     core::Status Trigger(const core::ComponentName& name)
     {
-        runtime::ComponentSpec spec;
-
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!running || stopping) {
@@ -288,11 +291,10 @@ struct Scheduler::Impl {
                 return core::Status::NotFound("component is not registered in scheduler: " + name.str());
             }
 
-            spec = found->second.spec;
-        }
-
-        if (!HasTrigger(spec, core::TriggerKind::kManual)) {
-            return core::Status::FailedPrecondition("component has no manual trigger: " + name.str());
+            if (!HasTrigger(found->second.spec, core::TriggerKind::kManual)) {
+                return core::Status::FailedPrecondition(
+                    "component has no manual trigger: " + name.str());
+            }
         }
 
         return Enqueue(name, core::Nanoseconds::zero());
