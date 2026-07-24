@@ -5,6 +5,8 @@ set(PUPPETMASTER_WITH_GOODLOG @PUPPETMASTER_ENABLE_GOODLOG@)
 
 include(CMakeFindDependencyMacro)
 
+find_dependency(Threads REQUIRED)
+
 if(PUPPETMASTER_WITH_FASTDDS)
     find_dependency(fastcdr CONFIG REQUIRED)
     find_dependency(fastdds CONFIG QUIET)

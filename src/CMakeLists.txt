@@ -1,5 +1,7 @@
 set(PUPPETMASTER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
+find_package(Threads REQUIRED)
+
 configure_file(
     "${PROJECT_SOURCE_DIR}/cmake/puppet_master/version.h.in"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"
@@ -46,6 +48,11 @@ add_library(puppet_master
 add_library(PuppetMaster::PuppetMaster ALIAS puppet_master)
 
 target_compile_features(puppet_master PUBLIC cxx_std_17)
+
+target_link_libraries(puppet_master
+    PUBLIC
+        Threads::Threads
+)
 
 target_include_directories(puppet_master
     PUBLIC
