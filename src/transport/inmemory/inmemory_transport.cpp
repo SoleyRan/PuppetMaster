@@ -112,6 +112,12 @@ public:
             return core::Status::Ok();
         }
 
+        std::size_t PendingMessageCount()
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return messages_.size();
+        }
+
         core::Status Push(const Message& message)
         {
             DataAvailableCallback callback;
@@ -230,6 +236,11 @@ public:
     core::Status SetDataAvailableCallback(DataAvailableCallback callback) override
     {
         return mailbox_->SetDataAvailableCallback(std::move(callback));
+    }
+
+    core::Result<std::size_t> PendingMessageCount() const override
+    {
+        return mailbox_->PendingMessageCount();
     }
 
 private:

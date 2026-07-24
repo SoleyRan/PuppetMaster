@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -49,6 +50,11 @@ public:
     virtual const MessageDescriptor& message_descriptor() const noexcept = 0;
     virtual core::Result<Message> Read(ReadOptions options = {}) = 0;
     virtual core::Status SetDataAvailableCallback(DataAvailableCallback callback) = 0;
+    virtual core::Result<std::size_t> PendingMessageCount() const
+    {
+        return core::Result<std::size_t>::FromStatus(
+            core::Status::Unsupported("reader does not expose pending message count"));
+    }
 
 protected:
     Reader() = default;

@@ -138,6 +138,20 @@ add_test(
     COMMAND puppet_master_observability_core_test
 )
 
+add_executable(puppet_master_transport_observability_test
+    transport_observability_test.cpp
+)
+
+target_link_libraries(puppet_master_transport_observability_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.transport_observability
+    COMMAND puppet_master_transport_observability_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )

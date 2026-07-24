@@ -1,5 +1,6 @@
 #include <puppet_master/runtime/context.h>
 
+#include <chrono>
 #include <initializer_list>
 #include <map>
 #include <mutex>
@@ -47,6 +48,180 @@ core::Status InvalidTransition(
         + " from state " + ToString(state));
 }
 
+core::TimePoint Now()
+{
+    return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
+}
+
+core::Nanoseconds MessageLatency(const transport::MessageMetadata& metadata)
+{
+    if (metadata.source_timestamp == core::TimePoint {}) {
+        return core::Nanoseconds::zero();
+    }
+
+    const auto now = Now();
+    return now >= metadata.source_timestamp
+        ? now - metadata.source_timestamp
+        : core::Nanoseconds::zero();
+}
+
+void LogEndpointFailure(
+    const observability::ObserverPtr& observer,
+    observability::LogLevel level,
+    const char* event,
+    const core::TopicName& topic,
+    const core::Status& status)
+{
+    if (!observer) {
+        return;
+    }
+
+    observability::LogRecord record;
+    record.level = level;
+    record.component = "transport";
+    record.event = event;
+    record.message = status.message();
+    record.fields = {
+        {"topic", topic.str()},
+        {"status", core::StatusCodeName(status.code())},
+    };
+    observer->Log(std::move(record));
+}
+
+class ObservedReader final : public transport::Reader {
+public:
+    ObservedReader(
+        transport::ReaderPtr reader,
+        observability::ObserverPtr observer)
+        : reader_(std::move(reader)),
+          observer_(std::move(observer))
+    {
+    }
+
+    const core::TopicName& topic_name() const noexcept override
+    {
+        return reader_->topic_name();
+    }
+
+    const transport::MessageDescriptor& message_descriptor() const noexcept override
+    {
+        return reader_->message_descriptor();
+    }
+
+    core::Result<transport::Message> Read(transport::ReadOptions options = {}) override
+    {
+        auto message = reader_->Read(options);
+        if (!message.ok()) {
+            if (message.status().code() != core::StatusCode::kUnavailable
+                && message.status().code() != core::StatusCode::kDeadlineExceeded) {
+                LogEndpointFailure(
+                    observer_,
+                    observability::LogLevel::kWarning,
+                    "topic_read_failed",
+                    topic_name(),
+                    message.status());
+            }
+            return message;
+        }
+
+        if (observer_) {
+            observer_->RecordTopicReceived(
+                topic_name(),
+                message.value().payload.size(),
+                MessageLatency(message.value().metadata));
+            RecordQueueDepth();
+        }
+
+        return message;
+    }
+
+    core::Status SetDataAvailableCallback(transport::DataAvailableCallback callback) override
+    {
+        const std::weak_ptr<transport::Reader> weak_reader(reader_);
+        const std::weak_ptr<observability::Observer> weak_observer(observer_);
+        const auto topic = topic_name();
+
+        return reader_->SetDataAvailableCallback(
+            [weak_reader, weak_observer, topic, callback = std::move(callback)]() {
+                auto reader = weak_reader.lock();
+                auto observer = weak_observer.lock();
+                if (reader && observer) {
+                    auto pending = reader->PendingMessageCount();
+                    if (pending.ok()) {
+                        observer->RecordQueueDepth(topic, pending.value());
+                    }
+                }
+
+                if (callback) {
+                    callback();
+                }
+            });
+    }
+
+    core::Result<std::size_t> PendingMessageCount() const override
+    {
+        return reader_->PendingMessageCount();
+    }
+
+private:
+    void RecordQueueDepth()
+    {
+        auto pending = reader_->PendingMessageCount();
+        if (pending.ok()) {
+            observer_->RecordQueueDepth(topic_name(), pending.value());
+        }
+    }
+
+    transport::ReaderPtr reader_;
+    observability::ObserverPtr observer_;
+};
+
+class ObservedWriter final : public transport::Writer {
+public:
+    ObservedWriter(
+        transport::WriterPtr writer,
+        observability::ObserverPtr observer)
+        : writer_(std::move(writer)),
+          observer_(std::move(observer))
+    {
+    }
+
+    const core::TopicName& topic_name() const noexcept override
+    {
+        return writer_->topic_name();
+    }
+
+    const transport::MessageDescriptor& message_descriptor() const noexcept override
+    {
+        return writer_->message_descriptor();
+    }
+
+    core::Status Write(
+        transport::ByteView payload,
+        transport::WriteOptions options = {}) override
+    {
+        auto status = writer_->Write(payload, options);
+        if (!status.ok()) {
+            LogEndpointFailure(
+                observer_,
+                observability::LogLevel::kError,
+                "topic_write_failed",
+                topic_name(),
+                status);
+            return status;
+        }
+
+        if (observer_) {
+            observer_->RecordTopicPublished(topic_name(), payload.size());
+        }
+        return core::Status::Ok();
+    }
+
+private:
+    transport::WriterPtr writer_;
+    observability::ObserverPtr observer_;
+};
+
 }  // namespace
 
 core::Status RuntimeOptions::Validate() const
@@ -56,7 +231,8 @@ core::Status RuntimeOptions::Validate() const
 
 struct RuntimeContext::Impl {
     explicit Impl(RuntimeOptions runtime_options)
-        : options(std::move(runtime_options))
+        : options(std::move(runtime_options)),
+          observer(std::make_shared<observability::Observer>(options.observability_options))
     {
     }
 
@@ -247,6 +423,7 @@ struct RuntimeContext::Impl {
     }
 
     RuntimeOptions options;
+    observability::ObserverPtr observer;
     ComponentRegistry components;
     transport::TransportRegistry transports;
     std::map<core::TransportKind, core::TransportName> transport_by_kind;
@@ -288,6 +465,11 @@ core::Result<std::shared_ptr<RuntimeContext>> RuntimeContext::Create(RuntimeOpti
 const RuntimeOptions& RuntimeContext::options() const noexcept
 {
     return impl_->options;
+}
+
+observability::ObserverPtr RuntimeContext::observer() const noexcept
+{
+    return impl_->observer;
 }
 
 core::Status RuntimeContext::Open()
@@ -504,7 +686,13 @@ core::Result<transport::ReaderPtr> RuntimeContext::CreateReader(
         return core::Result<transport::ReaderPtr>::FromStatus(transport.status());
     }
 
-    return transport.value()->CreateReader(endpoint);
+    auto reader = transport.value()->CreateReader(endpoint);
+    if (!reader.ok()) {
+        return reader;
+    }
+
+    return std::static_pointer_cast<transport::Reader>(
+        std::make_shared<ObservedReader>(reader.value(), impl_->observer));
 }
 
 core::Result<transport::WriterPtr> RuntimeContext::CreateWriter(
@@ -520,7 +708,13 @@ core::Result<transport::WriterPtr> RuntimeContext::CreateWriter(
         return core::Result<transport::WriterPtr>::FromStatus(transport.status());
     }
 
-    return transport.value()->CreateWriter(endpoint);
+    auto writer = transport.value()->CreateWriter(endpoint);
+    if (!writer.ok()) {
+        return writer;
+    }
+
+    return std::static_pointer_cast<transport::Writer>(
+        std::make_shared<ObservedWriter>(writer.value(), impl_->observer));
 }
 
 }  // namespace puppet_master::runtime
