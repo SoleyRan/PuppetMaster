@@ -8,6 +8,7 @@
 #include <puppet_master/puppet_master.h>
 
 namespace core = puppet_master::core;
+namespace observability = puppet_master::observability;
 namespace runtime = puppet_master::runtime;
 namespace scheduler = puppet_master::scheduler;
 namespace transport = puppet_master::transport;
@@ -101,14 +102,18 @@ private:
 
 class PeriodicCounter final : public runtime::Component {
 public:
-    PeriodicCounter(core::ComponentName name, core::Nanoseconds period)
+    PeriodicCounter(
+        core::ComponentName name,
+        core::Nanoseconds period,
+        core::Nanoseconds execution_delay = core::Nanoseconds::zero())
         : spec_ {
             std::move(name),
             "counts periodic scheduler triggers",
             {},
             {},
             {core::TriggerSpec {core::TriggerKind::kPeriodic, period, {}, {}, {}}}
-        }
+        },
+          execution_delay_(execution_delay)
     {
     }
 
@@ -119,6 +124,9 @@ public:
 
     core::Status Execute(runtime::ComponentContext&) override
     {
+        if (execution_delay_ > core::Nanoseconds::zero()) {
+            std::this_thread::sleep_for(execution_delay_);
+        }
         ++execute_count_;
         return core::Status::Ok();
     }
@@ -130,6 +138,7 @@ public:
 
 private:
     runtime::ComponentSpec spec_;
+    core::Nanoseconds execution_delay_;
     int execute_count_ {0};
 };
 
@@ -212,6 +221,11 @@ void ManualTriggerExecutesComponent()
     assert(sched.stats().dispatched_events == 1);
 
     assert(sched.Stop().ok());
+
+    const auto snapshot = context.value()->observer()->Snapshot();
+    assert(snapshot.tasks.size() == 1);
+    assert(snapshot.tasks.front().task_name == "manual_counter");
+    assert(snapshot.tasks.front().executions == 1);
 }
 
 void PeriodicTriggerExecutesComponent()
@@ -231,6 +245,44 @@ void PeriodicTriggerExecutesComponent()
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     assert(sched.Stop().ok());
     assert(component->execute_count() > 0);
+}
+
+void PeriodicDeadlineMissIsObservable()
+{
+    std::size_t deadline_logs = 0;
+
+    runtime::RuntimeOptions options;
+    options.observability_options.log_callback =
+        [&deadline_logs](const observability::LogRecord& record) {
+            if (record.event == "task_deadline_missed") {
+                ++deadline_logs;
+            }
+        };
+
+    auto context = runtime::RuntimeContext::Create(std::move(options));
+    assert(context.ok());
+
+    const auto name = MakeComponentName("slow_periodic_counter");
+    auto component = std::make_shared<PeriodicCounter>(
+        name,
+        std::chrono::milliseconds(1),
+        std::chrono::milliseconds(3));
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    assert(sched.Stop().ok());
+
+    const auto snapshot = context.value()->observer()->Snapshot();
+    assert(snapshot.tasks.size() == 1);
+    assert(snapshot.tasks.front().executions > 0);
+    assert(snapshot.tasks.front().deadline_misses > 0);
+    assert(snapshot.tasks.front().max_execution_time > std::chrono::milliseconds(1));
+    assert(deadline_logs == snapshot.tasks.front().deadline_misses);
 }
 
 void DataTriggerExecutesComponent()
@@ -288,6 +340,7 @@ int main()
 {
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
+    PeriodicDeadlineMissIsObservable();
     DataTriggerExecutesComponent();
     UnsupportedTaskDependencyIsRejected();
     return 0;

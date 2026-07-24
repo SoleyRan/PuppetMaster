@@ -27,6 +27,8 @@ This branch intentionally keeps the default build small:
 - `include/puppet_master/configuration` contains the code-first project
   configuration model used to declare topics, components, and triggers in one
   place.
+- `include/puppet_master/observability` contains structured events, runtime
+  metrics, trace hooks, and the optional GoodLog adapter.
 - `include/puppet_master/compat` contains a migration facade for projects that
   still use the old `itage_engine` node/reader/writer style APIs.
 - `src/communication/fastdds` is kept as an adapter migration area and is not
@@ -34,7 +36,7 @@ This branch intentionally keeps the default build small:
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
 - Minimal demos and smoke tests verify the project skeleton, core API, transport
   abstraction, in-memory pub/sub behavior, runtime assembly, scheduler triggers,
-  configuration assembly, and compatibility facade.
+  configuration assembly, compatibility facade, and runtime observability.
 
 ## Goals
 
@@ -70,10 +72,15 @@ Useful options:
 cmake -S . -B build -DPUPPETMASTER_BUILD_DEMOS=OFF
 cmake -S . -B build -DPUPPETMASTER_BUILD_TESTS=OFF
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
+cmake -S . -B build -DPUPPETMASTER_ENABLE_GOODLOG=ON
 ```
 
 `PUPPETMASTER_ENABLE_FASTDDS` builds the optional FastDDS adapter target. The
 default build remains transport-neutral and does not require FastDDS.
+
+`PUPPETMASTER_ENABLE_GOODLOG` builds `PuppetMaster::GoodLogAdapter`. CMake uses
+an installed GoodLog package when available or fetches a pinned revision from
+<https://github.com/SoleyRan/GoodLog>.
 
 ## Downstream Usage
 
@@ -95,8 +102,8 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 7. Component model and algorithm module interface. Done.
 8. Scheduler triggers. Done.
 9. Code-first configuration system. Done.
-10. itage_engine compatibility facade. In progress.
-11. Observability and production demos.
+10. itage_engine compatibility facade. Done.
+11. Observability and production demos. Done.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -112,3 +119,5 @@ See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [itage_engine Compatibility Facade](docs/compatibility-facade.md) for the
 transitional node/reader/writer API.
+See [Observability](docs/observability.md) for runtime metrics, trace hooks,
+structured logging, and GoodLog integration.

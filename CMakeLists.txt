@@ -23,6 +23,13 @@ endif()
 option(PUPPETMASTER_BUILD_DEMOS "Build PuppetMaster example programs." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_BUILD_TESTS "Build PuppetMaster tests." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_ENABLE_FASTDDS "Build the optional FastDDS transport adapter." OFF)
+option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
+set(
+    PUPPETMASTER_GOODLOG_GIT_TAG
+    "2eaaa2b67388dcfd41eaf8f3dd57e7f987bc31fa"
+    CACHE STRING
+    "GoodLog Git tag or commit used when the package is not installed."
+)
 
 # Compatibility aliases for the first public refactor branch. New integrations
 # should prefer the PUPPETMASTER_* option names because they remain scoped to
@@ -35,6 +42,31 @@ endif()
 if(DEFINED BUILD_TEST)
     message(DEPRECATION "BUILD_TEST is deprecated; use PUPPETMASTER_BUILD_TESTS instead.")
     set(PUPPETMASTER_BUILD_TESTS "${BUILD_TEST}")
+endif()
+
+if(PUPPETMASTER_ENABLE_GOODLOG AND NOT TARGET GoodLog::good_log)
+    find_package(GoodLog CONFIG QUIET)
+
+    if(NOT GoodLog_FOUND)
+        include(FetchContent)
+
+        # GoodLog currently uses generic BUILD_DEMO and BUILD_TEST options.
+        # Keep those variables local so embedding PuppetMaster cannot alter a
+        # parent project's options.
+        function(puppetmaster_fetch_goodlog)
+            set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+            set(BUILD_DEMO OFF)
+            set(BUILD_TEST OFF)
+            FetchContent_Declare(
+                GoodLog
+                GIT_REPOSITORY https://github.com/SoleyRan/GoodLog.git
+                GIT_TAG "${PUPPETMASTER_GOODLOG_GIT_TAG}"
+            )
+            FetchContent_MakeAvailable(GoodLog)
+        endfunction()
+
+        puppetmaster_fetch_goodlog()
+    endif()
 endif()
 
 add_subdirectory(src)

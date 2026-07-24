@@ -6,6 +6,7 @@
 #include <puppet_master/core/result.h>
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
+#include <puppet_master/observability/observability.h>
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/registry.h>
 #include <puppet_master/transport/transport.h>
@@ -16,6 +17,7 @@ struct RuntimeOptions {
     core::TransportName default_transport_name {core::TransportName::Unsafe("inmemory")};
     bool register_inmemory_transport {true};
     bool open_registered_transports {true};
+    observability::Options observability_options;
 
     core::Status Validate() const;
 };
@@ -37,6 +39,7 @@ public:
     static core::Result<std::shared_ptr<RuntimeContext>> Create(RuntimeOptions options = {});
 
     const RuntimeOptions& options() const noexcept;
+    observability::ObserverPtr observer() const noexcept;
 
     core::Status Open();
     core::Status Close();

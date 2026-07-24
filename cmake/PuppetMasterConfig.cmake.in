@@ -1,14 +1,22 @@
 @PACKAGE_INIT@
 
 set(PUPPETMASTER_WITH_FASTDDS @PUPPETMASTER_ENABLE_FASTDDS@)
+set(PUPPETMASTER_WITH_GOODLOG @PUPPETMASTER_ENABLE_GOODLOG@)
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads REQUIRED)
 
 if(PUPPETMASTER_WITH_FASTDDS)
-    include(CMakeFindDependencyMacro)
     find_dependency(fastcdr CONFIG REQUIRED)
     find_dependency(fastdds CONFIG QUIET)
     if(NOT fastdds_FOUND)
         find_dependency(fastrtps CONFIG REQUIRED)
     endif()
+endif()
+
+if(PUPPETMASTER_WITH_GOODLOG)
+    find_dependency(GoodLog CONFIG REQUIRED)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/PuppetMasterTargets.cmake")

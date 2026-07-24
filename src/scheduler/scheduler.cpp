@@ -1,6 +1,7 @@
 #include <puppet_master/scheduler/scheduler.h>
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -108,7 +109,17 @@ core::Status RunningRequired()
 }  // namespace
 
 struct Scheduler::Impl {
+    struct ScheduledEvent {
+        core::ComponentName component;
+        core::Nanoseconds deadline {0};
+    };
+
     struct ScheduledComponent {
+        explicit ScheduledComponent(runtime::ComponentSpec component_spec)
+            : spec(std::move(component_spec))
+        {
+        }
+
         runtime::ComponentSpec spec;
         std::vector<transport::ReaderPtr> data_trigger_readers;
         std::shared_ptr<std::mutex> execute_mutex {std::make_shared<std::mutex>()};
@@ -189,6 +200,18 @@ struct Scheduler::Impl {
             return status;
         }
 
+        if (const auto observer = runtime.observer()) {
+            observer->Log(observability::LogRecord {
+                observability::LogLevel::kInfo,
+                "scheduler",
+                "scheduler_started",
+                "scheduler is accepting trigger events",
+                {
+                    {"components", std::to_string(Stats().registered_components)},
+                },
+            });
+        }
+
         return core::Status::Ok();
     }
 
@@ -233,6 +256,19 @@ struct Scheduler::Impl {
         }
 
         idle.notify_all();
+
+        if (const auto observer = runtime.observer()) {
+            observer->Log(observability::LogRecord {
+                observability::LogLevel::kInfo,
+                "scheduler",
+                "scheduler_stopped",
+                "scheduler stopped after draining pending events",
+                {
+                    {"dispatched_events", std::to_string(Stats().dispatched_events)},
+                },
+            });
+        }
+
         return core::Status::Ok();
     }
 
@@ -244,8 +280,6 @@ struct Scheduler::Impl {
 
     core::Status Trigger(const core::ComponentName& name)
     {
-        runtime::ComponentSpec spec;
-
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!running || stopping) {
@@ -257,14 +291,13 @@ struct Scheduler::Impl {
                 return core::Status::NotFound("component is not registered in scheduler: " + name.str());
             }
 
-            spec = found->second.spec;
+            if (!HasTrigger(found->second.spec, core::TriggerKind::kManual)) {
+                return core::Status::FailedPrecondition(
+                    "component has no manual trigger: " + name.str());
+            }
         }
 
-        if (!HasTrigger(spec, core::TriggerKind::kManual)) {
-            return core::Status::FailedPrecondition("component has no manual trigger: " + name.str());
-        }
-
-        return Enqueue(name);
+        return Enqueue(name, core::Nanoseconds::zero());
     }
 
     core::Status WaitIdle(core::Nanoseconds timeout)
@@ -304,14 +337,16 @@ struct Scheduler::Impl {
     }
 
 private:
-    core::Status Enqueue(const core::ComponentName& name)
+    core::Status Enqueue(
+        const core::ComponentName& name,
+        core::Nanoseconds deadline)
     {
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!running || stopping) {
                 return RunningRequired();
             }
-            pending_events.push_back(name);
+            pending_events.push_back(ScheduledEvent {name, deadline});
         }
 
         event_available.notify_one();
@@ -353,7 +388,7 @@ private:
 
                     auto status = reader.value()->SetDataAvailableCallback([weak_self, name]() {
                         if (auto self = weak_self.lock()) {
-                            self->Enqueue(name);
+                            self->Enqueue(name, core::Nanoseconds::zero());
                         }
                     });
                     if (!status.ok()) {
@@ -410,7 +445,7 @@ private:
                         }
                     }
 
-                    self->Enqueue(work.first);
+                    self->Enqueue(work.first, work.second);
                 }
             });
         }
@@ -421,7 +456,10 @@ private:
     void DispatchLoop()
     {
         while (true) {
-            core::ComponentName name = core::ComponentName::Unsafe("__invalid__");
+            ScheduledEvent event {
+                core::ComponentName::Unsafe("__invalid__"),
+                core::Nanoseconds::zero(),
+            };
 
             {
                 std::unique_lock<std::mutex> lock(mutex);
@@ -433,12 +471,12 @@ private:
                     break;
                 }
 
-                name = pending_events.front();
+                event = pending_events.front();
                 pending_events.pop_front();
                 ++active_events;
             }
 
-            auto status = ExecuteNow(name);
+            auto status = ExecuteNow(event);
 
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -459,20 +497,68 @@ private:
         }
     }
 
-    core::Status ExecuteNow(const core::ComponentName& name)
+    core::Status ExecuteNow(const ScheduledEvent& event)
     {
         std::shared_ptr<std::mutex> execute_mutex;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            const auto found = components.find(name.str());
+            const auto found = components.find(event.component.str());
             if (found == components.end()) {
-                return core::Status::NotFound("component is not registered in scheduler: " + name.str());
+                return core::Status::NotFound(
+                    "component is not registered in scheduler: " + event.component.str());
             }
             execute_mutex = found->second.execute_mutex;
         }
 
         std::lock_guard<std::mutex> execution_lock(*execute_mutex);
-        return runtime.ExecuteComponent(name);
+        const auto started_at = core::SteadyClock::now();
+        auto status = runtime.ExecuteComponent(event.component);
+        const auto execution_time = std::chrono::duration_cast<core::Nanoseconds>(
+            core::SteadyClock::now() - started_at);
+
+        const auto observer = runtime.observer();
+        if (observer) {
+            observer->RecordTaskExecution(
+                event.component,
+                execution_time,
+                event.deadline,
+                status.ok());
+
+            if (!status.ok()) {
+                observer->Log(observability::LogRecord {
+                    observability::LogLevel::kError,
+                    event.component.str(),
+                    "task_execution_failed",
+                    status.message(),
+                    {
+                        {"status", core::StatusCodeName(status.code())},
+                        {"execution_us", std::to_string(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                execution_time).count())},
+                    },
+                });
+            }
+
+            if (event.deadline > core::Nanoseconds::zero()
+                && execution_time > event.deadline) {
+                observer->Log(observability::LogRecord {
+                    observability::LogLevel::kWarning,
+                    event.component.str(),
+                    "task_deadline_missed",
+                    "component execution exceeded its periodic deadline",
+                    {
+                        {"execution_us", std::to_string(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                execution_time).count())},
+                        {"deadline_us", std::to_string(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                event.deadline).count())},
+                    },
+                });
+            }
+        }
+
+        return status;
     }
 
     runtime::RuntimeContext& runtime;
@@ -481,7 +567,7 @@ private:
     std::condition_variable periodic_stop;
     std::condition_variable idle;
     std::map<std::string, ScheduledComponent> components;
-    std::deque<core::ComponentName> pending_events;
+    std::deque<ScheduledEvent> pending_events;
     std::vector<std::thread> periodic_threads;
     std::thread dispatcher;
     std::size_t active_events {0};
