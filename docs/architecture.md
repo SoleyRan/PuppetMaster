@@ -114,10 +114,11 @@ runtime, transports, and scheduler. It records topic throughput, message
 latency, queue depth, task execution time, failures, and deadline misses.
 
 The core `Observer` exposes event, metrics, and structured log callbacks without
-depending on a monitoring product. GoodLog is integrated through the optional
-`PuppetMaster::GoodLogAdapter` target. Prometheus, JSON logging, and Chrome
-trace support can be added as sibling adapters instead of expanding the core
-dependency surface.
+depending on a monitoring product. A standard-library console sink is available
+by default. GoodLog is integrated through the optional
+`PuppetMaster::GoodLogAdapter` target and replaces the same process-wide sink.
+Prometheus, JSON logging, and Chrome trace support can be added as sibling
+adapters instead of expanding the core dependency surface.
 
 ### Tooling
 

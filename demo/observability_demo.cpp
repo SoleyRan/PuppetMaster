@@ -145,13 +145,6 @@ private:
 int main()
 {
     runtime::RuntimeOptions options;
-    options.observability_options.log_callback =
-        [](const observability::LogRecord& record) {
-            std::cout
-                << '<' << observability::ToString(record.level) << '>'
-                << observability::FormatLogRecord(record)
-                << '\n';
-        };
     options.observability_options.event_callback =
         [](const observability::Event& event) {
             if (event.kind == observability::EventKind::kDeadlineMiss) {

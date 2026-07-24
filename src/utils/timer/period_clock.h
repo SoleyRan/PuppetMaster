@@ -8,7 +8,7 @@
 #include <unistd.h> 
 #include <signal.h>
 #include <cstring>
-#include <logger/log.hpp>
+#include <puppet_master/logging/log.h>
 #include <common/namespace_macros.h>
 
 PUPPET_MASTER_UTILS_NS_BEGIN

@@ -12,7 +12,7 @@
 #include <common/namespace_macros.h>
 #include <common/attributes.h>
 #include <common/common_macros.h>
-#include <utils/logger/log.hpp>
+#include <puppet_master/logging/log.h>
 #include <base/base_communication/node_base.h>
 
 PUPPET_MASTER_COMMUNICATION_NS_BEGIN

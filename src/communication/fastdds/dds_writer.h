@@ -6,7 +6,7 @@
 #include <fastdds/dds/publisher/Publisher.hpp>
 
 #include <base/base_communication/writer_base.h>
-#include <utils/logger/log.hpp>
+#include <puppet_master/logging/log.h>
 
 PUPPET_MASTER_COMMUNICATION_NS_BEGIN
 

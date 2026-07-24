@@ -7,6 +7,8 @@
 #include <sstream>
 #include <utility>
 
+#include <puppet_master/logging/logger.h>
+
 namespace puppet_master::observability {
 
 namespace {
@@ -115,6 +117,9 @@ struct Observer::Impl {
         : options(std::move(observer_options)),
           started_at(Now())
     {
+        if (options.use_default_log_sink && !options.log_callback) {
+            options.log_callback = logging::Write;
+        }
     }
 
     void Apply(const Event& event)

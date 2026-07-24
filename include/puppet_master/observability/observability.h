@@ -101,6 +101,7 @@ using LogCallback = std::function<void(const LogRecord&)>;
 
 struct Options {
     bool enabled {true};
+    bool use_default_log_sink {true};
     EventCallback event_callback;
     MetricsCallback metrics_callback;
     LogCallback log_callback;

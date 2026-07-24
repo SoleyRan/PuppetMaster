@@ -29,6 +29,8 @@ This branch intentionally keeps the default build small:
   place.
 - `include/puppet_master/observability` contains structured events, runtime
   metrics, trace hooks, and the optional GoodLog adapter.
+- `include/puppet_master/logging` contains the dependency-free default console
+  logger and the optional `LOG_Info()` style compatibility macros.
 - `include/puppet_master/compat` contains a migration facade for projects that
   still use the old `itage_engine` node/reader/writer style APIs.
 - `src/communication/fastdds` is kept as an adapter migration area and is not

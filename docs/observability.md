@@ -76,6 +76,41 @@ by callbacks are contained and never escape into middleware execution.
 Applications can also call `Snapshot()` at any time. Snapshots are copies and
 can be formatted or exported without holding the observer lock.
 
+## Default Logging
+
+PuppetMaster includes a small standard-library console logger. It is enabled by
+default and does not require GoodLog, Boost.Log, or another logging package.
+
+Middleware records are written to `std::clog` with timestamp, severity,
+component, event, message, and structured fields:
+
+```text
+[2026-07-24 14:30:21.083]<warning>[puppet_master][component=localization][event=task_deadline_missed] component execution exceeded its periodic deadline execution_us=8068 deadline_us=5000
+```
+
+The stream-style compatibility API is available from an explicit header:
+
+```cpp
+#include <puppet_master/logging/log.h>
+
+LOG_Info() << "runtime started";
+LOG_Warn() << "queue depth=" << queue_depth;
+LOG_Error() << "transport failed";
+```
+
+These macros write through the same process-wide sink used by the default
+Observer callback. Applications can replace the sink without changing call
+sites:
+
+```cpp
+logging::SetSink([](const observability::LogRecord& record) {
+    // Forward to another logging backend.
+});
+```
+
+Set `observability::Options::use_default_log_sink` to `false` when an Observer
+should remain silent until a callback is installed explicitly.
+
 ## Unified Logs With GoodLog
 
 GoodLog is an optional adapter because its Boost.Log, OpenSSL, and ZLIB
@@ -94,6 +129,14 @@ CMake first searches for an installed `GoodLog` package. If one is not found,
 it fetches the pinned revision from:
 
 <https://github.com/SoleyRan/GoodLog>
+
+For an offline build, copy GoodLog locally and point FetchContent to it:
+
+```bash
+cmake -S . -B build \
+  -DPUPPETMASTER_ENABLE_GOODLOG=ON \
+  -DFETCHCONTENT_SOURCE_DIR_GOODLOG=/path/to/GoodLog
+```
 
 Downstream targets link the adapter explicitly:
 
@@ -122,6 +165,10 @@ auto status = observability::goodlog::InstallSink(
     log_options);
 ```
 
+`InstallSink()` replaces the process-wide built-in sink. After installation,
+both middleware `Observer::Log()` records and `LOG_Info()` style calls are
+written by GoodLog.
+
 Middleware log messages share this shape:
 
 ```text
@@ -142,8 +189,8 @@ topic and task metrics:
 ./build/demo/puppet_master_observability_demo
 ```
 
-With `PUPPETMASTER_ENABLE_GOODLOG=ON`, structured middleware logs are also
-written through GoodLog. The default demo log directory is:
+With `PUPPETMASTER_ENABLE_GOODLOG=ON`, the demo installs the GoodLog sink.
+Otherwise it uses the built-in console logger. The default GoodLog directory is:
 
 ```text
 /tmp/puppet_master/

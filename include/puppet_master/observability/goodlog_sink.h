@@ -30,9 +30,9 @@ struct SinkOptions {
     std::string encryption_key_hex;
 };
 
-// Installs GoodLog as the Observer's structured log callback. GoodLog owns
-// process-wide Boost.Log sinks, so the backend is initialized once and later
-// calls attach additional observers to the same sink configuration.
+// Installs GoodLog as both the process-wide logging sink and the Observer's
+// structured log callback. GoodLog owns process-wide Boost.Log sinks, so the
+// backend is initialized once and later calls reuse the first configuration.
 PUPPET_MASTER_API core::Status InstallSink(
     const ObserverPtr& observer,
     const SinkOptions& options = {});

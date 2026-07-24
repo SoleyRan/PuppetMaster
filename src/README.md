@@ -5,14 +5,10 @@ details that are not part of the public API.
 
 ## Current Build Boundary
 
-The compiled library currently builds only:
-
-- `CMakeLists.txt`
-- `puppet_master.cpp`
-
-Public headers live under `../include/puppet_master` so downstream projects get
-a stable include path independent of internal refactors. The core API is
-currently header-only, and the public transport abstraction is also header-only.
+The main library target now compiles configuration, compatibility, logging,
+observability, runtime, scheduler, and in-memory transport implementations.
+Public headers remain under `../include/puppet_master` so downstream projects
+get a stable include path independent of internal source organization.
 
 ## Migration Areas
 
@@ -23,12 +19,13 @@ middleware implementation:
 - `common`
 - `communication`
 - `trigger`
-- `utils`
+- `utils` except for the removed legacy logger copy
 
 They are intentionally not wired into the default library target yet. Each area
 should be cleaned up in a focused branch after the public boundary is stable.
-This avoids mixing project skeleton work with transport, scheduler, logger, or
-queue behavior changes.
+Logging has moved to the public `include/puppet_master/logging` frontend and the
+compiled `logging/logging.cpp` implementation. The old local Boost.Log copy was
+removed; GoodLog now lives behind the optional observability adapter.
 
 ## Planned Direction
 

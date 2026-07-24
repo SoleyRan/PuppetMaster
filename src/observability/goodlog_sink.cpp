@@ -6,6 +6,7 @@
 #include <utility>
 
 #include <log.hpp>
+#include <puppet_master/logging/logger.h>
 
 namespace puppet_master::observability::goodlog {
 
@@ -124,7 +125,8 @@ core::Status InstallSink(
         }
     }
 
-    observer->SetLogCallback(WriteRecord);
+    ::puppet_master::logging::SetSink(WriteRecord);
+    observer->SetLogCallback(::puppet_master::logging::Write);
     return core::Status::Ok();
 }
 

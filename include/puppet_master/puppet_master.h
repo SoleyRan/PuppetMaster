@@ -7,6 +7,7 @@
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
 #include <puppet_master/export.h>
+#include <puppet_master/logging/logger.h>
 #include <puppet_master/observability/observability.h>
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/context.h>
