@@ -100,6 +100,9 @@ public:
         : reader_(std::move(reader)),
           observer_(std::move(observer))
     {
+        // Install the metrics callback immediately so queue peaks are visible
+        // even when application code does not subscribe to data notifications.
+        reader_->SetDataAvailableCallback(WrapCallback({}));
     }
 
     const core::TopicName& topic_name() const noexcept override
@@ -141,25 +144,7 @@ public:
 
     core::Status SetDataAvailableCallback(transport::DataAvailableCallback callback) override
     {
-        const std::weak_ptr<transport::Reader> weak_reader(reader_);
-        const std::weak_ptr<observability::Observer> weak_observer(observer_);
-        const auto topic = topic_name();
-
-        return reader_->SetDataAvailableCallback(
-            [weak_reader, weak_observer, topic, callback = std::move(callback)]() {
-                auto reader = weak_reader.lock();
-                auto observer = weak_observer.lock();
-                if (reader && observer) {
-                    auto pending = reader->PendingMessageCount();
-                    if (pending.ok()) {
-                        observer->RecordQueueDepth(topic, pending.value());
-                    }
-                }
-
-                if (callback) {
-                    callback();
-                }
-            });
+        return reader_->SetDataAvailableCallback(WrapCallback(std::move(callback)));
     }
 
     core::Result<std::size_t> PendingMessageCount() const override
@@ -168,6 +153,29 @@ public:
     }
 
 private:
+    transport::DataAvailableCallback WrapCallback(
+        transport::DataAvailableCallback callback) const
+    {
+        const std::weak_ptr<transport::Reader> weak_reader(reader_);
+        const std::weak_ptr<observability::Observer> weak_observer(observer_);
+        const auto topic = topic_name();
+
+        return [weak_reader, weak_observer, topic, callback = std::move(callback)]() {
+            auto reader = weak_reader.lock();
+            auto observer = weak_observer.lock();
+            if (reader && observer) {
+                auto pending = reader->PendingMessageCount();
+                if (pending.ok()) {
+                    observer->RecordQueueDepth(topic, pending.value());
+                }
+            }
+
+            if (callback) {
+                callback();
+            }
+        };
+    }
+
     void RecordQueueDepth()
     {
         auto pending = reader_->PendingMessageCount();

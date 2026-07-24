@@ -102,10 +102,34 @@ void TransportOperationsUpdateMetricsAndEvents()
         observability::EventKind::kQueueDepth) >= 3);
 }
 
+void QueueDepthDoesNotRequireAnApplicationCallback()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto endpoint = MakeQueuedEndpoint();
+    auto reader = context.value()->CreateReader(endpoint);
+    auto writer = context.value()->CreateWriter(endpoint);
+    assert(reader.ok());
+    assert(writer.ok());
+
+    const std::string payload = "queued";
+    for (int index = 0; index < 3; ++index) {
+        assert(writer.value()->Write(
+            transport::ByteView::From(payload.data(), payload.size())).ok());
+    }
+
+    const auto snapshot = context.value()->observer()->Snapshot();
+    assert(snapshot.topics.size() == 1);
+    assert(snapshot.topics.front().queue_depth == 3);
+    assert(snapshot.topics.front().max_queue_depth == 3);
+}
+
 }  // namespace
 
 int main()
 {
     TransportOperationsUpdateMetricsAndEvents();
+    QueueDepthDoesNotRequireAnApplicationCallback();
     return 0;
 }
