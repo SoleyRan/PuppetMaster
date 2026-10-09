@@ -2,6 +2,8 @@
 
 #include "byte_payload_type.h"
 
+#include <puppet_master/runtime/context.h>
+
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
@@ -396,6 +398,20 @@ void ConfigureTransports(const Options& options, dds::DomainParticipantQos& qos)
 }
 
 }  // namespace
+
+core::Status RegisterTransport(
+    runtime::RuntimeContext& runtime,
+    core::TransportName name,
+    Options options)
+{
+    auto status = options.Validate();
+    if (!status.ok()) {
+        return status;
+    }
+
+    return runtime.RegisterTransport(
+        std::make_shared<FastDdsTransport>(std::move(name), std::move(options)));
+}
 
 FastDdsTransport::FastDdsTransport(core::TransportName name, Options options)
     : name_(std::move(name)), options_(std::move(options)), impl_(std::make_unique<Impl>())

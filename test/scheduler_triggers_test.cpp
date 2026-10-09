@@ -274,7 +274,14 @@ void PeriodicDeadlineMissIsObservable()
     assert(sched.RegisterComponent(name).ok());
     assert(sched.Start().ok());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    const auto timeout = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < timeout) {
+        const auto current = context.value()->observer()->Snapshot();
+        if (!current.tasks.empty() && current.tasks.front().deadline_misses > 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     assert(sched.Stop().ok());
 
     const auto snapshot = context.value()->observer()->Snapshot();
