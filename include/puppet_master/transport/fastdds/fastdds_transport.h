@@ -5,7 +5,16 @@
 #include <puppet_master/transport/fastdds/options.h>
 #include <puppet_master/transport/transport.h>
 
+namespace puppet_master::runtime {
+class RuntimeContext;
+}
+
 namespace puppet_master::transport::fastdds {
+
+core::Status RegisterTransport(
+    runtime::RuntimeContext& runtime,
+    core::TransportName name,
+    Options options = {});
 
 class FastDdsTransport final : public ::puppet_master::transport::Transport {
 public:
