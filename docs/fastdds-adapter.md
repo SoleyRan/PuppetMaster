@@ -30,8 +30,7 @@ This milestone establishes the clean FastDDS adapter boundary:
 - FastDDS-specific options live under `puppet_master/transport/fastdds`.
 - `core::MessagePolicy` is mapped to a FastDDS-specific QoS profile.
 - `FastDdsTransport` owns participant, publisher, and subscriber lifecycle.
-- Concrete typed reader/writer binding is intentionally left for the next
-  adapter step.
+- `BytePayloadType`-based DataReader/DataWriter binding is implemented.
 
 The old files under `src/communication/fastdds` remain migration references.
 They are not compiled into the new adapter target.
@@ -58,14 +57,17 @@ selection stay in adapter options instead of leaking into core.
 
 ## Reader And Writer Binding
 
-FastDDS normally publishes generated or registered native sample types. The
-transport abstraction currently moves byte payloads, so the next adapter step
-needs an explicit native type binding strategy before creating actual
-DataReaders and DataWriters.
+The transport abstraction moves byte payloads, so the adapter registers a
+`BytePayloadType` (sequence number + opaque bytes) once per `type_name` and
+binds DataReaders and DataWriters to it.
 
-The planned direction is:
-
-- keep the generic `transport::Reader` and `transport::Writer` contract
-- add FastDDS endpoint binding metadata for native type support
-- implement typed sample read/write behind the adapter
-- keep generated FastDDS headers out of core and runtime APIs
+- `transport::Reader` supports listener callbacks (invoked outside locks) and
+  blocking reads via `ReadOptions{wait, timeout}`; `timeout == 0` waits
+  indefinitely, an expired timeout returns `DeadlineExceeded`, and a
+  non-waiting read with no data returns `Unavailable`.
+- Endpoints whose descriptor conflicts with an existing topic return
+  `InvalidArgument`.
+- After `Close()`, remaining reader/writer handles return `Unavailable`.
+- `source_timestamp` is the local receive time.
+- `supports_zero_copy` is `false`; data-sharing is not used for byte payloads.
+- Generated FastDDS headers stay out of core and runtime APIs.

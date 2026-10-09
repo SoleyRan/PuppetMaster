@@ -195,3 +195,19 @@ add_test(
     NAME puppet_master.fastdds_policy_mapping
     COMMAND puppet_master_fastdds_policy_mapping_test
 )
+
+if(PUPPETMASTER_ENABLE_FASTDDS)
+    add_executable(puppet_master_fastdds_transport_test
+        fastdds_transport_test.cpp
+    )
+
+    target_link_libraries(puppet_master_fastdds_transport_test
+        PRIVATE
+            PuppetMaster::FastDdsAdapter
+    )
+
+    add_test(
+        NAME puppet_master.fastdds_transport
+        COMMAND puppet_master_fastdds_transport_test
+    )
+endif()
