@@ -3,12 +3,16 @@ find_package(fastdds CONFIG QUIET)
 
 if(fastdds_FOUND)
     set(PUPPETMASTER_FASTDDS_LIBRARY fastdds)
+    set(PUPPETMASTER_FASTDDS_V3 1)
 else()
     find_package(fastrtps CONFIG REQUIRED)
     set(PUPPETMASTER_FASTDDS_LIBRARY fastrtps)
+    set(PUPPETMASTER_FASTDDS_V3 0)
 endif()
 
 add_library(puppet_master_fastdds
+    byte_payload_type.cpp
+    byte_payload_type.h
     fastdds_transport.cpp
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
@@ -29,6 +33,8 @@ target_link_libraries(puppet_master_fastdds
 target_compile_definitions(puppet_master_fastdds
     PUBLIC
         PUPPETMASTER_HAS_FASTDDS=1
+    PRIVATE
+        PUPPETMASTER_FASTDDS_V3=${PUPPETMASTER_FASTDDS_V3}
 )
 
 if(MSVC)

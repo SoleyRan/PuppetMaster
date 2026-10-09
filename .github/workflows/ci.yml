@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (default)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  fastdds:
+    name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fastdds: v2.14.4
+            fastcdr: v2.2.5
+    env:
+      DEPS_PREFIX: ${{ github.workspace }}/deps-install
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasio-dev libtinyxml2-dev libssl-dev ninja-build
+
+      - name: Cache FastDDS
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: fastdds-${{ runner.os }}-${{ matrix.fastdds }}-${{ matrix.fastcdr }}-v1
+
+      - name: Build FastDDS from source
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          mkdir -p deps-src && cd deps-src
+
+          git clone --depth 1 https://github.com/eProsima/foonathan_memory_vendor.git
+          cmake -S foonathan_memory_vendor -B build-foonathan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" -DBUILD_SHARED_LIBS=ON
+          cmake --build build-foonathan --target install
+
+          git clone --depth 1 --branch ${{ matrix.fastcdr }} https://github.com/eProsima/Fast-CDR.git
+          cmake -S Fast-CDR -B build-fastcdr -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX"
+          cmake --build build-fastcdr --target install
+
+          git clone --depth 1 --branch ${{ matrix.fastdds }} https://github.com/eProsima/Fast-DDS.git
+          cmake -S Fast-DDS -B build-fastdds -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" -DCOMPILE_EXAMPLES=OFF -DBUILD_TESTING=OFF
+          cmake --build build-fastdds --target install
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPUPPETMASTER_ENABLE_FASTDDS=ON \
+            -DCMAKE_PREFIX_PATH="$DEPS_PREFIX"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
+        run: ctest --test-dir build --output-on-failure
