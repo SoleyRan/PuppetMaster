@@ -47,7 +47,8 @@ namespace {
 #if PUPPETMASTER_FASTDDS_V3
 constexpr dds::ReturnCode_t kRetOk = dds::RETCODE_OK;
 #else
-const dds::ReturnCode_t kRetOk = dds::ReturnCode_t::RETCODE_OK;
+const eprosima::fastrtps::types::ReturnCode_t kRetOk =
+    eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK;
 #endif
 
 core::TimePoint Now()
@@ -381,7 +382,7 @@ void ConfigureTransports(const Options& options, dds::DomainParticipantQos& qos)
 
     qos.transport().use_builtin_transports = false;
     if (options.transport_mode == TransportMode::kUdp || options.transport_mode == TransportMode::kHybrid) {
-        auto udp = std::make_shared<rtps::UDPv4TransportDescriptor>();
+        auto udp = std::make_shared<eprosima::fastdds::rtps::UDPv4TransportDescriptor>();
         udp->sendBufferSize = static_cast<std::uint32_t>(options.udp_buffer_size);
         udp->receiveBufferSize = static_cast<std::uint32_t>(options.udp_buffer_size);
         qos.transport().user_transports.push_back(udp);
