@@ -1,3 +1,9 @@
+if(MSVC)
+    add_compile_options(/UNDEBUG)
+else()
+    add_compile_options(-UNDEBUG)
+endif()
+
 add_executable(puppet_master_project_skeleton_test
     project_skeleton_test.cpp
 )

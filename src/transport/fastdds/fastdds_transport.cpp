@@ -388,7 +388,7 @@ void ConfigureTransports(const Options& options, dds::DomainParticipantQos& qos)
     }
     if (options.transport_mode == TransportMode::kSharedMemory ||
         options.transport_mode == TransportMode::kHybrid) {
-        auto shm = std::make_shared<rtps::SharedMemTransportDescriptor>();
+        auto shm = std::make_shared<eprosima::fastdds::rtps::SharedMemTransportDescriptor>();
         shm->segment_size(static_cast<std::uint32_t>(options.shm_segment_size));
         qos.transport().user_transports.push_back(shm);
     }
