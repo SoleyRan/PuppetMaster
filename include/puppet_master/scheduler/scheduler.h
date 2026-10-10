@@ -15,6 +15,7 @@ struct SchedulerStats {
     std::size_t pending_events {0};
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
+    std::size_t coalesced_events {0};
 };
 
 struct SchedulerOptions {
