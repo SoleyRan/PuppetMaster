@@ -17,10 +17,14 @@ inline core::Result<QosProfile> MapMessagePolicy(
     if (!status.ok()) {
         return core::Result<QosProfile>::FromStatus(std::move(status));
     }
+    if (policy.overflow != core::QueueOverflowPolicy::kDropOldest) {
+        return core::Result<QosProfile>::FromStatus(
+            core::Status::Unsupported("FastDDS supports only drop-oldest reader history overflow"));
+    }
 
     QosProfile qos;
     qos.durability = durability;
-    qos.history_depth = policy.queue_depth;
+    qos.history_depth = policy.freshness == core::FreshnessPolicy::kLatest ? 1 : policy.queue_depth;
 
     switch (policy.delivery) {
         case core::DeliveryGuarantee::kBestEffort:
@@ -31,12 +35,13 @@ inline core::Result<QosProfile> MapMessagePolicy(
             break;
     }
 
-    switch (policy.retention) {
-        case core::RetentionPolicy::kKeepLast:
+    switch (policy.freshness) {
+        case core::FreshnessPolicy::kLatest:
             qos.history = HistoryKind::kKeepLast;
             break;
-        case core::RetentionPolicy::kKeepAll:
-            qos.history = HistoryKind::kKeepAll;
+        case core::FreshnessPolicy::kQueued:
+            qos.history = policy.retention == core::RetentionPolicy::kKeepAll
+                ? HistoryKind::kKeepAll : HistoryKind::kKeepLast;
             break;
     }
 
@@ -46,6 +51,15 @@ inline core::Result<QosProfile> MapMessagePolicy(
     }
 
     return qos;
+}
+
+inline core::Result<QosProfile> MapWriterMessagePolicy(
+    const core::MessagePolicy& policy,
+    DurabilityKind durability = DurabilityKind::kVolatile)
+{
+    auto writer_policy = policy;
+    writer_policy.freshness = core::FreshnessPolicy::kQueued;
+    return MapMessagePolicy(writer_policy, durability);
 }
 
 }  // namespace puppet_master::transport::fastdds
