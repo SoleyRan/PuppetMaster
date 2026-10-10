@@ -12,12 +12,10 @@ This milestone adds:
 - manual trigger dispatch
 - periodic trigger dispatch
 - data trigger dispatch through reader callbacks
-- a serialized dispatcher queue
+- task dependency dispatch after successful upstream execution
+- a configurable worker pool (one worker by default)
+- per-component serial execution with cross-component parallelism
 - basic scheduler stats and idle waiting
-
-Task dependency triggers are deliberately rejected with
-`StatusCode::kUnsupported` in this milestone. They need a dependency graph and
-ready-state model, which should be designed separately.
 
 ## Execution Model
 
@@ -37,9 +35,15 @@ The scheduler reads component specs from `RuntimeContext`, validates their
 triggers, then converts readiness events into `RuntimeContext::ExecuteComponent`
 calls.
 
-All trigger events pass through one dispatcher queue. This keeps the first
-implementation deterministic and prevents the same component from being
-executed concurrently by periodic and data triggers.
+All trigger events pass through one queue. By default, one worker executes
+components in sequence, preserving existing behavior. Pass
+`SchedulerOptions {worker_count}` to the constructor to run different components
+in parallel. Workers reserve a component before taking its next queued event:
+events for the same component never execute concurrently, even across trigger
+kinds. `worker_count == 0` is rejected by `Start()` with `InvalidArgument`.
+`WaitIdle()` waits until both queued and executing events (including dependency
+propagation) are finished; a positive timeout returns `DeadlineExceeded` if
+work is still in progress.
 
 ## Manual Triggers
 
@@ -59,8 +63,8 @@ sched.WaitIdle(std::chrono::milliseconds(500));
 ## Periodic Triggers
 
 Periodic triggers start lightweight timer threads. Timer threads do not execute
-component code directly; they only enqueue readiness events. The dispatcher
-thread performs the actual `ExecuteComponent()` call.
+component code directly; they only enqueue readiness events. Worker threads
+perform the actual `ExecuteComponent()` call.
 
 ```cpp
 core::TriggerSpec {
@@ -91,14 +95,39 @@ its previous dispatch. Repeated notifications from one topic count only once;
 when all dependencies are ready, the scheduler enqueues one execution and
 resets that trigger's readiness. `kAny` continues to enqueue on each notification.
 
+## Task Dependency Triggers
+
+A task dependency refers to a registered component by its task name (the
+component name). For example, after registering and bringing up both components:
+
+```cpp
+core::TriggerSpec {
+    core::TriggerKind::kTaskDependency,
+    {},
+    core::DependencyPolicy::kAll,
+    {},
+    {core::TaskName::Unsafe("upstream")}
+}
+```
+
+A successful upstream execution marks that task ready for each downstream
+trigger. Failed executions do not propagate readiness. `kAny` dispatches once
+for each successful completion of any named upstream. `kAll` dispatches after
+every named upstream has completed successfully since the previous dispatch;
+repeated completions from one upstream count only once until the others finish.
+A downstream execution may in turn trigger another downstream task, allowing
+chains. `Stop()` and the next `Start()` discard partial readiness.
+
+`Start()` rejects unresolved dependencies, duplicate names within a dependency
+list, self-dependencies, and cycles in the registered task graph. Register all
+upstream components before starting the scheduler.
+
 ## Current Limitations
 
 The scheduler is intentionally small in this branch:
 
-- no executor pool yet
 - no priority or deadline policy yet
 - no trigger coalescing policy yet
-- no task dependency graph yet
 
 Those should be built on top of the current queue and trigger model instead of
 being mixed into the first implementation.

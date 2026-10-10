@@ -6,8 +6,10 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -71,8 +73,8 @@ core::Status ValidateTrigger(const runtime::ComponentSpec& spec, const core::Tri
         }
     }
 
-    if (trigger.kind == core::TriggerKind::kTaskDependency) {
-        return core::Status::Unsupported("task dependency triggers are not implemented yet");
+    if (trigger.kind == core::TriggerKind::kTaskDependency && trigger.task_dependencies.empty()) {
+        return core::Status::InvalidArgument("task dependency trigger requires at least one task dependency");
     }
 
     return core::Status::Ok();
@@ -113,6 +115,17 @@ struct Scheduler::Impl {
         std::vector<bool> ready;
     };
 
+    struct TaskTriggerState {
+        core::DependencyPolicy policy;
+        std::vector<bool> ready;
+    };
+
+    struct TaskDependent {
+        std::string component;
+        std::size_t trigger_index;
+        std::size_t dependency_index;
+    };
+
     struct ScheduledComponent {
         explicit ScheduledComponent(runtime::ComponentSpec component_spec)
             : spec(std::move(component_spec))
@@ -122,11 +135,11 @@ struct Scheduler::Impl {
         runtime::ComponentSpec spec;
         std::vector<transport::ReaderPtr> data_trigger_readers;
         std::vector<DataTriggerState> data_triggers;
-        std::shared_ptr<std::mutex> execute_mutex {std::make_shared<std::mutex>()};
+        std::vector<TaskTriggerState> task_triggers;
     };
 
-    explicit Impl(runtime::RuntimeContext& runtime_ref)
-        : runtime(runtime_ref)
+    explicit Impl(runtime::RuntimeContext& runtime_ref, SchedulerOptions scheduler_options)
+        : runtime(runtime_ref), options(scheduler_options)
     {
     }
 
@@ -148,6 +161,11 @@ struct Scheduler::Impl {
         }
 
         std::lock_guard<std::mutex> lock(mutex);
+        if (running || stopping) {
+            return core::Status::FailedPrecondition(
+                "components must be registered before scheduler starts");
+        }
+
         const auto key = name.str();
         if (components.find(key) != components.end()) {
             return core::Status::AlreadyExists("component already registered in scheduler: " + key);
@@ -176,17 +194,30 @@ struct Scheduler::Impl {
             if (running) {
                 return core::Status::Ok();
             }
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is stopping");
+            }
+            if (options.worker_count == 0) {
+                return core::Status::InvalidArgument("scheduler worker_count must be greater than zero");
+            }
+
+            auto status = InstallTaskTriggers();
+            if (!status.ok()) {
+                return status;
+            }
 
             stopping = false;
             running = true;
             last_status = core::Status::Ok();
         }
 
-        dispatcher = std::thread([weak_self]() {
-            if (auto self = weak_self.lock()) {
-                self->DispatchLoop();
-            }
-        });
+        for (std::size_t index = 0; index < options.worker_count; ++index) {
+            workers.emplace_back([weak_self]() {
+                if (auto self = weak_self.lock()) {
+                    self->DispatchLoop();
+                }
+            });
+        }
 
         auto status = InstallDataTriggers(weak_self);
         if (!status.ok()) {
@@ -218,18 +249,32 @@ struct Scheduler::Impl {
     core::Status Stop()
     {
         std::vector<std::thread> periodic_threads_to_join;
-        std::thread dispatcher_to_join;
+        std::vector<std::thread> workers_to_join;
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!running && !dispatcher.joinable()) {
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is already stopping");
+            }
+            if (!running) {
                 return core::Status::Ok();
+            }
+            const auto caller = std::this_thread::get_id();
+            for (const auto& worker : workers) {
+                if (worker.get_id() == caller) {
+                    return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
+                }
+            }
+            for (const auto& timer : periodic_threads) {
+                if (timer.get_id() == caller) {
+                    return core::Status::FailedPrecondition("scheduler timer cannot stop itself");
+                }
             }
 
             stopping = true;
             running = false;
             periodic_threads_to_join.swap(periodic_threads);
-            dispatcher_to_join = std::move(dispatcher);
+            workers_to_join.swap(workers);
         }
 
         event_available.notify_all();
@@ -241,8 +286,10 @@ struct Scheduler::Impl {
             }
         }
 
-        if (dispatcher_to_join.joinable()) {
-            dispatcher_to_join.join();
+        for (auto& worker : workers_to_join) {
+            if (worker.joinable()) {
+                worker.join();
+            }
         }
 
         {
@@ -252,7 +299,9 @@ struct Scheduler::Impl {
             for (auto& entry : components) {
                 entry.second.data_trigger_readers.clear();
                 entry.second.data_triggers.clear();
+                entry.second.task_triggers.clear();
             }
+            task_dependents.clear();
             stopping = false;
         }
 
@@ -338,6 +387,72 @@ struct Scheduler::Impl {
     }
 
 private:
+    core::Status InstallTaskTriggers()
+    {
+        std::map<std::string, std::vector<TaskDependent>> dependents;
+        std::map<std::string, std::vector<TaskTriggerState>> states;
+        std::map<std::string, std::size_t> indegree;
+        for (const auto& entry : components) {
+            indegree.emplace(entry.first, 0);
+        }
+
+        for (const auto& entry : components) {
+            const auto& name = entry.first;
+            for (const auto& trigger : entry.second.spec.triggers) {
+                if (trigger.kind != core::TriggerKind::kTaskDependency) {
+                    continue;
+                }
+                if (trigger.task_dependencies.empty()) {
+                    return core::Status::InvalidArgument("task dependency trigger requires at least one task dependency");
+                }
+                const auto trigger_index = states[name].size();
+                states[name].push_back(TaskTriggerState {
+                    trigger.dependency_policy,
+                    std::vector<bool>(trigger.task_dependencies.size(), false)
+                });
+                std::set<std::string> seen;
+                for (std::size_t index = 0; index < trigger.task_dependencies.size(); ++index) {
+                    const auto& upstream = trigger.task_dependencies[index].str();
+                    if (upstream == name || !seen.insert(upstream).second) {
+                        return core::Status::InvalidArgument("self or duplicate task dependency: " + upstream);
+                    }
+                    if (components.find(upstream) == components.end()) {
+                        return core::Status::InvalidArgument("task dependency is not registered in scheduler: " + upstream);
+                    }
+                    dependents[upstream].push_back(TaskDependent {name, trigger_index, index});
+                    ++indegree[name];
+                }
+            }
+        }
+
+        std::deque<std::string> ready;
+        for (const auto& entry : indegree) {
+            if (entry.second == 0) {
+                ready.push_back(entry.first);
+            }
+        }
+        std::size_t visited = 0;
+        while (!ready.empty()) {
+            const auto upstream = ready.front();
+            ready.pop_front();
+            ++visited;
+            for (const auto& dependent : dependents[upstream]) {
+                if (--indegree[dependent.component] == 0) {
+                    ready.push_back(dependent.component);
+                }
+            }
+        }
+        if (visited != components.size()) {
+            return core::Status::InvalidArgument("task dependency graph contains a cycle");
+        }
+
+        for (auto& entry : components) {
+            entry.second.task_triggers = std::move(states[entry.first]);
+        }
+        task_dependents = std::move(dependents);
+        return core::Status::Ok();
+    }
+
     core::Status Enqueue(
         const core::ComponentName& name,
         core::Nanoseconds deadline)
@@ -514,8 +629,20 @@ private:
                     break;
                 }
 
-                event = pending_events.front();
-                pending_events.pop_front();
+                auto selected = pending_events.end();
+                for (auto candidate = pending_events.begin(); candidate != pending_events.end(); ++candidate) {
+                    if (executing_components.find(candidate->component.str()) == executing_components.end()) {
+                        selected = candidate;
+                        break;
+                    }
+                }
+                if (selected == pending_events.end()) {
+                    event_available.wait(lock);
+                    continue;
+                }
+                event = *selected;
+                pending_events.erase(selected);
+                executing_components.insert(event.component.str());
                 ++active_events;
             }
 
@@ -528,6 +655,35 @@ private:
                 }
                 ++dispatched_events;
                 --active_events;
+                executing_components.erase(event.component.str());
+                event_available.notify_all();
+                if (status.ok() && !stopping) {
+                    const auto found = task_dependents.find(event.component.str());
+                    if (found != task_dependents.end()) {
+                        for (const auto& dependent : found->second) {
+                            auto& trigger = components.at(dependent.component).task_triggers.at(dependent.trigger_index);
+                            bool enqueue = false;
+                            if (trigger.policy == core::DependencyPolicy::kAny) {
+                                enqueue = true;
+                            } else {
+                                trigger.ready[dependent.dependency_index] = true;
+                                enqueue = std::all_of(trigger.ready.begin(), trigger.ready.end(), [](bool ready) {
+                                    return ready;
+                                });
+                                if (enqueue) {
+                                    std::fill(trigger.ready.begin(), trigger.ready.end(), false);
+                                }
+                            }
+                            if (enqueue) {
+                                pending_events.push_back(ScheduledEvent {
+                                    core::ComponentName::Unsafe(dependent.component),
+                                    core::Nanoseconds::zero(),
+                                });
+                                event_available.notify_one();
+                            }
+                        }
+                    }
+                }
                 if (pending_events.empty() && active_events == 0) {
                     idle.notify_all();
                 }
@@ -542,18 +698,6 @@ private:
 
     core::Status ExecuteNow(const ScheduledEvent& event)
     {
-        std::shared_ptr<std::mutex> execute_mutex;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            const auto found = components.find(event.component.str());
-            if (found == components.end()) {
-                return core::Status::NotFound(
-                    "component is not registered in scheduler: " + event.component.str());
-            }
-            execute_mutex = found->second.execute_mutex;
-        }
-
-        std::lock_guard<std::mutex> execution_lock(*execute_mutex);
         const auto started_at = core::SteadyClock::now();
         auto status = runtime.ExecuteComponent(event.component);
         const auto execution_time = std::chrono::duration_cast<core::Nanoseconds>(
@@ -605,14 +749,17 @@ private:
     }
 
     runtime::RuntimeContext& runtime;
+    SchedulerOptions options;
     mutable std::mutex mutex;
     std::condition_variable event_available;
     std::condition_variable periodic_stop;
     std::condition_variable idle;
     std::map<std::string, ScheduledComponent> components;
+    std::map<std::string, std::vector<TaskDependent>> task_dependents;
     std::deque<ScheduledEvent> pending_events;
+    std::unordered_set<std::string> executing_components;
     std::vector<std::thread> periodic_threads;
-    std::thread dispatcher;
+    std::vector<std::thread> workers;
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
     core::Status last_status;
@@ -620,8 +767,8 @@ private:
     bool stopping {false};
 };
 
-Scheduler::Scheduler(runtime::RuntimeContext& runtime)
-    : impl_(std::make_shared<Impl>(runtime))
+Scheduler::Scheduler(runtime::RuntimeContext& runtime, SchedulerOptions options)
+    : impl_(std::make_shared<Impl>(runtime, options))
 {
 }
 

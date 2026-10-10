@@ -17,13 +17,16 @@ struct SchedulerStats {
     std::size_t dispatched_events {0};
 };
 
-// Scheduler turns TriggerSpec declarations into ExecuteComponent() calls. This
-// first implementation intentionally keeps execution local and deterministic:
-// one dispatcher thread serializes trigger events, while periodic trigger
-// threads only enqueue readiness events.
+struct SchedulerOptions {
+    std::size_t worker_count {1};
+};
+
+// Scheduler turns TriggerSpec declarations into ExecuteComponent() calls.
+// Workers may execute different components concurrently; each component is
+// executed serially.
 class Scheduler final {
 public:
-    explicit Scheduler(runtime::RuntimeContext& runtime);
+    explicit Scheduler(runtime::RuntimeContext& runtime, SchedulerOptions options = {});
     ~Scheduler();
 
     Scheduler(const Scheduler&) = delete;
