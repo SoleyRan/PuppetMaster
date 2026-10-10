@@ -241,6 +241,74 @@ private:
     int execute_count_ {0};
 };
 
+class BlockingDataConsumer final : public runtime::Component {
+public:
+    BlockingDataConsumer(
+        core::ComponentName name,
+        transport::EndpointConfig endpoint,
+        std::atomic<int>& barrier)
+        : spec_ {std::move(name), "blocks data-triggered execution", {std::move(endpoint)}, {}, {}},
+          barrier_(barrier)
+    {
+        spec_.triggers = {core::TriggerSpec {
+            core::TriggerKind::kData,
+            {},
+            core::DependencyPolicy::kAny,
+            {spec_.readers.front().topic.name},
+            {}
+        }};
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        return spec_;
+    }
+
+    core::Status Configure(runtime::ComponentContext& context) override
+    {
+        auto reader = context.CreateReader(spec_.readers.front());
+        if (!reader.ok()) {
+            return reader.status();
+        }
+
+        reader_ = reader.value();
+        return core::Status::Ok();
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        ++entered_;
+        while (barrier_.load() < 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        auto message = reader_->Read();
+        if (!message.ok()) {
+            return message.status();
+        }
+
+        ++execute_count_;
+        return core::Status::Ok();
+    }
+
+    int entered() const noexcept
+    {
+        return entered_;
+    }
+
+    int execute_count() const noexcept
+    {
+        return execute_count_;
+    }
+
+private:
+    runtime::ComponentSpec spec_;
+    transport::ReaderPtr reader_;
+    std::atomic<int>& barrier_;
+    std::atomic<int> entered_ {0};
+    int execute_count_ {0};
+};
+
 class MultiTopicCounter final : public runtime::Component {
 public:
     MultiTopicCounter(core::ComponentName name, transport::EndpointConfig first, transport::EndpointConfig second)
@@ -392,6 +460,63 @@ void DataTriggerExecutesComponent()
     assert(component->execute_count() == 1);
     assert(component->last_payload() == payload);
 
+    assert(sched.Stop().ok());
+}
+
+void DataTriggerCoalescesRepeatedArrivals()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto endpoint = MakeEndpoint("/scheduler/coalesce");
+    const auto name = MakeComponentName("blocking_data_consumer");
+    std::atomic<int> barrier {0};
+    auto component = std::make_shared<BlockingDataConsumer>(name, endpoint, barrier);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+
+    auto writer = context.value()->CreateWriter(endpoint);
+    assert(writer.ok());
+
+    auto write_payload = [&writer](const std::string& payload) {
+        assert(writer.value()->Write(
+            transport::ByteView::From(payload.data(), payload.size())).ok());
+    };
+
+    write_payload("first");
+    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (component->entered() == 0 && std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(component->entered() == 1);
+
+    write_payload("second");
+    write_payload("third");
+    write_payload("fourth");
+
+    const auto coalesced_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < coalesced_deadline) {
+        const auto stats = sched.stats();
+        if (stats.pending_events == 1
+            && stats.active_events == 1
+            && stats.coalesced_events >= 2) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto blocked_stats = sched.stats();
+    assert(blocked_stats.pending_events == 1);
+    assert(blocked_stats.active_events == 1);
+    assert(blocked_stats.coalesced_events >= 2);
+    assert(sched.WaitIdle(std::chrono::milliseconds(20)).code() == core::StatusCode::kDeadlineExceeded);
+
+    barrier.store(2);
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 2);
     assert(sched.Stop().ok());
 }
 
@@ -694,6 +819,9 @@ void ParallelWorkersExecuteDifferentComponents()
 
     assert(sched.Trigger(first).ok());
     assert(sched.Trigger(second).ok());
+    const auto queued_stats = sched.stats();
+    assert(queued_stats.pending_events + queued_stats.active_events == 2);
+    assert(queued_stats.coalesced_events == 0);
 
     while (first_component->entered() + second_component->entered() < 2) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -708,7 +836,7 @@ void ParallelWorkersExecuteDifferentComponents()
     assert(sched.Stop().ok());
 }
 
-void SameComponentExecutesSerially()
+void SameComponentExecutesSeriallyAndCoalescesTriggers()
 {
     auto context = runtime::RuntimeContext::Create();
     assert(context.ok());
@@ -726,10 +854,18 @@ void SameComponentExecutesSerially()
     assert(sched.Start().ok());
 
     assert(sched.Trigger(name).ok());
-    assert(sched.Trigger(name).ok());
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (component->entered() == 0 && std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     assert(component->entered() == 1);
+
+    assert(sched.Trigger(name).ok());
+    assert(sched.Trigger(name).ok());
+    const auto stats = sched.stats();
+    assert(stats.pending_events == 1);
+    assert(stats.coalesced_events == 1);
+    assert(sched.WaitIdle(std::chrono::milliseconds(20)).code() == core::StatusCode::kDeadlineExceeded);
 
     barrier.store(2);
     assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
@@ -758,6 +894,7 @@ int main()
     PeriodicTriggerExecutesComponent();
     PeriodicDeadlineMissIsObservable();
     DataTriggerExecutesComponent();
+    DataTriggerCoalescesRepeatedArrivals();
     AllDataTriggerWaitsForEveryTopic();
     TaskDependencyChainAndPolicies();
     FailedTaskDoesNotPropagate();
@@ -765,7 +902,7 @@ int main()
     EmptyTaskDependenciesAndLateRegistrationAreRejected();
     TaskReadinessResetsAfterRestart();
     ParallelWorkersExecuteDifferentComponents();
-    SameComponentExecutesSerially();
+    SameComponentExecutesSeriallyAndCoalescesTriggers();
     ZeroWorkerCountIsRejected();
     return 0;
 }

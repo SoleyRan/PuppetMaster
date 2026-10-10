@@ -75,15 +75,16 @@ the selected transport backend.
 ### Scheduler
 
 Scheduler converts periodic timers, data availability, task dependencies, and
-manual triggers into executor work. Its behavior must define deadline handling,
-queue overflow, trigger coalescing, and dependency semantics.
+manual triggers into executor work. Its behavior defines deadline observation,
+trigger coalescing, and dependency semantics.
 
 The current scheduler milestone supports manual, periodic, data-driven, and
 task-dependency trigger dispatch through `scheduler::Scheduler`. Events pass
 through a shared queue and a configurable worker pool calls
 `RuntimeContext::ExecuteComponent()`. Each component executes serially while
-different components may run in parallel. Priorities, deadlines, and trigger
-coalescing policies remain future work.
+different components may run in parallel, and each component has at most one
+pending successor event. Priority and deadline-based scheduling remain future
+work.
 
 ### Configuration
 

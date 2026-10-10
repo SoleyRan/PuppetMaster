@@ -295,6 +295,7 @@ struct Scheduler::Impl {
         {
             std::lock_guard<std::mutex> lock(mutex);
             pending_events.clear();
+            queued_components.clear();
             active_events = 0;
             for (auto& entry : components) {
                 entry.second.data_trigger_readers.clear();
@@ -376,7 +377,8 @@ struct Scheduler::Impl {
             components.size(),
             pending_events.size(),
             active_events,
-            dispatched_events
+            dispatched_events,
+            coalesced_events
         };
     }
 
@@ -453,19 +455,26 @@ private:
         return core::Status::Ok();
     }
 
+    // Called with mutex held. An executing component may have one queued successor.
+    void QueueEvent(const core::ComponentName& name, core::Nanoseconds deadline)
+    {
+        if (!queued_components.insert(name.str()).second) {
+            ++coalesced_events;
+            return;
+        }
+        pending_events.push_back(ScheduledEvent {name, deadline});
+        event_available.notify_one();
+    }
+
     core::Status Enqueue(
         const core::ComponentName& name,
         core::Nanoseconds deadline)
     {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (!running || stopping) {
-                return RunningRequired();
-            }
-            pending_events.push_back(ScheduledEvent {name, deadline});
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!running || stopping) {
+            return RunningRequired();
         }
-
-        event_available.notify_one();
+        QueueEvent(name, deadline);
         return core::Status::Ok();
     }
 
@@ -490,11 +499,8 @@ private:
                 }
             }
             if (enqueue) {
-                pending_events.push_back(ScheduledEvent {name, core::Nanoseconds::zero()});
+                QueueEvent(name, core::Nanoseconds::zero());
             }
-        }
-        if (enqueue) {
-            event_available.notify_one();
         }
     }
 
@@ -642,6 +648,7 @@ private:
                 }
                 event = *selected;
                 pending_events.erase(selected);
+                queued_components.erase(event.component.str());
                 executing_components.insert(event.component.str());
                 ++active_events;
             }
@@ -675,11 +682,9 @@ private:
                                 }
                             }
                             if (enqueue) {
-                                pending_events.push_back(ScheduledEvent {
+                                QueueEvent(
                                     core::ComponentName::Unsafe(dependent.component),
-                                    core::Nanoseconds::zero(),
-                                });
-                                event_available.notify_one();
+                                    core::Nanoseconds::zero());
                             }
                         }
                     }
@@ -757,11 +762,13 @@ private:
     std::map<std::string, ScheduledComponent> components;
     std::map<std::string, std::vector<TaskDependent>> task_dependents;
     std::deque<ScheduledEvent> pending_events;
+    std::unordered_set<std::string> queued_components;
     std::unordered_set<std::string> executing_components;
     std::vector<std::thread> periodic_threads;
     std::vector<std::thread> workers;
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
+    std::size_t coalesced_events {0};
     core::Status last_status;
     bool running {false};
     bool stopping {false};

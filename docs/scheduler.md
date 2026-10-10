@@ -15,7 +15,8 @@ This milestone adds:
 - task dependency dispatch after successful upstream execution
 - a configurable worker pool (one worker by default)
 - per-component serial execution with cross-component parallelism
-- basic scheduler stats and idle waiting
+- trigger coalescing with a per-component pending-event bound
+- scheduler stats, including a coalesced-event counter, and idle waiting
 
 ## Execution Model
 
@@ -44,6 +45,26 @@ kinds. `worker_count == 0` is rejected by `Start()` with `InvalidArgument`.
 `WaitIdle()` waits until both queued and executing events (including dependency
 propagation) are finished; a positive timeout returns `DeadlineExceeded` if
 work is still in progress.
+
+## Trigger Coalescing
+
+Manual, periodic, data, and task-dependency triggers all enter through the same
+queueing function. The scheduler keeps an index of components that already have
+a pending event. A component can therefore have at most one event waiting to
+start. When that component is already executing, it may still have one queued
+successor; additional triggers while that successor is present are collapsed
+into it and counted in `SchedulerStats::coalesced_events`.
+
+This bounds the backlog for a slow component even when timers or data callbacks
+fire faster than it can finish. The first accepted event supplies the stored
+deadline; later coalesced triggers do not replace, shorten, or extend that
+deadline.
+
+Coalescing applies only after a trigger's readiness rule has been evaluated.
+Multi-topic and multi-task `kAll` policies still track each dependency
+independently. Repeated readiness from one dependency is not allowed to satisfy
+the other dependencies; once the complete dependency set is ready, the resulting
+execution request participates in the same one-event pending bound.
 
 ## Manual Triggers
 
@@ -93,7 +114,9 @@ This design keeps scheduler readiness separate from component data consumption.
 For a multi-topic `kAll` trigger, each dependency must report new data since
 its previous dispatch. Repeated notifications from one topic count only once;
 when all dependencies are ready, the scheduler enqueues one execution and
-resets that trigger's readiness. `kAny` continues to enqueue on each notification.
+resets that trigger's readiness. `kAny` requests an execution on each
+notification; those requests are coalesced if the component already has a
+pending event.
 
 ## Task Dependency Triggers
 
@@ -111,8 +134,9 @@ core::TriggerSpec {
 ```
 
 A successful upstream execution marks that task ready for each downstream
-trigger. Failed executions do not propagate readiness. `kAny` dispatches once
-for each successful completion of any named upstream. `kAll` dispatches after
+trigger. Failed executions do not propagate readiness. `kAny` requests an
+execution for each successful completion of any named upstream, subject to the
+pending-event coalescing bound. `kAll` dispatches after
 every named upstream has completed successfully since the previous dispatch;
 repeated completions from one upstream count only once until the others finish.
 A downstream execution may in turn trigger another downstream task, allowing
@@ -126,8 +150,7 @@ upstream components before starting the scheduler.
 
 The scheduler is intentionally small in this branch:
 
-- no priority or deadline policy yet
-- no trigger coalescing policy yet
+- no priority or deadline-based scheduling policy yet
 
-Those should be built on top of the current queue and trigger model instead of
-being mixed into the first implementation.
+That policy should be built on top of the current queue and trigger model rather
+than being mixed into trigger dispatch.
