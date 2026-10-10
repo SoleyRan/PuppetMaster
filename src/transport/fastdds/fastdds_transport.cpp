@@ -284,19 +284,22 @@ public:
         return endpoint_.message;
     }
 
-    core::Status Write(ByteView payload, WriteOptions /*options*/) override
+    core::Status Write(ByteView payload, WriteOptions options) override
     {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->writer == nullptr) {
+            return core::Status::Unavailable("FastDDS writer is closed");
+        }
+        if (options.source_timestamp != core::TimePoint {}) {
+            return core::Status::Unsupported("FastDDS does not support explicit source timestamps");
+        }
+
         auto status = payload.Validate();
         if (!status.ok()) {
             return status;
         }
 
         detail::BytePayload sample = CopyBytes(payload);
-
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        if (state_->writer == nullptr) {
-            return core::Status::Unavailable("FastDDS writer is closed");
-        }
 #if PUPPETMASTER_FASTDDS_V3
         const bool written = state_->writer->write(&sample) == kRetOk;
 #else
@@ -535,7 +538,11 @@ core::Status FastDdsTransport::ValidateEndpoint(const EndpointConfig& endpoint) 
     if (endpoint.topic.transport != core::TransportKind::kFastDds) {
         return core::Status::InvalidArgument("endpoint topic is not bound to the FastDDS transport");
     }
-    return MapMessagePolicy(endpoint.topic.message_policy, options_.durability).status();
+    status = MapMessagePolicy(endpoint.topic.message_policy, options_.durability).status();
+    if (!status.ok()) {
+        return status;
+    }
+    return MapWriterMessagePolicy(endpoint.topic.message_policy, options_.durability).status();
 }
 
 core::Result<ReaderPtr> FastDdsTransport::CreateReader(const EndpointConfig& endpoint)
@@ -583,7 +590,7 @@ core::Result<WriterPtr> FastDdsTransport::CreateWriter(const EndpointConfig& end
         return core::Result<WriterPtr>::FromStatus(
             core::Status::FailedPrecondition("FastDDS transport must be open before creating writers"));
     }
-    const QosProfile profile = MapMessagePolicy(endpoint.topic.message_policy, options_.durability).value();
+    const QosProfile profile = MapWriterMessagePolicy(endpoint.topic.message_policy, options_.durability).value();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
     auto topic = impl_->EnsureTopic(endpoint);

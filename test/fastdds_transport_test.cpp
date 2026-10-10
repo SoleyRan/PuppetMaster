@@ -137,6 +137,14 @@ void RejectsForeignTransportKind()
     assert(transport->ValidateEndpoint(endpoint).code() == core::StatusCode::kInvalidArgument);
 }
 
+void RejectsUnsupportedOverflowPolicy()
+{
+    auto transport = MakeTransport();
+    auto endpoint = MakeEndpoint("/test/unsupported-overflow", "test.Bytes");
+    endpoint.topic.message_policy.overflow = core::QueueOverflowPolicy::kBlock;
+    assert(transport->ValidateEndpoint(endpoint).code() == core::StatusCode::kUnsupported);
+}
+
 void PublishSubscribeRoundTrip()
 {
     auto transport = MakeTransport();
@@ -150,6 +158,13 @@ void PublishSubscribeRoundTrip()
     assert(writer.ok());
 
     const std::string payload = "hello fastdds";
+    transport::WriteOptions write_options;
+    write_options.source_timestamp = core::TimePoint {core::Nanoseconds {1}};
+    assert(writer.value()->Write(
+        transport::ByteView::From(payload.data(), payload.size()), write_options).code() ==
+           core::StatusCode::kUnsupported);
+    assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+
     transport::ReadOptions options;
     options.wait = true;
     options.timeout = std::chrono::milliseconds(200);
@@ -177,6 +192,9 @@ void PublishSubscribeRoundTrip()
     auto after_close = reader.value()->Read();
     assert(after_close.status().code() == core::StatusCode::kUnavailable);
     assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).code() ==
+           core::StatusCode::kUnavailable);
+    assert(writer.value()->Write(
+        transport::ByteView::From(payload.data(), payload.size()), write_options).code() ==
            core::StatusCode::kUnavailable);
 }
 
@@ -286,6 +304,7 @@ int main()
 {
     RejectsEndpointsBeforeOpen();
     RejectsForeignTransportKind();
+    RejectsUnsupportedOverflowPolicy();
     PublishSubscribeRoundTrip();
     RuntimeContextCreatesFastDdsEndpoints();
     ConfigurationAndSchedulerFastDdsRoundTrip();

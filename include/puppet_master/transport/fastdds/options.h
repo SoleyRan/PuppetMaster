@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 
 #include <puppet_master/core/status.h>
@@ -39,8 +40,10 @@ struct QosProfile {
 
     core::Status Validate() const
     {
-        if (history == HistoryKind::kKeepLast && history_depth == 0) {
-            return core::Status::InvalidArgument("FastDDS history_depth must be greater than zero");
+        if (history == HistoryKind::kKeepLast &&
+            (history_depth == 0 || history_depth > static_cast<std::size_t>(
+                std::numeric_limits<std::int32_t>::max()))) {
+            return core::Status::InvalidArgument("FastDDS history_depth must fit a positive int32");
         }
         return core::Status::Ok();
     }
@@ -51,7 +54,7 @@ struct Options {
     std::string participant_name {"PuppetMasterFastDDS"};
     TransportMode transport_mode {TransportMode::kDefault};
     DurabilityKind durability {DurabilityKind::kVolatile};
-    bool data_sharing {true};
+    bool data_sharing {false};
     bool async_publish {true};
     std::size_t udp_buffer_size {16 * 1024 * 1024};
     std::size_t shm_segment_size {160 * 1024 * 1024};
@@ -70,6 +73,10 @@ struct Options {
         if ((transport_mode == TransportMode::kSharedMemory || transport_mode == TransportMode::kHybrid)
             && shm_segment_size == 0) {
             return core::Status::InvalidArgument("FastDDS shm_segment_size must be greater than zero");
+        }
+
+        if (data_sharing) {
+            return core::Status::Unsupported("FastDDS data-sharing is unsupported for unbounded byte payloads");
         }
 
         return core::Status::Ok();
