@@ -13,7 +13,8 @@ This milestone adds:
 - periodic trigger dispatch
 - data trigger dispatch through reader callbacks
 - task dependency dispatch after successful upstream execution
-- a serialized dispatcher queue
+- a configurable worker pool (one worker by default)
+- per-component serial execution with cross-component parallelism
 - basic scheduler stats and idle waiting
 
 ## Execution Model
@@ -34,9 +35,15 @@ The scheduler reads component specs from `RuntimeContext`, validates their
 triggers, then converts readiness events into `RuntimeContext::ExecuteComponent`
 calls.
 
-All trigger events pass through one dispatcher queue. This keeps the first
-implementation deterministic and prevents the same component from being
-executed concurrently by periodic and data triggers.
+All trigger events pass through one queue. By default, one worker executes
+components in sequence, preserving existing behavior. Pass
+`SchedulerOptions {worker_count}` to the constructor to run different components
+in parallel. Workers reserve a component before taking its next queued event:
+events for the same component never execute concurrently, even across trigger
+kinds. `worker_count == 0` is rejected by `Start()` with `InvalidArgument`.
+`WaitIdle()` waits until both queued and executing events (including dependency
+propagation) are finished; a positive timeout returns `DeadlineExceeded` if
+work is still in progress.
 
 ## Manual Triggers
 
@@ -56,8 +63,8 @@ sched.WaitIdle(std::chrono::milliseconds(500));
 ## Periodic Triggers
 
 Periodic triggers start lightweight timer threads. Timer threads do not execute
-component code directly; they only enqueue readiness events. The dispatcher
-thread performs the actual `ExecuteComponent()` call.
+component code directly; they only enqueue readiness events. Worker threads
+perform the actual `ExecuteComponent()` call.
 
 ```cpp
 core::TriggerSpec {
@@ -119,7 +126,6 @@ upstream components before starting the scheduler.
 
 The scheduler is intentionally small in this branch:
 
-- no executor pool yet
 - no priority or deadline policy yet
 - no trigger coalescing policy yet
 

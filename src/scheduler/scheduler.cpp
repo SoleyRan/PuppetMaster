@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -135,11 +136,10 @@ struct Scheduler::Impl {
         std::vector<transport::ReaderPtr> data_trigger_readers;
         std::vector<DataTriggerState> data_triggers;
         std::vector<TaskTriggerState> task_triggers;
-        std::shared_ptr<std::mutex> execute_mutex {std::make_shared<std::mutex>()};
     };
 
-    explicit Impl(runtime::RuntimeContext& runtime_ref)
-        : runtime(runtime_ref)
+    explicit Impl(runtime::RuntimeContext& runtime_ref, SchedulerOptions scheduler_options)
+        : runtime(runtime_ref), options(scheduler_options)
     {
     }
 
@@ -194,6 +194,12 @@ struct Scheduler::Impl {
             if (running) {
                 return core::Status::Ok();
             }
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is stopping");
+            }
+            if (options.worker_count == 0) {
+                return core::Status::InvalidArgument("scheduler worker_count must be greater than zero");
+            }
 
             auto status = InstallTaskTriggers();
             if (!status.ok()) {
@@ -205,11 +211,13 @@ struct Scheduler::Impl {
             last_status = core::Status::Ok();
         }
 
-        dispatcher = std::thread([weak_self]() {
-            if (auto self = weak_self.lock()) {
-                self->DispatchLoop();
-            }
-        });
+        for (std::size_t index = 0; index < options.worker_count; ++index) {
+            workers.emplace_back([weak_self]() {
+                if (auto self = weak_self.lock()) {
+                    self->DispatchLoop();
+                }
+            });
+        }
 
         auto status = InstallDataTriggers(weak_self);
         if (!status.ok()) {
@@ -241,18 +249,32 @@ struct Scheduler::Impl {
     core::Status Stop()
     {
         std::vector<std::thread> periodic_threads_to_join;
-        std::thread dispatcher_to_join;
+        std::vector<std::thread> workers_to_join;
 
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (!running && !dispatcher.joinable()) {
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is already stopping");
+            }
+            if (!running) {
                 return core::Status::Ok();
+            }
+            const auto caller = std::this_thread::get_id();
+            for (const auto& worker : workers) {
+                if (worker.get_id() == caller) {
+                    return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
+                }
+            }
+            for (const auto& timer : periodic_threads) {
+                if (timer.get_id() == caller) {
+                    return core::Status::FailedPrecondition("scheduler timer cannot stop itself");
+                }
             }
 
             stopping = true;
             running = false;
             periodic_threads_to_join.swap(periodic_threads);
-            dispatcher_to_join = std::move(dispatcher);
+            workers_to_join.swap(workers);
         }
 
         event_available.notify_all();
@@ -264,8 +286,10 @@ struct Scheduler::Impl {
             }
         }
 
-        if (dispatcher_to_join.joinable()) {
-            dispatcher_to_join.join();
+        for (auto& worker : workers_to_join) {
+            if (worker.joinable()) {
+                worker.join();
+            }
         }
 
         {
@@ -605,8 +629,20 @@ private:
                     break;
                 }
 
-                event = pending_events.front();
-                pending_events.pop_front();
+                auto selected = pending_events.end();
+                for (auto candidate = pending_events.begin(); candidate != pending_events.end(); ++candidate) {
+                    if (executing_components.find(candidate->component.str()) == executing_components.end()) {
+                        selected = candidate;
+                        break;
+                    }
+                }
+                if (selected == pending_events.end()) {
+                    event_available.wait(lock);
+                    continue;
+                }
+                event = *selected;
+                pending_events.erase(selected);
+                executing_components.insert(event.component.str());
                 ++active_events;
             }
 
@@ -619,7 +655,9 @@ private:
                 }
                 ++dispatched_events;
                 --active_events;
-                if (status.ok() && running && !stopping) {
+                executing_components.erase(event.component.str());
+                event_available.notify_all();
+                if (status.ok() && !stopping) {
                     const auto found = task_dependents.find(event.component.str());
                     if (found != task_dependents.end()) {
                         for (const auto& dependent : found->second) {
@@ -660,18 +698,6 @@ private:
 
     core::Status ExecuteNow(const ScheduledEvent& event)
     {
-        std::shared_ptr<std::mutex> execute_mutex;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            const auto found = components.find(event.component.str());
-            if (found == components.end()) {
-                return core::Status::NotFound(
-                    "component is not registered in scheduler: " + event.component.str());
-            }
-            execute_mutex = found->second.execute_mutex;
-        }
-
-        std::lock_guard<std::mutex> execution_lock(*execute_mutex);
         const auto started_at = core::SteadyClock::now();
         auto status = runtime.ExecuteComponent(event.component);
         const auto execution_time = std::chrono::duration_cast<core::Nanoseconds>(
@@ -723,6 +749,7 @@ private:
     }
 
     runtime::RuntimeContext& runtime;
+    SchedulerOptions options;
     mutable std::mutex mutex;
     std::condition_variable event_available;
     std::condition_variable periodic_stop;
@@ -730,8 +757,9 @@ private:
     std::map<std::string, ScheduledComponent> components;
     std::map<std::string, std::vector<TaskDependent>> task_dependents;
     std::deque<ScheduledEvent> pending_events;
+    std::unordered_set<std::string> executing_components;
     std::vector<std::thread> periodic_threads;
-    std::thread dispatcher;
+    std::vector<std::thread> workers;
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
     core::Status last_status;
@@ -739,8 +767,8 @@ private:
     bool stopping {false};
 };
 
-Scheduler::Scheduler(runtime::RuntimeContext& runtime)
-    : impl_(std::make_shared<Impl>(runtime))
+Scheduler::Scheduler(runtime::RuntimeContext& runtime, SchedulerOptions options)
+    : impl_(std::make_shared<Impl>(runtime, options))
 {
 }
 

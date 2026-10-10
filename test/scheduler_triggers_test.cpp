@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <memory>
@@ -624,6 +625,131 @@ void TaskReadinessResetsAfterRestart()
     assert(sched.Stop().ok());
 }
 
+class BlockingCounter final : public runtime::Component {
+public:
+    explicit BlockingCounter(core::ComponentName name, std::atomic<int>& barrier)
+        : spec_ {
+            std::move(name),
+            "blocks until barrier reaches target",
+            {},
+            {},
+            {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}
+        },
+          barrier_(barrier)
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        return spec_;
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        ++entered_;
+        while (barrier_.load() < 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ++execute_count_;
+        return core::Status::Ok();
+    }
+
+    int entered() const noexcept
+    {
+        return entered_;
+    }
+
+    int execute_count() const noexcept
+    {
+        return execute_count_;
+    }
+
+private:
+    runtime::ComponentSpec spec_;
+    std::atomic<int>& barrier_;
+    std::atomic<int> entered_ {0};
+    int execute_count_ {0};
+};
+
+void ParallelWorkersExecuteDifferentComponents()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto first = MakeComponentName("parallel_first");
+    const auto second = MakeComponentName("parallel_second");
+    std::atomic<int> barrier {0};
+    auto first_component = std::make_shared<BlockingCounter>(first, barrier);
+    auto second_component = std::make_shared<BlockingCounter>(second, barrier);
+    assert(context.value()->RegisterComponent(first_component).ok());
+    assert(context.value()->RegisterComponent(second_component).ok());
+    assert(BringUp(*context.value(), first).ok());
+    assert(BringUp(*context.value(), second).ok());
+
+    scheduler::SchedulerOptions options;
+    options.worker_count = 2;
+    scheduler::Scheduler sched(*context.value(), options);
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+
+    assert(sched.Trigger(first).ok());
+    assert(sched.Trigger(second).ok());
+
+    while (first_component->entered() + second_component->entered() < 2) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(first_component->entered() == 1);
+    assert(second_component->entered() == 1);
+
+    barrier.store(2);
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(first_component->execute_count() == 1);
+    assert(second_component->execute_count() == 1);
+    assert(sched.Stop().ok());
+}
+
+void SameComponentExecutesSerially()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto name = MakeComponentName("serial_component");
+    std::atomic<int> barrier {0};
+    auto component = std::make_shared<BlockingCounter>(name, barrier);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::SchedulerOptions options;
+    options.worker_count = 2;
+    scheduler::Scheduler sched(*context.value(), options);
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+
+    assert(sched.Trigger(name).ok());
+    assert(sched.Trigger(name).ok());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    assert(component->entered() == 1);
+
+    barrier.store(2);
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 2);
+    assert(sched.Stop().ok());
+}
+
+void ZeroWorkerCountIsRejected()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    scheduler::SchedulerOptions options;
+    options.worker_count = 0;
+    scheduler::Scheduler sched(*context.value(), options);
+    const auto status = sched.Start();
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(!sched.is_running());
+}
+
 }  // namespace
 
 int main()
@@ -638,5 +764,8 @@ int main()
     InvalidTaskDependencyGraphsAreRejectedAtStart();
     EmptyTaskDependenciesAndLateRegistrationAreRejected();
     TaskReadinessResetsAfterRestart();
+    ParallelWorkersExecuteDifferentComponents();
+    SameComponentExecutesSerially();
+    ZeroWorkerCountIsRejected();
     return 0;
 }
