@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <puppet_master/puppet_master.h>
 
@@ -68,13 +69,51 @@ std::string PayloadToString(const transport::ByteBuffer& payload)
 
 class ManualCounter final : public runtime::Component {
 public:
-    explicit ManualCounter(core::ComponentName name)
+    explicit ManualCounter(core::ComponentName name, bool fail = false)
         : spec_ {
             std::move(name),
             "counts manual scheduler triggers",
             {},
             {},
             {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}
+        },
+          fail_(fail)
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        return spec_;
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        ++execute_count_;
+        if (fail_) {
+            return core::Status::FailedPrecondition("intentional task failure");
+        }
+        return core::Status::Ok();
+    }
+
+    int execute_count() const noexcept
+    {
+        return execute_count_;
+    }
+
+private:
+    runtime::ComponentSpec spec_;
+    bool fail_;
+    int execute_count_ {0};
+};
+
+class TaskCounter final : public runtime::Component {
+public:
+    TaskCounter(core::ComponentName name, std::vector<core::TaskName> dependencies,
+                core::DependencyPolicy policy = core::DependencyPolicy::kAll)
+        : spec_ {
+            std::move(name), "counts task dependency triggers", {}, {},
+            {core::TriggerSpec {core::TriggerKind::kTaskDependency, {}, policy, {},
+                                std::move(dependencies)}}
         }
     {
     }
@@ -405,25 +444,184 @@ void AllDataTriggerWaitsForEveryTopic()
     assert(sched.Stop().ok());
 }
 
-void UnsupportedTaskDependencyIsRejected()
+void TaskDependencyChainAndPolicies()
 {
     auto context = runtime::RuntimeContext::Create();
     assert(context.ok());
 
-    const auto name = MakeComponentName("task_dependency");
-    runtime::ComponentSpec spec {
-        name,
-        "unsupported task dependency trigger",
-        {},
-        {},
-        {core::TriggerSpec {core::TriggerKind::kTaskDependency, {}, {}, {}, {core::TaskName::Unsafe("upstream")}}}
-    };
-    assert(context.value()->RegisterComponent(spec).ok());
+    const auto first = MakeComponentName("task_first");
+    const auto second = MakeComponentName("task_second");
+    const auto any = MakeComponentName("task_any");
+    const auto all = MakeComponentName("task_all");
+    const auto chained = MakeComponentName("task_chained");
+    auto first_component = std::make_shared<ManualCounter>(first);
+    auto second_component = std::make_shared<ManualCounter>(second);
+    auto any_component = std::make_shared<TaskCounter>(
+        any, std::vector<core::TaskName> {core::TaskName::Unsafe(first.str()),
+                                          core::TaskName::Unsafe(second.str())},
+        core::DependencyPolicy::kAny);
+    auto all_component = std::make_shared<TaskCounter>(
+        all, std::vector<core::TaskName> {core::TaskName::Unsafe(first.str()),
+                                          core::TaskName::Unsafe(second.str())});
+    auto chained_component = std::make_shared<TaskCounter>(
+        chained, std::vector<core::TaskName> {core::TaskName::Unsafe(all.str())});
+    for (const auto& component : {std::static_pointer_cast<runtime::Component>(first_component),
+                                  std::static_pointer_cast<runtime::Component>(second_component),
+                                  std::static_pointer_cast<runtime::Component>(any_component),
+                                  std::static_pointer_cast<runtime::Component>(all_component),
+                                  std::static_pointer_cast<runtime::Component>(chained_component)}) {
+        assert(context.value()->RegisterComponent(component).ok());
+        assert(BringUp(*context.value(), component->Describe().name).ok());
+    }
 
     scheduler::Scheduler sched(*context.value());
-    auto status = sched.RegisterComponent(name);
-    assert(!status.ok());
-    assert(status.code() == core::StatusCode::kUnsupported);
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+
+    assert(sched.Trigger(first).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(first_component->execute_count() == 1);
+    assert(any_component->execute_count() == 1);
+    assert(all_component->execute_count() == 0);
+    assert(chained_component->execute_count() == 0);
+
+    assert(sched.Trigger(first).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(any_component->execute_count() == 2);
+    assert(all_component->execute_count() == 0);
+
+    assert(sched.Trigger(second).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(any_component->execute_count() == 3);
+    assert(all_component->execute_count() == 1);
+    assert(chained_component->execute_count() == 1);
+
+    assert(sched.Trigger(second).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(all_component->execute_count() == 1);
+    assert(sched.Trigger(first).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(any_component->execute_count() == 5);
+    assert(all_component->execute_count() == 2);
+    assert(chained_component->execute_count() == 2);
+    assert(sched.Stop().ok());
+}
+
+void FailedTaskDoesNotPropagate()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto upstream = MakeComponentName("failing_upstream");
+    const auto downstream = MakeComponentName("failure_downstream");
+    auto failing = std::make_shared<ManualCounter>(upstream, true);
+    auto dependent = std::make_shared<TaskCounter>(
+        downstream, std::vector<core::TaskName> {core::TaskName::Unsafe(upstream.str())});
+    assert(context.value()->RegisterComponent(failing).ok());
+    assert(context.value()->RegisterComponent(dependent).ok());
+    assert(BringUp(*context.value(), upstream).ok());
+    assert(BringUp(*context.value(), downstream).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(upstream).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(failing->execute_count() == 1);
+    assert(dependent->execute_count() == 0);
+    assert(!sched.last_error().ok());
+    assert(sched.Stop().ok());
+}
+
+void InvalidTaskDependencyGraphsAreRejectedAtStart()
+{
+    const auto check = [](const std::vector<std::pair<std::string, std::vector<std::string>>>& graph) {
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        scheduler::Scheduler sched(*context.value());
+        for (const auto& entry : graph) {
+            const auto name = MakeComponentName(entry.first);
+            std::vector<core::TaskName> dependencies;
+            for (const auto& dependency : entry.second) {
+                dependencies.push_back(core::TaskName::Unsafe(dependency));
+            }
+            std::shared_ptr<runtime::Component> component;
+            if (dependencies.empty()) {
+                component = std::make_shared<ManualCounter>(name);
+            } else {
+                component = std::make_shared<TaskCounter>(name, std::move(dependencies));
+            }
+            assert(context.value()->RegisterComponent(component).ok());
+            assert(BringUp(*context.value(), name).ok());
+            assert(sched.RegisterComponent(name).ok());
+        }
+        const auto status = sched.Start();
+        assert(!status.ok());
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(!sched.is_running());
+    };
+    check({{"missing_downstream", {"missing_upstream"}}});
+    check({{"duplicate_downstream", {"upstream", "upstream"}}, {"upstream", {}}});
+    check({{"self_reference", {"self_reference"}}});
+    check({{"cycle_a", {"cycle_b"}}, {"cycle_b", {"cycle_a"}}});
+}
+
+void EmptyTaskDependenciesAndLateRegistrationAreRejected()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto empty = MakeComponentName("empty_task_dependencies");
+    auto empty_component = std::make_shared<TaskCounter>(empty, std::vector<core::TaskName> {});
+    assert(context.value()->RegisterComponent(empty_component).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    const auto empty_status = sched.RegisterComponent(empty);
+    assert(empty_status.code() == core::StatusCode::kInvalidArgument);
+
+    const auto upstream = MakeComponentName("registered_before_start");
+    auto component = std::make_shared<ManualCounter>(upstream);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), upstream).ok());
+    assert(sched.RegisterComponent(upstream).ok());
+    assert(sched.Start().ok());
+    const auto late_status = sched.RegisterComponent(upstream);
+    assert(late_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(sched.Stop().ok());
+}
+
+void TaskReadinessResetsAfterRestart()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto first = MakeComponentName("restart_first");
+    const auto second = MakeComponentName("restart_second");
+    const auto all = MakeComponentName("restart_all");
+    auto first_component = std::make_shared<ManualCounter>(first);
+    auto second_component = std::make_shared<ManualCounter>(second);
+    auto dependent = std::make_shared<TaskCounter>(
+        all, std::vector<core::TaskName> {core::TaskName::Unsafe(first.str()),
+                                          core::TaskName::Unsafe(second.str())});
+    assert(context.value()->RegisterComponent(first_component).ok());
+    assert(context.value()->RegisterComponent(second_component).ok());
+    assert(context.value()->RegisterComponent(dependent).ok());
+    assert(BringUp(*context.value(), first).ok());
+    assert(BringUp(*context.value(), second).ok());
+    assert(BringUp(*context.value(), all).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(first).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(dependent->execute_count() == 0);
+    assert(sched.Stop().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(second).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(dependent->execute_count() == 0);
+    assert(sched.Trigger(first).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(dependent->execute_count() == 1);
+    assert(sched.Stop().ok());
 }
 
 }  // namespace
@@ -435,6 +633,10 @@ int main()
     PeriodicDeadlineMissIsObservable();
     DataTriggerExecutesComponent();
     AllDataTriggerWaitsForEveryTopic();
-    UnsupportedTaskDependencyIsRejected();
+    TaskDependencyChainAndPolicies();
+    FailedTaskDoesNotPropagate();
+    InvalidTaskDependencyGraphsAreRejectedAtStart();
+    EmptyTaskDependenciesAndLateRegistrationAreRejected();
+    TaskReadinessResetsAfterRestart();
     return 0;
 }

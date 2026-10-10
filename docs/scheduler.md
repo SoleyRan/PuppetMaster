@@ -12,12 +12,9 @@ This milestone adds:
 - manual trigger dispatch
 - periodic trigger dispatch
 - data trigger dispatch through reader callbacks
+- task dependency dispatch after successful upstream execution
 - a serialized dispatcher queue
 - basic scheduler stats and idle waiting
-
-Task dependency triggers are deliberately rejected with
-`StatusCode::kUnsupported` in this milestone. They need a dependency graph and
-ready-state model, which should be designed separately.
 
 ## Execution Model
 
@@ -91,6 +88,33 @@ its previous dispatch. Repeated notifications from one topic count only once;
 when all dependencies are ready, the scheduler enqueues one execution and
 resets that trigger's readiness. `kAny` continues to enqueue on each notification.
 
+## Task Dependency Triggers
+
+A task dependency refers to a registered component by its task name (the
+component name). For example, after registering and bringing up both components:
+
+```cpp
+core::TriggerSpec {
+    core::TriggerKind::kTaskDependency,
+    {},
+    core::DependencyPolicy::kAll,
+    {},
+    {core::TaskName::Unsafe("upstream")}
+}
+```
+
+A successful upstream execution marks that task ready for each downstream
+trigger. Failed executions do not propagate readiness. `kAny` dispatches once
+for each successful completion of any named upstream. `kAll` dispatches after
+every named upstream has completed successfully since the previous dispatch;
+repeated completions from one upstream count only once until the others finish.
+A downstream execution may in turn trigger another downstream task, allowing
+chains. `Stop()` and the next `Start()` discard partial readiness.
+
+`Start()` rejects unresolved dependencies, duplicate names within a dependency
+list, self-dependencies, and cycles in the registered task graph. Register all
+upstream components before starting the scheduler.
+
 ## Current Limitations
 
 The scheduler is intentionally small in this branch:
@@ -98,7 +122,6 @@ The scheduler is intentionally small in this branch:
 - no executor pool yet
 - no priority or deadline policy yet
 - no trigger coalescing policy yet
-- no task dependency graph yet
 
 Those should be built on top of the current queue and trigger model instead of
 being mixed into the first implementation.
