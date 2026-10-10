@@ -17,11 +17,18 @@ namespace puppet_master::scheduler {
 
 namespace {
 
-bool HasTrigger(const runtime::ComponentSpec& spec, core::TriggerKind kind)
+const core::TriggerSpec* FindTrigger(const runtime::ComponentSpec& spec, core::TriggerKind kind)
 {
-    return std::any_of(spec.triggers.begin(), spec.triggers.end(), [kind](const auto& trigger) {
+    const auto found = std::find_if(spec.triggers.begin(), spec.triggers.end(), [kind](const auto& trigger) {
         return trigger.kind == kind;
     });
+    return found == spec.triggers.end() ? nullptr : &*found;
+}
+
+core::Nanoseconds EffectiveDeadline(const core::TriggerSpec& trigger)
+{
+    return trigger.deadline > core::Nanoseconds::zero() ? trigger.deadline
+        : trigger.kind == core::TriggerKind::kPeriodic ? trigger.period : core::Nanoseconds::zero();
 }
 
 core::Result<transport::EndpointConfig> FindReaderEndpoint(
@@ -108,16 +115,22 @@ struct Scheduler::Impl {
     struct ScheduledEvent {
         core::ComponentName component;
         core::Nanoseconds deadline {0};
+        std::int32_t priority {0};
+        core::SteadyClock::time_point due_time {core::SteadyClock::time_point::max()};
     };
 
     struct DataTriggerState {
         core::DependencyPolicy policy;
         std::vector<bool> ready;
+        std::int32_t priority;
+        core::Nanoseconds deadline;
     };
 
     struct TaskTriggerState {
         core::DependencyPolicy policy;
         std::vector<bool> ready;
+        std::int32_t priority;
+        core::Nanoseconds deadline;
     };
 
     struct TaskDependent {
@@ -331,6 +344,7 @@ struct Scheduler::Impl {
 
     core::Status Trigger(const core::ComponentName& name)
     {
+        core::TriggerSpec manual;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!running || stopping) {
@@ -342,13 +356,16 @@ struct Scheduler::Impl {
                 return core::Status::NotFound("component is not registered in scheduler: " + name.str());
             }
 
-            if (!HasTrigger(found->second.spec, core::TriggerKind::kManual)) {
+            const auto* trigger = FindTrigger(found->second.spec, core::TriggerKind::kManual);
+            if (!trigger) {
                 return core::Status::FailedPrecondition(
                     "component has no manual trigger: " + name.str());
             }
+            // 多个手动声明时，使用声明顺序中的第一个。
+            manual = *trigger;
         }
 
-        return Enqueue(name, core::Nanoseconds::zero());
+        return Enqueue(name, EffectiveDeadline(manual), manual.priority);
     }
 
     core::Status WaitIdle(core::Nanoseconds timeout)
@@ -410,7 +427,9 @@ private:
                 const auto trigger_index = states[name].size();
                 states[name].push_back(TaskTriggerState {
                     trigger.dependency_policy,
-                    std::vector<bool>(trigger.task_dependencies.size(), false)
+                    std::vector<bool>(trigger.task_dependencies.size(), false),
+                    trigger.priority,
+                    EffectiveDeadline(trigger)
                 });
                 std::set<std::string> seen;
                 for (std::size_t index = 0; index < trigger.task_dependencies.size(); ++index) {
@@ -455,26 +474,31 @@ private:
         return core::Status::Ok();
     }
 
-    // Called with mutex held. An executing component may have one queued successor.
-    void QueueEvent(const core::ComponentName& name, core::Nanoseconds deadline)
+    // 持有互斥锁时调用；合并时保留首事件的全部属性。
+    void QueueEvent(const core::ComponentName& name, core::Nanoseconds deadline, std::int32_t priority)
     {
         if (!queued_components.insert(name.str()).second) {
             ++coalesced_events;
             return;
         }
-        pending_events.push_back(ScheduledEvent {name, deadline});
+        const auto queued_at = core::SteadyClock::now();
+        const auto due_time = deadline > core::Nanoseconds::zero()
+            ? queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline)
+            : core::SteadyClock::time_point::max();
+        pending_events.push_back(ScheduledEvent {name, deadline, priority, due_time});
         event_available.notify_one();
     }
 
     core::Status Enqueue(
         const core::ComponentName& name,
-        core::Nanoseconds deadline)
+        core::Nanoseconds deadline,
+        std::int32_t priority)
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (!running || stopping) {
             return RunningRequired();
         }
-        QueueEvent(name, deadline);
+        QueueEvent(name, deadline, priority);
         return core::Status::Ok();
     }
 
@@ -499,7 +523,7 @@ private:
                 }
             }
             if (enqueue) {
-                QueueEvent(name, core::Nanoseconds::zero());
+                QueueEvent(name, trigger.deadline, trigger.priority);
             }
         }
     }
@@ -533,7 +557,9 @@ private:
                     trigger_index = states.size();
                     states.push_back(DataTriggerState {
                         trigger.dependency_policy,
-                        std::vector<bool>(trigger.data_dependencies.size(), false)
+                        std::vector<bool>(trigger.data_dependencies.size(), false),
+                        trigger.priority,
+                        EffectiveDeadline(trigger)
                     });
                 }
 
@@ -575,7 +601,7 @@ private:
 
     core::Status StartPeriodicTriggers(std::weak_ptr<Impl> weak_self)
     {
-        std::vector<std::pair<core::ComponentName, core::Nanoseconds>> periodic_work;
+        std::vector<std::pair<core::ComponentName, core::TriggerSpec>> periodic_work;
 
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -584,7 +610,7 @@ private:
                     if (trigger.kind == core::TriggerKind::kPeriodic) {
                         periodic_work.emplace_back(
                             core::ComponentName::Unsafe(entry.first),
-                            trigger.period);
+                            trigger);
                     }
                 }
             }
@@ -601,7 +627,7 @@ private:
 
                     {
                         std::unique_lock<std::mutex> lock(self->mutex);
-                        const bool should_stop = self->periodic_stop.wait_for(lock, work.second, [self]() {
+                        const bool should_stop = self->periodic_stop.wait_for(lock, work.second.period, [self]() {
                             return !self->running || self->stopping;
                         });
                         if (should_stop) {
@@ -609,7 +635,7 @@ private:
                         }
                     }
 
-                    self->Enqueue(work.first, work.second);
+                    self->Enqueue(work.first, EffectiveDeadline(work.second), work.second.priority);
                 }
             });
         }
@@ -637,9 +663,14 @@ private:
 
                 auto selected = pending_events.end();
                 for (auto candidate = pending_events.begin(); candidate != pending_events.end(); ++candidate) {
-                    if (executing_components.find(candidate->component.str()) == executing_components.end()) {
+                    if (executing_components.find(candidate->component.str()) != executing_components.end()) {
+                        continue;
+                    }
+                    // 仅严格更优时替换，排序键相同时保留先入队事件。
+                    if (selected == pending_events.end()
+                        || candidate->priority > selected->priority
+                        || (candidate->priority == selected->priority && candidate->due_time < selected->due_time)) {
                         selected = candidate;
-                        break;
                     }
                 }
                 if (selected == pending_events.end()) {
@@ -684,7 +715,8 @@ private:
                             if (enqueue) {
                                 QueueEvent(
                                     core::ComponentName::Unsafe(dependent.component),
-                                    core::Nanoseconds::zero());
+                                    trigger.deadline,
+                                    trigger.priority);
                             }
                         }
                     }
@@ -737,7 +769,7 @@ private:
                     observability::LogLevel::kWarning,
                     event.component.str(),
                     "task_deadline_missed",
-                    "component execution exceeded its periodic deadline",
+                    "component execution exceeded its deadline",
                     {
                         {"execution_us", std::to_string(
                             std::chrono::duration_cast<std::chrono::microseconds>(

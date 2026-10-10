@@ -83,8 +83,20 @@ task-dependency trigger dispatch through `scheduler::Scheduler`. Events pass
 through a shared queue and a configurable worker pool calls
 `RuntimeContext::ExecuteComponent()`. Each component executes serially while
 different components may run in parallel, and each component has at most one
-pending successor event. Priority and deadline-based scheduling remain future
-work.
+pending successor event. Eligible queued events are selected by descending
+priority, then ascending absolute due time (enqueue time plus the effective
+relative deadline); exact ties retain FIFO order. The policy is non-preemptive.
+The concrete trigger declaration supplies both metadata fields, and coalescing
+retains the first event's complete metadata. Multiple manual declarations use
+the first declaration. A zero deadline uses the period for periodic triggers
+and means unbounded for other kinds; negative deadlines are invalid. Ordinary
+default-priority events without deadlines remain FIFO.
+
+This is not a real-time scheduler and does not guarantee deadline satisfaction
+or bounded waiting. Sustained higher-priority work can starve lower-priority
+events. Existing deadline-miss observation compares execution duration with the
+effective relative budget; queue waiting is not included in
+`RecordTaskExecution()` or its deadline-miss metrics.
 
 ### Configuration
 
