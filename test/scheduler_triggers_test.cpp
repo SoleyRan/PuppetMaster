@@ -1,6 +1,7 @@
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -873,6 +874,223 @@ void SameComponentExecutesSeriallyAndCoalescesTriggers()
     assert(sched.Stop().ok());
 }
 
+class OrderedComponent final : public runtime::Component {
+public:
+    OrderedComponent(runtime::ComponentSpec spec, std::vector<std::string>& order,
+                     std::atomic<bool>* release = nullptr)
+        : spec_(std::move(spec)), order_(order), release_(release)
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        return spec_;
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        entered.store(true);
+        if (release_) {
+            const auto timeout = core::SteadyClock::now() + std::chrono::seconds(5);
+            while (!release_->load() && core::SteadyClock::now() < timeout) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            if (!release_->load()) {
+                return core::Status::DeadlineExceeded("ordering test blocker timed out");
+            }
+        } else {
+            order_.push_back(spec_.name.str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return core::Status::Ok();
+    }
+
+    std::atomic<bool> entered {false};
+
+private:
+    runtime::ComponentSpec spec_;
+    std::vector<std::string>& order_;
+    std::atomic<bool>* release_;
+};
+
+core::TriggerSpec ManualPolicy(std::int32_t priority = 0, core::Nanoseconds deadline = {})
+{
+    return core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}, priority, deadline};
+}
+
+runtime::ComponentSpec OrderedSpec(const std::string& name, core::TriggerSpec trigger)
+{
+    return runtime::ComponentSpec {MakeComponentName(name), "records scheduler order", {}, {}, {trigger}};
+}
+
+void CheckQueuedOrder(
+    std::vector<runtime::ComponentSpec> specs,
+    const std::function<void(runtime::RuntimeContext&, scheduler::Scheduler&)>& enqueue,
+    const std::vector<std::string>& expected,
+    const std::function<void(const observability::MetricsSnapshot&)>& inspect = {})
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    std::vector<std::string> order;
+    std::atomic<bool> release {false};
+    const auto blocker_name = MakeComponentName("ordering_blocker");
+    auto blocker = std::make_shared<OrderedComponent>(
+        OrderedSpec(blocker_name.str(), ManualPolicy()), order, &release);
+    assert(context.value()->RegisterComponent(blocker).ok());
+    assert(BringUp(*context.value(), blocker_name).ok());
+    for (auto& spec : specs) {
+        const auto name = spec.name;
+        assert(context.value()->RegisterComponent(std::make_shared<OrderedComponent>(spec, order)).ok());
+        assert(BringUp(*context.value(), name).ok());
+    }
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(blocker_name).ok());
+    const auto timeout = core::SteadyClock::now() + std::chrono::milliseconds(500);
+    while (!blocker->entered.load() && core::SteadyClock::now() < timeout) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(blocker->entered.load());
+    enqueue(*context.value(), sched);
+    release.store(true);
+    assert(sched.WaitIdle(std::chrono::seconds(2)).ok());
+    assert(sched.last_error().ok());
+    assert(order == expected);
+    assert(sched.Stop().ok());
+    if (inspect) {
+        inspect(context.value()->observer()->Snapshot());
+    }
+}
+
+void PriorityAndFifoOrdering()
+{
+    auto first_manual = OrderedSpec("first_manual", ManualPolicy(3));
+    first_manual.triggers.push_back(ManualPolicy(100));
+    CheckQueuedOrder(
+        {OrderedSpec("low", ManualPolicy(-1, std::chrono::nanoseconds(1))),
+         OrderedSpec("tie_first", ManualPolicy()), OrderedSpec("high", ManualPolicy(9)),
+         OrderedSpec("tie_second", ManualPolicy()), first_manual},
+        [](runtime::RuntimeContext&, scheduler::Scheduler& sched) {
+            for (const auto* name : {"low", "tie_first", "high", "tie_second", "first_manual"}) {
+                assert(sched.Trigger(MakeComponentName(name)).ok());
+            }
+        },
+        {"high", "first_manual", "tie_first", "tie_second", "low"});
+}
+
+void AbsoluteDeadlineOrderingAndCoalescing()
+{
+    CheckQueuedOrder(
+        {OrderedSpec("early", ManualPolicy(0, std::chrono::milliseconds(200))),
+         OrderedSpec("shorter", ManualPolicy(0, std::chrono::milliseconds(100))),
+         OrderedSpec("unbounded", ManualPolicy())},
+        [](runtime::RuntimeContext&, scheduler::Scheduler& sched) {
+            assert(sched.Trigger(MakeComponentName("unbounded")).ok());
+            assert(sched.Trigger(MakeComponentName("early")).ok());
+            // 后入队的短预算仍有更晚的绝对截止时间；重复触发不得刷新首事件。
+            const auto later = core::SteadyClock::now() + std::chrono::milliseconds(250);
+            std::this_thread::sleep_until(later);
+            assert(sched.Trigger(MakeComponentName("shorter")).ok());
+            assert(sched.Trigger(MakeComponentName("early")).ok());
+            assert(sched.stats().coalesced_events == 1);
+        },
+        {"early", "shorter", "unbounded"},
+        [](const observability::MetricsSnapshot& snapshot) {
+            for (const auto& task : snapshot.tasks) {
+                if (task.task_name == "early") {
+                    assert(task.deadline_misses == 0);
+                    return;
+                }
+            }
+            assert(false);
+        });
+}
+
+void NonperiodicDeadlineAndCoalescedMetadata()
+{
+    const auto endpoint = MakeEndpoint("/scheduler/ordering_metadata");
+    auto mixed = OrderedSpec("mixed", ManualPolicy(-1, std::chrono::nanoseconds(1)));
+    mixed.readers.push_back(endpoint);
+    mixed.triggers.push_back(core::TriggerSpec {
+        core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+        {endpoint.topic.name}, {}, 10, std::chrono::seconds(1)});
+    CheckQueuedOrder(
+        {mixed, OrderedSpec("ordinary", ManualPolicy())},
+        [endpoint](runtime::RuntimeContext& context, scheduler::Scheduler& sched) {
+            assert(sched.Trigger(MakeComponentName("mixed")).ok());
+            auto writer = context.CreateWriter(endpoint);
+            assert(writer.ok());
+            const std::string payload = "metadata";
+            assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+            const auto timeout = core::SteadyClock::now() + std::chrono::milliseconds(500);
+            while (sched.stats().coalesced_events == 0 && core::SteadyClock::now() < timeout) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(sched.stats().coalesced_events == 1);
+            assert(sched.Trigger(MakeComponentName("ordinary")).ok());
+        },
+        {"ordinary", "mixed"},
+        [](const observability::MetricsSnapshot& snapshot) {
+            for (const auto& task : snapshot.tasks) {
+                if (task.task_name == "mixed") {
+                    assert(task.executions == 1);
+                    assert(task.deadline_misses == 1);
+                    return;
+                }
+            }
+            assert(false);
+        });
+}
+
+void DataAndTaskPoliciesReachQueue()
+{
+    const auto endpoint = MakeEndpoint("/scheduler/ordering_data");
+    auto data = OrderedSpec("data", core::TriggerSpec {
+        core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+        {endpoint.topic.name}, {}, 0, std::chrono::seconds(1)});
+    data.readers.push_back(endpoint);
+    auto task = OrderedSpec("dependent", core::TriggerSpec {
+        core::TriggerKind::kTaskDependency, {}, core::DependencyPolicy::kAll, {},
+        {core::TaskName::Unsafe("ordering_blocker")}, 5, core::Nanoseconds(1)});
+    CheckQueuedOrder(
+        {data, task, OrderedSpec("ordinary", ManualPolicy())},
+        [endpoint](runtime::RuntimeContext& context, scheduler::Scheduler& sched) {
+            assert(sched.Trigger(MakeComponentName("ordinary")).ok());
+            auto writer = context.CreateWriter(endpoint);
+            assert(writer.ok());
+            const std::string payload = "data";
+            assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+            const auto timeout = core::SteadyClock::now() + std::chrono::milliseconds(500);
+            while (sched.stats().pending_events < 2 && core::SteadyClock::now() < timeout) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(sched.stats().pending_events == 2);
+        },
+        {"dependent", "data", "ordinary"},
+        [](const observability::MetricsSnapshot& snapshot) {
+            for (const auto& task : snapshot.tasks) {
+                if (task.task_name == "dependent") {
+                    assert(task.deadline_misses == 1);
+                    return;
+                }
+            }
+            assert(false);
+        });
+}
+
+void NegativeDeadlineIsRejected()
+{
+    for (const auto kind : {core::TriggerKind::kManual, core::TriggerKind::kPeriodic,
+                           core::TriggerKind::kData, core::TriggerKind::kTaskDependency}) {
+        core::TriggerSpec trigger {kind, std::chrono::milliseconds(1), {}, {}, {}, 0,
+                                   core::Nanoseconds(-1)};
+        assert(trigger.Validate().code() == core::StatusCode::kInvalidArgument);
+        trigger.deadline = core::Nanoseconds::zero();
+        assert(trigger.Validate().ok());
+    }
+}
+
 void ZeroWorkerCountIsRejected()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -903,6 +1121,11 @@ int main()
     TaskReadinessResetsAfterRestart();
     ParallelWorkersExecuteDifferentComponents();
     SameComponentExecutesSeriallyAndCoalescesTriggers();
+    PriorityAndFifoOrdering();
+    AbsoluteDeadlineOrderingAndCoalescing();
+    NonperiodicDeadlineAndCoalescedMetadata();
+    DataAndTaskPoliciesReachQueue();
+    NegativeDeadlineIsRejected();
     ZeroWorkerCountIsRejected();
     return 0;
 }

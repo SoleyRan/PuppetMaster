@@ -235,11 +235,16 @@ struct TriggerSpec {
     DependencyPolicy dependency_policy {DependencyPolicy::kAll};
     std::vector<TopicName> data_dependencies;
     std::vector<TaskName> task_dependencies;
+    std::int32_t priority {0};
+    Nanoseconds deadline {0};
 
     Status Validate() const
     {
         if (kind == TriggerKind::kPeriodic && period <= Nanoseconds::zero()) {
             return Status::InvalidArgument("periodic trigger period must be greater than zero");
+        }
+        if (deadline < Nanoseconds::zero()) {
+            return Status::InvalidArgument("trigger deadline must not be negative");
         }
         return Status::Ok();
     }

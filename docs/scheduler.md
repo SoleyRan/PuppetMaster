@@ -16,6 +16,8 @@ This milestone adds:
 - a configurable worker pool (one worker by default)
 - per-component serial execution with cross-component parallelism
 - trigger coalescing with a per-component pending-event bound
+- priority and relative deadline metadata for trigger events
+- non-preemptive priority/deadline queue ordering
 - scheduler stats, including a coalesced-event counter, and idle waiting
 
 ## Execution Model
@@ -36,15 +38,29 @@ The scheduler reads component specs from `RuntimeContext`, validates their
 triggers, then converts readiness events into `RuntimeContext::ExecuteComponent`
 calls.
 
-All trigger events pass through one queue. By default, one worker executes
-components in sequence, preserving existing behavior. Pass
+All trigger events pass through one queue. `TriggerSpec` has optional trailing
+`priority` (`std::int32_t`, default 0) and `deadline` (`Nanoseconds`, default
+zero) fields; existing five-field aggregate initializers remain valid. Higher
+priority is dispatched first. Among events with equal priority, the scheduler
+chooses the earliest absolute due time, computed when an event is enqueued as
+the enqueue time plus its effective relative deadline. Zero means no explicit
+deadline: periodic triggers then use their period as the budget, while manual,
+data, and task-dependency triggers remain unbounded. Negative deadlines are
+rejected by `TriggerSpec::Validate()`. Unbounded events sort after bounded
+events of the same priority, and exact ties retain FIFO enqueue order. With
+default priorities and no deadlines, ordinary events remain FIFO. Dispatch is
+non-preemptive: metadata affects only the next eligible event, not work already
+executing.
+
+By default, one worker executes components in sequence. Pass
 `SchedulerOptions {worker_count}` to the constructor to run different components
 in parallel. Workers reserve a component before taking its next queued event:
 events for the same component never execute concurrently, even across trigger
-kinds. `worker_count == 0` is rejected by `Start()` with `InvalidArgument`.
-`WaitIdle()` waits until both queued and executing events (including dependency
-propagation) are finished; a positive timeout returns `DeadlineExceeded` if
-work is still in progress.
+kinds. Ordering applies among currently eligible components; a queued event for
+an executing component waits until that component is free. `worker_count == 0`
+is rejected by `Start()` with `InvalidArgument`. `WaitIdle()` waits until both
+queued and executing events (including dependency propagation) are finished; a
+positive timeout returns `DeadlineExceeded` if work is still in progress.
 
 ## Trigger Coalescing
 
@@ -56,9 +72,10 @@ successor; additional triggers while that successor is present are collapsed
 into it and counted in `SchedulerStats::coalesced_events`.
 
 This bounds the backlog for a slow component even when timers or data callbacks
-fire faster than it can finish. The first accepted event supplies the stored
-deadline; later coalesced triggers do not replace, shorten, or extend that
-deadline.
+fire faster than it can finish. The first accepted event supplies all stored
+metadata: priority, effective relative deadline, and absolute due time. Later
+coalesced triggers do not replace any of these values, even when they come from
+a different trigger declaration or have a higher priority or earlier deadline.
 
 Coalescing applies only after a trigger's readiness rule has been evaluated.
 Multi-topic and multi-task `kAll` policies still track each dependency
@@ -79,7 +96,9 @@ sched.Trigger(component_name);
 sched.WaitIdle(std::chrono::milliseconds(500));
 ```
 
-`Trigger()` only accepts components that declare a manual trigger.
+`Trigger()` only accepts components that declare a manual trigger. If a
+component declares multiple manual triggers, `Trigger()` uses the first one in
+declaration order for priority and deadline.
 
 ## Periodic Triggers
 
@@ -146,11 +165,15 @@ chains. `Stop()` and the next `Start()` discard partial readiness.
 list, self-dependencies, and cycles in the registered task graph. Register all
 upstream components before starting the scheduler.
 
-## Current Limitations
+## Deadline Observation and Limitations
 
-The scheduler is intentionally small in this branch:
+`RecordTaskExecution()` measures only `ExecuteComponent()` duration. Its
+deadline-miss metric compares that duration with the event's effective relative
+budget, not with the absolute due time used for queue ordering. Time waiting in
+the queue is not included: an event can execute after its due time without an
+execution deadline miss.
 
-- no priority or deadline-based scheduling policy yet
-
-That policy should be built on top of the current queue and trigger model rather
-than being mixed into trigger dispatch.
+This policy is not a real-time guarantee. Dispatch cannot preempt a running
+component, deadlines do not force timely execution, and sustained
+higher-priority work can starve lower-priority events. The scheduler does not
+promise bounded queue waiting or deadline satisfaction.
