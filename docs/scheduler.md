@@ -86,6 +86,10 @@ grow an unconsumed queue. The component still owns its normal reader and can
 consume the actual message during `Execute()`.
 
 This design keeps scheduler readiness separate from component data consumption.
+For a multi-topic `kAll` trigger, each dependency must report new data since
+its previous dispatch. Repeated notifications from one topic count only once;
+when all dependencies are ready, the scheduler enqueues one execution and
+resets that trigger's readiness. `kAny` continues to enqueue on each notification.
 
 ## Current Limitations
 
@@ -94,7 +98,6 @@ The scheduler is intentionally small in this branch:
 - no executor pool yet
 - no priority or deadline policy yet
 - no trigger coalescing policy yet
-- no multi-topic `kAll` data dependency support yet
 - no task dependency graph yet
 
 Those should be built on top of the current queue and trigger model instead of
