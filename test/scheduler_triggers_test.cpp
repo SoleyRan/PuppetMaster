@@ -201,6 +201,41 @@ private:
     int execute_count_ {0};
 };
 
+class MultiTopicCounter final : public runtime::Component {
+public:
+    MultiTopicCounter(core::ComponentName name, transport::EndpointConfig first, transport::EndpointConfig second)
+        : spec_ {
+            std::move(name), "counts complete data dependency sets",
+            {std::move(first), std::move(second)}, {}, {}
+        }
+    {
+        spec_.triggers = {core::TriggerSpec {
+            core::TriggerKind::kData, {}, core::DependencyPolicy::kAll,
+            {spec_.readers[0].topic.name, spec_.readers[1].topic.name}, {}
+        }};
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        return spec_;
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        ++execute_count_;
+        return core::Status::Ok();
+    }
+
+    int execute_count() const noexcept
+    {
+        return execute_count_;
+    }
+
+private:
+    runtime::ComponentSpec spec_;
+    int execute_count_ {0};
+};
+
 void ManualTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -320,6 +355,56 @@ void DataTriggerExecutesComponent()
     assert(sched.Stop().ok());
 }
 
+void AllDataTriggerWaitsForEveryTopic()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto first = MakeEndpoint("/scheduler/all-first");
+    const auto second = MakeEndpoint("/scheduler/all-second");
+    const auto name = MakeComponentName("all_data_consumer");
+    auto component = std::make_shared<MultiTopicCounter>(name, first, second);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+
+    auto first_writer = context.value()->CreateWriter(first);
+    auto second_writer = context.value()->CreateWriter(second);
+    assert(first_writer.ok());
+    assert(second_writer.ok());
+
+    const std::string first_payload = "first";
+    const std::string second_payload = "second";
+    assert(first_writer.value()->Write(transport::ByteView::From(
+        first_payload.data(), first_payload.size())).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 0);
+    assert(first_writer.value()->Write(transport::ByteView::From(
+        first_payload.data(), first_payload.size())).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 0);
+
+    assert(second_writer.value()->Write(transport::ByteView::From(
+        second_payload.data(), second_payload.size())).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 1);
+
+    assert(first_writer.value()->Write(transport::ByteView::From(
+        first_payload.data(), first_payload.size())).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(50)).ok());
+    assert(component->execute_count() == 1);
+
+    assert(second_writer.value()->Write(transport::ByteView::From(
+        second_payload.data(), second_payload.size())).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->execute_count() == 2);
+
+    assert(sched.Stop().ok());
+}
+
 void UnsupportedTaskDependencyIsRejected()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -349,6 +434,7 @@ int main()
     PeriodicTriggerExecutesComponent();
     PeriodicDeadlineMissIsObservable();
     DataTriggerExecutesComponent();
+    AllDataTriggerWaitsForEveryTopic();
     UnsupportedTaskDependencyIsRejected();
     return 0;
 }

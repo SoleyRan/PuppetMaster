@@ -63,12 +63,6 @@ core::Status ValidateTrigger(const runtime::ComponentSpec& spec, const core::Tri
             return core::Status::InvalidArgument("data trigger requires at least one topic dependency");
         }
 
-        if (trigger.dependency_policy == core::DependencyPolicy::kAll
-            && trigger.data_dependencies.size() > 1) {
-            return core::Status::Unsupported(
-                "data trigger with kAll and multiple dependencies is not implemented yet");
-        }
-
         for (const auto& topic : trigger.data_dependencies) {
             auto endpoint = FindReaderEndpoint(spec, topic);
             if (!endpoint.ok()) {
@@ -114,6 +108,11 @@ struct Scheduler::Impl {
         core::Nanoseconds deadline {0};
     };
 
+    struct DataTriggerState {
+        core::DependencyPolicy policy;
+        std::vector<bool> ready;
+    };
+
     struct ScheduledComponent {
         explicit ScheduledComponent(runtime::ComponentSpec component_spec)
             : spec(std::move(component_spec))
@@ -122,6 +121,7 @@ struct Scheduler::Impl {
 
         runtime::ComponentSpec spec;
         std::vector<transport::ReaderPtr> data_trigger_readers;
+        std::vector<DataTriggerState> data_triggers;
         std::shared_ptr<std::mutex> execute_mutex {std::make_shared<std::mutex>()};
     };
 
@@ -251,6 +251,7 @@ struct Scheduler::Impl {
             active_events = 0;
             for (auto& entry : components) {
                 entry.second.data_trigger_readers.clear();
+                entry.second.data_triggers.clear();
             }
             stopping = false;
         }
@@ -353,6 +354,35 @@ private:
         return core::Status::Ok();
     }
 
+    void OnDataAvailable(const core::ComponentName& name, std::size_t trigger_index, std::size_t topic_index)
+    {
+        bool enqueue = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!running || stopping) {
+                return;
+            }
+            auto& trigger = components.at(name.str()).data_triggers.at(trigger_index);
+            if (trigger.policy == core::DependencyPolicy::kAny) {
+                enqueue = true;
+            } else {
+                trigger.ready[topic_index] = true;
+                enqueue = std::all_of(trigger.ready.begin(), trigger.ready.end(), [](bool ready) {
+                    return ready;
+                });
+                if (enqueue) {
+                    std::fill(trigger.ready.begin(), trigger.ready.end(), false);
+                }
+            }
+            if (enqueue) {
+                pending_events.push_back(ScheduledEvent {name, core::Nanoseconds::zero()});
+            }
+        }
+        if (enqueue) {
+            event_available.notify_one();
+        }
+    }
+
     core::Status InstallDataTriggers(std::weak_ptr<Impl> weak_self)
     {
         std::vector<core::ComponentName> names;
@@ -375,7 +405,19 @@ private:
                     continue;
                 }
 
-                for (const auto& topic : trigger.data_dependencies) {
+                std::size_t trigger_index;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    auto& states = components.at(name.str()).data_triggers;
+                    trigger_index = states.size();
+                    states.push_back(DataTriggerState {
+                        trigger.dependency_policy,
+                        std::vector<bool>(trigger.data_dependencies.size(), false)
+                    });
+                }
+
+                for (std::size_t topic_index = 0; topic_index < trigger.data_dependencies.size(); ++topic_index) {
+                    const auto& topic = trigger.data_dependencies[topic_index];
                     auto endpoint = FindReaderEndpoint(spec.value(), topic);
                     if (!endpoint.ok()) {
                         return endpoint.status();
@@ -386,11 +428,12 @@ private:
                         return reader.status();
                     }
 
-                    auto status = reader.value()->SetDataAvailableCallback([weak_self, name]() {
-                        if (auto self = weak_self.lock()) {
-                            self->Enqueue(name, core::Nanoseconds::zero());
-                        }
-                    });
+                    auto status = reader.value()->SetDataAvailableCallback(
+                        [weak_self, name, trigger_index, topic_index]() {
+                            if (auto self = weak_self.lock()) {
+                                self->OnDataAvailable(name, trigger_index, topic_index);
+                            }
+                        });
                     if (!status.ok()) {
                         return status;
                     }
