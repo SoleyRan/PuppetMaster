@@ -85,9 +85,8 @@ void ApplyEndpointQos(const QosProfile& profile,
 }
 
 // State shared between a FastDdsReader handle, its DDS listener and the
-// owning transport. Two locks keep the listener thread away from DDS calls:
-// signal_mutex guards notification state only, entity_mutex guards the
-// DataReader pointer and every DDS call made through it.
+// owning transport. signal_mutex guards notification state; entity_mutex
+// guards the DataReader pointer and DDS calls made through it.
 struct ReaderState {
     class Listener final : public dds::DataReaderListener {
     public:
@@ -98,6 +97,9 @@ struct ReaderState {
             DataAvailableCallback callback;
             {
                 std::lock_guard<std::mutex> lock(state_.signal_mutex);
+                if (state_.closed) {
+                    return;
+                }
                 ++state_.generation;
                 callback = state_.callback;
             }
@@ -119,6 +121,7 @@ struct ReaderState {
     std::uint64_t generation {0};
     bool closed {false};
 
+    std::mutex shutdown_mutex;
     std::mutex entity_mutex;
     dds::Subscriber* subscriber {nullptr};
     dds::DataReader* reader {nullptr};
@@ -131,15 +134,25 @@ struct ReaderState {
         {
             std::lock_guard<std::mutex> lock(signal_mutex);
             closed = true;
+            callback = {};
         }
         cv.notify_all();
 
-        std::lock_guard<std::mutex> lock(entity_mutex);
-        if (reader != nullptr && subscriber != nullptr) {
-            subscriber->delete_datareader(reader);
+        // Release signal_mutex before deletion, which may wait for an in-flight listener.
+        std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex);
+        dds::DataReader* detached_reader;
+        dds::Subscriber* detached_subscriber;
+        {
+            std::lock_guard<std::mutex> lock(entity_mutex);
+            detached_reader = reader;
+            detached_subscriber = subscriber;
+            reader = nullptr;
+            subscriber = nullptr;
         }
-        reader = nullptr;
-        subscriber = nullptr;
+        // Deletion can wait for an in-flight listener that calls back into this reader.
+        if (detached_reader != nullptr && detached_subscriber != nullptr) {
+            detached_subscriber->delete_datareader(detached_reader);
+        }
     }
 };
 
@@ -216,6 +229,9 @@ public:
     core::Status SetDataAvailableCallback(DataAvailableCallback callback) override
     {
         std::lock_guard<std::mutex> lock(state_->signal_mutex);
+        if (state_->closed) {
+            return core::Status::Unavailable("FastDDS reader is closed");
+        }
         state_->callback = std::move(callback);
         return core::Status::Ok();
     }
@@ -328,7 +344,9 @@ struct FastDdsTransport::Impl {
     dds::Publisher* publisher {nullptr};
     dds::Subscriber* subscriber {nullptr};
 
-    std::mutex mutex;
+    std::mutex lifecycle_mutex;
+    mutable std::mutex mutex;
+    bool closing {false};
     std::map<std::string, TopicEntry> topics;
     std::set<std::string> registered_types;
     std::vector<std::weak_ptr<ReaderState>> readers;
@@ -455,6 +473,8 @@ core::Status FastDdsTransport::Open()
     if (!status.ok()) {
         return status;
     }
+    std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->participant != nullptr) {
         return core::Status::Ok();
     }
@@ -471,7 +491,16 @@ core::Status FastDdsTransport::Open()
     impl_->publisher = impl_->participant->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
     impl_->subscriber = impl_->participant->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
     if (impl_->publisher == nullptr || impl_->subscriber == nullptr) {
-        Close();
+        if (impl_->publisher != nullptr) {
+            impl_->participant->delete_publisher(impl_->publisher);
+            impl_->publisher = nullptr;
+        }
+        if (impl_->subscriber != nullptr) {
+            impl_->participant->delete_subscriber(impl_->subscriber);
+            impl_->subscriber = nullptr;
+        }
+        dds::DomainParticipantFactory::get_instance()->delete_participant(impl_->participant);
+        impl_->participant = nullptr;
         return core::Status::Unavailable("failed to create FastDDS publisher/subscriber");
     }
     return core::Status::Ok();
@@ -479,17 +508,19 @@ core::Status FastDdsTransport::Open()
 
 core::Status FastDdsTransport::Close() noexcept
 {
-    if (impl_->participant == nullptr) {
-        return core::Status::Ok();
-    }
-
+    std::lock_guard<std::mutex> lifecycle_lock(impl_->lifecycle_mutex);
     std::vector<std::weak_ptr<ReaderState>> readers;
     std::vector<std::weak_ptr<WriterState>> writers;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (impl_->participant == nullptr) {
+            return core::Status::Ok();
+        }
+        impl_->closing = true;
         readers.swap(impl_->readers);
         writers.swap(impl_->writers);
     }
+
     // Endpoint handles may outlive the transport; detach them from DDS first.
     for (auto& weak : readers) {
         if (auto state = weak.lock()) {
@@ -502,14 +533,16 @@ core::Status FastDdsTransport::Close() noexcept
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
-        for (auto& entry : impl_->topics) {
-            impl_->participant->delete_topic(entry.second.topic);
-        }
-        impl_->topics.clear();
-        impl_->registered_types.clear();
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->participant == nullptr) {
+        return core::Status::Ok();
     }
+
+    for (auto& entry : impl_->topics) {
+        impl_->participant->delete_topic(entry.second.topic);
+    }
+    impl_->topics.clear();
+    impl_->registered_types.clear();
 
     if (impl_->publisher != nullptr) {
         impl_->participant->delete_publisher(impl_->publisher);
@@ -521,12 +554,15 @@ core::Status FastDdsTransport::Close() noexcept
     impl_->publisher = nullptr;
     impl_->subscriber = nullptr;
     impl_->participant = nullptr;
+    impl_->closing = false;
     return core::Status::Ok();
 }
 
+
 bool FastDdsTransport::is_open() const noexcept
 {
-    return impl_->participant != nullptr;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->participant != nullptr && !impl_->closing;
 }
 
 core::Status FastDdsTransport::ValidateEndpoint(const EndpointConfig& endpoint) const
@@ -558,6 +594,10 @@ core::Result<ReaderPtr> FastDdsTransport::CreateReader(const EndpointConfig& end
     const QosProfile profile = MapMessagePolicy(endpoint.topic.message_policy, options_.durability).value();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->participant == nullptr || impl_->closing) {
+        return core::Result<ReaderPtr>::FromStatus(
+            core::Status::FailedPrecondition("FastDDS transport must be open before creating readers"));
+    }
     auto topic = impl_->EnsureTopic(endpoint);
     if (!topic.ok()) {
         return core::Result<ReaderPtr>::FromStatus(topic.status());
@@ -593,6 +633,10 @@ core::Result<WriterPtr> FastDdsTransport::CreateWriter(const EndpointConfig& end
     const QosProfile profile = MapWriterMessagePolicy(endpoint.topic.message_policy, options_.durability).value();
 
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->participant == nullptr || impl_->closing) {
+        return core::Result<WriterPtr>::FromStatus(
+            core::Status::FailedPrecondition("FastDDS transport must be open before creating writers"));
+    }
     auto topic = impl_->EnsureTopic(endpoint);
     if (!topic.ok()) {
         return core::Result<WriterPtr>::FromStatus(topic.status());
