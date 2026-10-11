@@ -9,7 +9,7 @@ find_dependency(Threads REQUIRED)
 
 if(PUPPETMASTER_WITH_FASTDDS)
     find_dependency(fastcdr CONFIG REQUIRED)
-    find_dependency(fastdds CONFIG QUIET)
+    find_package(fastdds CONFIG QUIET)
     if(NOT fastdds_FOUND)
         find_dependency(fastrtps CONFIG REQUIRED)
     endif()
