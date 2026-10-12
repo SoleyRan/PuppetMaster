@@ -117,6 +117,7 @@ struct Scheduler::Impl {
         core::Nanoseconds deadline {0};
         std::int32_t priority {0};
         core::SteadyClock::time_point due_time {core::SteadyClock::time_point::max()};
+        core::SteadyClock::time_point queued_at {};
     };
 
     struct DataTriggerState {
@@ -485,7 +486,7 @@ private:
         const auto due_time = deadline > core::Nanoseconds::zero()
             ? queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline)
             : core::SteadyClock::time_point::max();
-        pending_events.push_back(ScheduledEvent {name, deadline, priority, due_time});
+        pending_events.push_back(ScheduledEvent {name, deadline, priority, due_time, queued_at});
         event_available.notify_one();
     }
 
@@ -737,8 +738,12 @@ private:
     {
         const auto started_at = core::SteadyClock::now();
         auto status = runtime.ExecuteComponent(event.component);
+        const auto completed_at = core::SteadyClock::now();
+        const auto queue_wait = std::chrono::duration_cast<core::Nanoseconds>(
+            started_at - event.queued_at);
         const auto execution_time = std::chrono::duration_cast<core::Nanoseconds>(
-            core::SteadyClock::now() - started_at);
+            completed_at - started_at);
+        const auto response_time = queue_wait + execution_time;
 
         const auto observer = runtime.observer();
         if (observer) {
@@ -746,7 +751,10 @@ private:
                 event.component,
                 execution_time,
                 event.deadline,
-                status.ok());
+                status.ok(),
+                queue_wait,
+                core::TimePoint(std::chrono::duration_cast<core::Nanoseconds>(
+                    completed_at.time_since_epoch())));
 
             if (!status.ok()) {
                 observer->Log(observability::LogRecord {
@@ -764,16 +772,22 @@ private:
             }
 
             if (event.deadline > core::Nanoseconds::zero()
-                && execution_time > event.deadline) {
+                && response_time > event.deadline) {
                 observer->Log(observability::LogRecord {
                     observability::LogLevel::kWarning,
                     event.component.str(),
                     "task_deadline_missed",
-                    "component execution exceeded its deadline",
+                    "component response exceeded its deadline",
                     {
                         {"execution_us", std::to_string(
                             std::chrono::duration_cast<std::chrono::microseconds>(
                                 execution_time).count())},
+                        {"queue_wait_us", std::to_string(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                queue_wait).count())},
+                        {"response_us", std::to_string(
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                response_time).count())},
                         {"deadline_us", std::to_string(
                             std::chrono::duration_cast<std::chrono::microseconds>(
                                 event.deadline).count())},

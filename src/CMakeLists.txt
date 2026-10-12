@@ -19,6 +19,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/types.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/chrome_trace_exporter.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/goodlog_sink.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/observability.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/component.h"
@@ -99,6 +100,56 @@ install(
 if(PUPPETMASTER_ENABLE_FASTDDS)
     add_subdirectory(transport/fastdds)
 endif()
+
+add_library(puppet_master_chrome_trace_adapter
+    observability/chrome_trace_exporter.cpp
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/chrome_trace_exporter.h"
+)
+
+add_library(PuppetMaster::ChromeTraceAdapter ALIAS puppet_master_chrome_trace_adapter)
+
+target_compile_features(puppet_master_chrome_trace_adapter PUBLIC cxx_std_17)
+
+target_link_libraries(puppet_master_chrome_trace_adapter
+    PUBLIC PuppetMaster::PuppetMaster
+)
+
+target_compile_definitions(puppet_master_chrome_trace_adapter
+    PRIVATE PUPPET_MASTER_EXPORTS
+)
+
+if(NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(puppet_master_chrome_trace_adapter PUBLIC PUPPET_MASTER_STATIC_DEFINE)
+endif()
+
+target_include_directories(puppet_master_chrome_trace_adapter
+    PUBLIC
+        "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+)
+
+if(MSVC)
+    target_compile_options(puppet_master_chrome_trace_adapter PRIVATE /W4 /permissive-)
+else()
+    target_compile_options(puppet_master_chrome_trace_adapter PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+set_target_properties(puppet_master_chrome_trace_adapter
+    PROPERTIES
+        EXPORT_NAME ChromeTraceAdapter
+        OUTPUT_NAME puppet_master_chrome_trace_adapter
+        POSITION_INDEPENDENT_CODE ON
+        VERSION "${PROJECT_VERSION}"
+        SOVERSION "${PROJECT_VERSION_MAJOR}"
+)
+
+install(
+    TARGETS puppet_master_chrome_trace_adapter
+    EXPORT PuppetMasterTargets
+    ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
 
 if(PUPPETMASTER_ENABLE_GOODLOG)
     add_library(puppet_master_goodlog_adapter
