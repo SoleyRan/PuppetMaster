@@ -11,6 +11,19 @@ Enable the adapter with:
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
 ```
 
+For an explicit cross-process UDP smoke executable (used by the FastDDS CI
+job), also enable:
+
+```bash
+cmake -S . -B build \
+  -DPUPPETMASTER_ENABLE_FASTDDS=ON \
+  -DPUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE=ON
+```
+
+The smoke executable starts independent publisher and subscriber processes and
+checks binary payload transfer, acknowledgement, and read timeout behavior.
+It is intentionally opt-in because discovery depends on the host network.
+
 When enabled, PuppetMaster builds an additional target:
 
 ```cmake

@@ -35,6 +35,8 @@ jobs:
         include:
           - fastdds: v2.14.4
             fastcdr: v2.2.5
+          - fastdds: v3.2.2
+            fastcdr: v2.3.3
     env:
       DEPS_PREFIX: ${{ github.workspace }}/deps-install
     steps:
@@ -78,6 +80,7 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DPUPPETMASTER_ENABLE_FASTDDS=ON \
+            -DPUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE=ON \
             -DCMAKE_PREFIX_PATH="$DEPS_PREFIX"
 
       - name: Build
@@ -87,6 +90,11 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
         run: ctest --test-dir build --output-on-failure
+
+      - name: Cross-process UDP smoke
+        env:
+          LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
+        run: timeout 45s build/test/puppet_master_fastdds_cross_process_smoke
 
       - name: Install and verify downstream consumer
         env:

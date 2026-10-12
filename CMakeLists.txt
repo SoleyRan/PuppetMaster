@@ -23,6 +23,8 @@ endif()
 option(PUPPETMASTER_BUILD_DEMOS "Build PuppetMaster example programs." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_BUILD_TESTS "Build PuppetMaster tests." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_ENABLE_FASTDDS "Build the optional FastDDS transport adapter." OFF)
+option(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE
+    "Build the opt-in FastDDS cross-process smoke executable." OFF)
 option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
 set(
     PUPPETMASTER_GOODLOG_GIT_TAG
