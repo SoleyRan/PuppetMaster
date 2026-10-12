@@ -111,6 +111,8 @@ struct Observer::Impl {
     struct TaskAccumulator {
         TaskMetrics metrics;
         core::Nanoseconds total_execution_time {0};
+        core::Nanoseconds total_queue_wait {0};
+        core::Nanoseconds total_response_time {0};
     };
 
     explicit Impl(Options observer_options)
@@ -165,6 +167,15 @@ struct Observer::Impl {
                 task.total_execution_time += event.duration;
                 task.metrics.max_execution_time =
                     std::max(task.metrics.max_execution_time, event.duration);
+                task.metrics.last_queue_wait = event.queue_wait;
+                task.total_queue_wait += event.queue_wait;
+                task.metrics.max_queue_wait =
+                    std::max(task.metrics.max_queue_wait, event.queue_wait);
+                const auto response_time = event.queue_wait + event.duration;
+                task.metrics.last_response_time = response_time;
+                task.total_response_time += response_time;
+                task.metrics.max_response_time =
+                    std::max(task.metrics.max_response_time, response_time);
                 break;
             }
             case EventKind::kDeadlineMiss: {
@@ -203,6 +214,10 @@ struct Observer::Impl {
             auto metrics = entry.second.metrics;
             metrics.average_execution_time =
                 AverageDuration(entry.second.total_execution_time, metrics.executions);
+            metrics.average_queue_wait =
+                AverageDuration(entry.second.total_queue_wait, metrics.executions);
+            metrics.average_response_time =
+                AverageDuration(entry.second.total_response_time, metrics.executions);
             snapshot.tasks.push_back(std::move(metrics));
         }
 
@@ -322,7 +337,8 @@ void Observer::RecordTaskExecution(
     const core::ComponentName& component,
     core::Nanoseconds duration,
     core::Nanoseconds deadline,
-    bool success)
+    bool success,
+    core::Nanoseconds queue_wait)
 {
     Event execution;
     execution.kind = EventKind::kTaskExecution;
@@ -331,9 +347,10 @@ void Observer::RecordTaskExecution(
     execution.duration_available = true;
     execution.deadline = deadline;
     execution.success = success;
+    execution.queue_wait = queue_wait;
     Emit(execution);
 
-    if (deadline > core::Nanoseconds::zero() && duration > deadline) {
+    if (deadline > core::Nanoseconds::zero() && queue_wait + duration > deadline) {
         Event miss = execution;
         miss.kind = EventKind::kDeadlineMiss;
         Emit(std::move(miss));

@@ -999,12 +999,100 @@ void AbsoluteDeadlineOrderingAndCoalescing()
         [](const observability::MetricsSnapshot& snapshot) {
             for (const auto& task : snapshot.tasks) {
                 if (task.task_name == "early") {
-                    assert(task.deadline_misses == 0);
+                    assert(task.deadline_misses == 1);
+                    assert(task.last_queue_wait > std::chrono::milliseconds(200));
+                    assert(task.last_response_time == task.last_queue_wait + task.last_execution_time);
                     return;
                 }
             }
             assert(false);
         });
+}
+
+void QueuedDeadlineMissMatchesEventsAndLog()
+{
+    std::vector<observability::Event> events;
+    std::vector<observability::LogRecord> logs;
+    runtime::RuntimeOptions options;
+    options.observability_options.event_callback = [&events](const observability::Event& event) {
+        if (event.resource == "queued_deadline") {
+            events.push_back(event);
+        }
+    };
+    options.observability_options.log_callback = [&logs](const observability::LogRecord& record) {
+        if (record.event == "task_deadline_missed" && record.component == "queued_deadline") {
+            logs.push_back(record);
+        }
+    };
+    auto context = runtime::RuntimeContext::Create(std::move(options));
+    assert(context.ok());
+    std::vector<std::string> order;
+    std::atomic<bool> release {false};
+    const auto blocker_name = MakeComponentName("queued_deadline_blocker");
+    const auto target_name = MakeComponentName("queued_deadline");
+    auto blocker = std::make_shared<OrderedComponent>(
+        OrderedSpec(blocker_name.str(), ManualPolicy()), order, &release);
+    auto target = std::make_shared<OrderedComponent>(
+        OrderedSpec(target_name.str(), ManualPolicy(0, std::chrono::milliseconds(30))), order);
+    assert(context.value()->RegisterComponent(blocker).ok());
+    assert(context.value()->RegisterComponent(target).ok());
+    assert(BringUp(*context.value(), blocker_name).ok());
+    assert(BringUp(*context.value(), target_name).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(blocker_name).ok());
+    const auto entered_deadline = core::SteadyClock::now() + std::chrono::milliseconds(500);
+    while (!blocker->entered.load() && core::SteadyClock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(blocker->entered.load());
+    assert(sched.Trigger(target_name).ok());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    assert(sched.stats().pending_events == 1);
+    assert(sched.Trigger(target_name).ok());
+    assert(sched.stats().coalesced_events == 1);
+    release.store(true);
+    assert(sched.WaitIdle(std::chrono::seconds(2)).ok());
+    assert(sched.Stop().ok());
+
+    assert(order == std::vector<std::string> {target_name.str()});
+    assert(events.size() == 2);
+    assert(events[0].kind == observability::EventKind::kTaskExecution);
+    assert(events[1].kind == observability::EventKind::kDeadlineMiss);
+    assert(events[0].queue_wait > std::chrono::milliseconds(30));
+    assert(events[0].queue_wait == events[1].queue_wait);
+    assert(events[0].duration == events[1].duration);
+    assert(events[0].deadline == events[1].deadline);
+    assert(events[0].success == events[1].success);
+    const auto snapshot = context.value()->observer()->Snapshot();
+    assert(snapshot.tasks.size() == 2);
+    bool found_target = false;
+    for (const auto& task : snapshot.tasks) {
+        if (task.task_name == target_name.str()) {
+            found_target = true;
+            assert(task.executions == 1);
+            assert(task.deadline_misses == 1);
+            assert(task.last_queue_wait == events[0].queue_wait);
+            assert(task.last_execution_time == events[0].duration);
+            assert(task.last_response_time == events[0].queue_wait + events[0].duration);
+        }
+    }
+    assert(found_target);
+    assert(logs.size() == 1);
+    const auto field = [&logs](const std::string& key) {
+        for (const auto& entry : logs.front().fields) {
+            if (entry.key == key) {
+                return std::stoll(entry.value);
+            }
+        }
+        assert(false);
+        return 0LL;
+    };
+    assert(field("queue_wait_us") == std::chrono::duration_cast<std::chrono::microseconds>(events[0].queue_wait).count());
+    assert(field("execution_us") == std::chrono::duration_cast<std::chrono::microseconds>(events[0].duration).count());
+    assert(field("response_us") == std::chrono::duration_cast<std::chrono::microseconds>(events[0].queue_wait + events[0].duration).count());
+    assert(field("deadline_us") == 30000);
 }
 
 void NonperiodicDeadlineAndCoalescedMetadata()
@@ -1123,6 +1211,7 @@ int main()
     SameComponentExecutesSeriallyAndCoalescesTriggers();
     PriorityAndFifoOrdering();
     AbsoluteDeadlineOrderingAndCoalescing();
+    QueuedDeadlineMissMatchesEventsAndLog();
     NonperiodicDeadlineAndCoalescedMetadata();
     DataAndTaskPoliciesReachQueue();
     NegativeDeadlineIsRejected();

@@ -58,6 +58,7 @@ struct Event {
     bool duration_available {false};
     core::Nanoseconds deadline {0};
     bool success {true};
+    core::Nanoseconds queue_wait {0};
 };
 
 struct TopicMetrics {
@@ -86,6 +87,12 @@ struct TaskMetrics {
     core::Nanoseconds last_execution_time {0};
     core::Nanoseconds average_execution_time {0};
     core::Nanoseconds max_execution_time {0};
+    core::Nanoseconds last_queue_wait {0};
+    core::Nanoseconds average_queue_wait {0};
+    core::Nanoseconds max_queue_wait {0};
+    core::Nanoseconds last_response_time {0};
+    core::Nanoseconds average_response_time {0};
+    core::Nanoseconds max_response_time {0};
 };
 
 struct MetricsSnapshot {
@@ -140,7 +147,8 @@ public:
         const core::ComponentName& component,
         core::Nanoseconds duration,
         core::Nanoseconds deadline = core::Nanoseconds::zero(),
-        bool success = true);
+        bool success = true,
+        core::Nanoseconds queue_wait = core::Nanoseconds::zero());
 
     MetricsSnapshot Snapshot() const;
     void PublishMetrics() const;
