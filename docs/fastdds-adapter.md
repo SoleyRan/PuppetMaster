@@ -23,6 +23,18 @@ The main target remains:
 PuppetMaster::PuppetMaster
 ```
 
+For an installed adapter, downstream projects must make the installed Fast-CDR
+and Fast-DDS packages discoverable alongside PuppetMaster (via
+`CMAKE_PREFIX_PATH` or their package-specific `*_DIR` variables). The adapter
+links publicly to `fastcdr` and `fastdds` on Fast-DDS 3.x, or to `fastcdr` and
+`fastrtps` on Fast-DDS 2.x. Consumers only need to link the exported adapter
+target; the package config resolves those transitive dependencies:
+
+```cmake
+find_package(PuppetMaster CONFIG REQUIRED)
+target_link_libraries(my_component PRIVATE PuppetMaster::FastDdsAdapter)
+```
+
 ## Current Scope
 
 This milestone establishes the clean FastDDS adapter boundary:
@@ -69,8 +81,9 @@ transport selection stay in adapter options instead of leaking into core.
 ## Reader And Writer Binding
 
 The transport abstraction moves byte payloads, so the adapter registers a
-`BytePayloadType` (sequence number + opaque bytes) once per `type_name` and
-binds DataReaders and DataWriters to it.
+`BytePayloadType` (CDR encapsulation header, little-endian uint32 payload
+length, then opaque bytes) once per `type_name` and binds DataReaders and
+DataWriters to it.
 
 - `transport::Reader` supports listener callbacks (invoked outside locks) and
   blocking reads via `ReadOptions{wait, timeout}`; `timeout == 0` waits

@@ -87,3 +87,23 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
         run: ctest --test-dir build --output-on-failure
+
+      - name: Install and verify downstream consumer
+        env:
+          LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
+        run: |
+          set -e
+          cmake --install build --prefix "$DEPS_PREFIX/puppetmaster"
+          mkdir -p consumer-check
+          cat > consumer-check/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(PuppetMasterConsumer LANGUAGES CXX)
+          find_package(PuppetMaster CONFIG REQUIRED)
+          add_executable(puppet_master_consumer main.cpp)
+          target_link_libraries(puppet_master_consumer PRIVATE PuppetMaster::FastDdsAdapter)
+          EOF
+          printf '#include <puppet_master/transport/fastdds/fastdds_transport.h>\nint main() { auto name = puppet_master::core::TransportName::Create("consumer"); puppet_master::transport::fastdds::FastDdsTransport transport(name.value()); return transport.Open().ok() && transport.Close().ok() ? 0 : 1; }\n' > consumer-check/main.cpp
+          cmake -S consumer-check -B consumer-check/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$DEPS_PREFIX/puppetmaster;$DEPS_PREFIX"
+          cmake --build consumer-check/build --parallel
+          consumer-check/build/puppet_master_consumer

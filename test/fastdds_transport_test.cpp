@@ -1,7 +1,9 @@
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <puppet_master/puppet_master.h>
@@ -198,6 +200,32 @@ void PublishSubscribeRoundTrip()
            core::StatusCode::kUnavailable);
 }
 
+void CloseWakesWaitingReader()
+{
+    auto transport = MakeTransport();
+    assert(transport->Open().ok());
+    auto reader = transport->CreateReader(MakeEndpoint("/test/close-wait", "test.CloseBytes"));
+    assert(reader.ok());
+
+    std::atomic<bool> waiting {false};
+    std::atomic<core::StatusCode> result {core::StatusCode::kOk};
+    std::thread waiting_thread([&] {
+        transport::ReadOptions options;
+        options.wait = true;
+        options.timeout = std::chrono::seconds(5);
+        waiting.store(true);
+        result.store(reader.value()->Read(options).status().code());
+    });
+    while (!waiting.load()) {
+        std::this_thread::yield();
+    }
+    assert(transport->Close().ok());
+    waiting_thread.join();
+    assert(result.load() == core::StatusCode::kUnavailable);
+    assert(reader.value()->SetDataAvailableCallback([] {}).code() ==
+           core::StatusCode::kUnavailable);
+}
+
 void ConfigurationAndSchedulerFastDdsRoundTrip()
 {
     configuration::ProjectConfig project;
@@ -306,6 +334,7 @@ int main()
     RejectsForeignTransportKind();
     RejectsUnsupportedOverflowPolicy();
     PublishSubscribeRoundTrip();
+    CloseWakesWaitingReader();
     RuntimeContextCreatesFastDdsEndpoints();
     ConfigurationAndSchedulerFastDdsRoundTrip();
     return 0;
