@@ -158,6 +158,20 @@ add_test(
     COMMAND puppet_master_chrome_trace_exporter_test
 )
 
+add_executable(puppet_master_prometheus_exporter_test
+    prometheus_exporter_test.cpp
+)
+
+target_link_libraries(puppet_master_prometheus_exporter_test
+    PRIVATE
+        PuppetMaster::PrometheusAdapter
+)
+
+add_test(
+    NAME puppet_master.prometheus_exporter
+    COMMAND puppet_master_prometheus_exporter_test
+)
+
 add_executable(puppet_master_logging_test
     logging_test.cpp
 )
