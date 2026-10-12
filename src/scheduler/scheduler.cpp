@@ -752,7 +752,9 @@ private:
                 execution_time,
                 event.deadline,
                 status.ok(),
-                queue_wait);
+                queue_wait,
+                core::TimePoint(std::chrono::duration_cast<core::Nanoseconds>(
+                    completed_at.time_since_epoch())));
 
             if (!status.ok()) {
                 observer->Log(observability::LogRecord {

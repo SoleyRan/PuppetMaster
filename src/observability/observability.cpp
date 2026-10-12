@@ -338,8 +338,10 @@ void Observer::RecordTaskExecution(
     core::Nanoseconds duration,
     core::Nanoseconds deadline,
     bool success,
-    core::Nanoseconds queue_wait)
+    core::Nanoseconds queue_wait,
+    core::TimePoint completed_at)
 {
+    const auto timestamp = completed_at != core::TimePoint {} ? completed_at : Now();
     Event execution;
     execution.kind = EventKind::kTaskExecution;
     execution.resource = component.str();
@@ -348,6 +350,7 @@ void Observer::RecordTaskExecution(
     execution.deadline = deadline;
     execution.success = success;
     execution.queue_wait = queue_wait;
+    execution.timestamp = timestamp;
     Emit(execution);
 
     if (deadline > core::Nanoseconds::zero() && queue_wait + duration > deadline) {

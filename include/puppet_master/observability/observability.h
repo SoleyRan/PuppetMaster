@@ -148,7 +148,8 @@ public:
         core::Nanoseconds duration,
         core::Nanoseconds deadline = core::Nanoseconds::zero(),
         bool success = true,
-        core::Nanoseconds queue_wait = core::Nanoseconds::zero());
+        core::Nanoseconds queue_wait = core::Nanoseconds::zero(),
+        core::TimePoint completed_at = {});
 
     MetricsSnapshot Snapshot() const;
     void PublishMetrics() const;

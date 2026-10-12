@@ -2,6 +2,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -91,6 +92,7 @@ void TracksEndToEndDeadlines()
     };
     observability::Observer observer(std::move(options));
     const auto component = MakeComponentName("queued_task");
+    const core::TimePoint completed_at(std::chrono::nanoseconds(123456789));
     observer.RecordTaskExecution(component, std::chrono::milliseconds(2),
                                  std::chrono::milliseconds(5), true,
                                  std::chrono::milliseconds(3));
@@ -99,7 +101,7 @@ void TracksEndToEndDeadlines()
                                  std::chrono::milliseconds(8));
     observer.RecordTaskExecution(component, std::chrono::milliseconds(2),
                                  std::chrono::milliseconds(5), true,
-                                 std::chrono::milliseconds(4));
+                                 std::chrono::milliseconds(4), completed_at);
     observer.RecordTaskExecution(component, std::chrono::milliseconds(4),
                                  std::chrono::milliseconds(5), false,
                                  std::chrono::milliseconds(7));
@@ -110,6 +112,8 @@ void TracksEndToEndDeadlines()
     assert(events[1].kind == observability::EventKind::kTaskExecution);
     assert(events[2].kind == observability::EventKind::kTaskExecution);
     assert(events[3].kind == observability::EventKind::kDeadlineMiss);
+    assert(events[2].timestamp == completed_at);
+    assert(events[2].timestamp == events[3].timestamp);
     assert(events[3].queue_wait == std::chrono::milliseconds(4));
     assert(events[3].duration == std::chrono::milliseconds(2));
     assert(events[3].deadline == std::chrono::milliseconds(5));
@@ -134,6 +138,27 @@ void TracksEndToEndDeadlines()
     assert(metrics.last_response_time == std::chrono::milliseconds(11));
     assert(metrics.average_response_time == std::chrono::milliseconds(8));
     assert(metrics.max_response_time == std::chrono::milliseconds(11));
+}
+
+void CallbackDelayDoesNotChangeDeadlineTimestamp()
+{
+    std::vector<observability::Event> events;
+    observability::Options options;
+    options.event_callback = [&events](const observability::Event& event) {
+        events.push_back(event);
+        if (event.kind == observability::EventKind::kTaskExecution) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    };
+    observability::Observer observer(std::move(options));
+    observer.RecordTaskExecution(MakeComponentName("callback_delay"),
+                                 std::chrono::milliseconds(2),
+                                 std::chrono::milliseconds(1));
+
+    assert(events.size() == 2);
+    assert(events[0].kind == observability::EventKind::kTaskExecution);
+    assert(events[1].kind == observability::EventKind::kDeadlineMiss);
+    assert(events[0].timestamp == events[1].timestamp);
 }
 
 void PublishesTraceAndMetricsCallbacks()
@@ -180,6 +205,7 @@ int main()
     FormatsStructuredLogRecords();
     AggregatesTopicAndTaskMetrics();
     TracksEndToEndDeadlines();
+    CallbackDelayDoesNotChangeDeadlineTimestamp();
     PublishesTraceAndMetricsCallbacks();
     CallbackExceptionsDoNotEscape();
     return 0;

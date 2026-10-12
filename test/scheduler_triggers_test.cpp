@@ -1062,6 +1062,7 @@ void QueuedDeadlineMissMatchesEventsAndLog()
     assert(events[1].kind == observability::EventKind::kDeadlineMiss);
     assert(events[0].queue_wait > std::chrono::milliseconds(30));
     assert(events[0].queue_wait == events[1].queue_wait);
+    assert(events[0].timestamp == events[1].timestamp);
     assert(events[0].duration == events[1].duration);
     assert(events[0].deadline == events[1].deadline);
     assert(events[0].success == events[1].success);
