@@ -91,6 +91,14 @@ jobs:
           LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
         run: ctest --test-dir build --output-on-failure
 
+      - name: Diagnose FastDDS transport crash
+        if: failure() && matrix.fastdds == 'v3.2.2'
+        env:
+          LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
+        run: |
+          sudo apt-get install -y gdb
+          gdb -batch -ex run -ex 'thread apply all bt' --args build/test/puppet_master_fastdds_transport_test
+
       - name: Cross-process UDP smoke
         env:
           LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
