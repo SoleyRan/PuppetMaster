@@ -203,6 +203,17 @@ add_test(
 )
 
 if(PUPPETMASTER_ENABLE_FASTDDS)
+    if(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE)
+        add_executable(puppet_master_fastdds_cross_process_smoke
+            fastdds_cross_process_smoke.cpp
+        )
+
+        target_link_libraries(puppet_master_fastdds_cross_process_smoke
+            PRIVATE
+                PuppetMaster::FastDdsAdapter
+        )
+    endif()
+
     add_executable(puppet_master_fastdds_transport_test
         fastdds_transport_test.cpp
     )
