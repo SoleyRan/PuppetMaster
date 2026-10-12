@@ -84,7 +84,7 @@ BytePayloadType::BytePayloadType(const std::string& type_name)
 {
 #if PUPPETMASTER_FASTDDS_V3
     set_name(type_name);
-    max_serialized_type_size = 0;
+    max_serialized_type_size = kInitialTypeSize;
     is_compute_key_provided = false;
 #else
     setName(type_name.c_str());
