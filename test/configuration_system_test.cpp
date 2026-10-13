@@ -152,6 +152,94 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     assert(status.code() == core::StatusCode::kInvalidArgument);
 }
 
+void TaskDependencyGraphsAreValidatedBeforeAssembly()
+{
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"b"};
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {
+        "a", "", {}, {}, {task}, "counter"
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "b", "", {}, {}, {}, "counter"
+    }).ok());
+    assert(project.Validate().ok());
+
+    config::ComponentFactoryRegistry factories;
+    int created = 0;
+    assert(factories.Register("counter",
+        [&created](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        }).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto reject = [&](const std::string& expected_message) {
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find(expected_message) != std::string::npos);
+        assert(config::ApplyComponentSpecs(project, *context.value()).code()
+            == core::StatusCode::kInvalidArgument);
+        auto specs_only = config::CreateScheduler(project, *context.value());
+        assert(!specs_only.ok());
+        assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+        auto instances = config::CreateScheduler(project, *context.value(), factories);
+        assert(!instances.ok());
+        assert(instances.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    };
+
+    project.components.front().triggers.front().task_dependencies = {"missing"};
+    reject("component a trigger 0 references unknown task dependency: missing");
+    project.components.front().triggers.front().task_dependencies = {"a"};
+    reject("component a trigger 0 has self task dependency: a");
+    project.components.front().triggers.front().task_dependencies = {"b", "b"};
+    reject("component a trigger 0 has duplicate task dependency: b");
+
+    project.components.front().triggers.front().task_dependencies = {"b"};
+    task.task_dependencies = {"a"};
+    project.components.back().triggers = {task};
+    reject("task dependency graph contains a cycle");
+
+    project.components.back().triggers.front().task_dependencies = {"c"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "c", "", {}, {}, {task}, "counter"
+    }).ok());
+    reject("task dependency graph contains a cycle");
+}
+
+void TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams()
+{
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"left", "right"};
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {
+        "sink", "", {}, {}, {task}
+    }).ok());
+    task.task_dependencies = {"root"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "left", "", {}, {}, {task, task}
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "right", "", {}, {}, {task}
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "root", "", {}, {}, {}
+    }).ok());
+    assert(project.Validate().ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto sched = config::CreateScheduler(project, *context.value());
+    assert(sched.ok());
+    assert(sched.value()->stats().registered_components == 4);
+    assert(sched.value()->Start().ok());
+    assert(sched.value()->Stop().ok());
+}
+
 void TriggerSchedulingFieldsReachComponentSpec()
 {
     auto project = MakeSpeedProject();
@@ -424,6 +512,8 @@ int main()
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    TaskDependencyGraphsAreValidatedBeforeAssembly();
+    TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams();
     TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
     ProjectConfigCreatesConfiguredScheduler();

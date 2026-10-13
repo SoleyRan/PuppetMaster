@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -71,6 +73,61 @@ core::Status ValidateUniqueComponents(const std::vector<ComponentConfig>& compon
             return core::Status::AlreadyExists("component name is duplicated: " + component.name);
         }
         seen.emplace(component.name, true);
+    }
+    return core::Status::Ok();
+}
+
+core::Status ValidateTaskDependencies(const std::vector<ComponentConfig>& components)
+{
+    std::map<std::string, std::size_t> indegree;
+    std::map<std::string, std::vector<std::string>> dependents;
+    for (const auto& component : components) {
+        indegree.emplace(component.name, 0);
+    }
+
+    for (const auto& component : components) {
+        for (std::size_t index = 0; index < component.triggers.size(); ++index) {
+            const auto& trigger = component.triggers[index];
+            if (trigger.kind != core::TriggerKind::kTaskDependency) {
+                continue;
+            }
+            std::set<std::string> seen;
+            for (const auto& upstream : trigger.task_dependencies) {
+                const auto location = "component " + component.name + " trigger " + std::to_string(index);
+                if (upstream == component.name) {
+                    return core::Status::InvalidArgument(location + " has self task dependency: " + upstream);
+                }
+                if (!seen.insert(upstream).second) {
+                    return core::Status::InvalidArgument(location + " has duplicate task dependency: " + upstream);
+                }
+                if (indegree.find(upstream) == indegree.end()) {
+                    return core::Status::InvalidArgument(location + " references unknown task dependency: " + upstream);
+                }
+                dependents[upstream].push_back(component.name);
+                ++indegree[component.name];
+            }
+        }
+    }
+
+    std::deque<std::string> ready;
+    for (const auto& entry : indegree) {
+        if (entry.second == 0) {
+            ready.push_back(entry.first);
+        }
+    }
+    std::size_t visited = 0;
+    while (!ready.empty()) {
+        const auto upstream = ready.front();
+        ready.pop_front();
+        ++visited;
+        for (const auto& dependent : dependents[upstream]) {
+            if (--indegree[dependent] == 0) {
+                ready.push_back(dependent);
+            }
+        }
+    }
+    if (visited != components.size()) {
+        return core::Status::InvalidArgument("task dependency graph contains a cycle");
     }
     return core::Status::Ok();
 }
@@ -385,7 +442,7 @@ core::Status ProjectConfig::Validate() const
         }
     }
 
-    return core::Status::Ok();
+    return ValidateTaskDependencies(components);
 }
 
 core::Result<runtime::RuntimeOptions> ProjectConfig::ToRuntimeOptions() const
