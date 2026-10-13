@@ -397,6 +397,11 @@ void RegistryRejectsInvalidRegistration()
     assert(factories.Register("monitor", {}).code() == core::StatusCode::kInvalidArgument);
     assert(factories.Register("monitor", factory).ok());
     assert(factories.Register("monitor", factory).code() == core::StatusCode::kAlreadyExists);
+    const auto& registered = factories;
+    assert(registered.ValidateType("").code() == core::StatusCode::kInvalidArgument);
+    assert(registered.ValidateType(" \t").code() == core::StatusCode::kInvalidArgument);
+    assert(registered.ValidateType("unknown").code() == core::StatusCode::kNotFound);
+    assert(registered.ValidateType("monitor").ok());
     auto spec = MakeSpeedProject().BuildComponentSpec("speed_monitor").value();
     assert(factories.Create("", spec).status().code() == core::StatusCode::kInvalidArgument);
     assert(factories.Create(" \t", spec).status().code() == core::StatusCode::kInvalidArgument);
@@ -456,14 +461,24 @@ void RegistryFailuresLeaveRuntimeUnchanged()
     auto missing = config::CreateScheduler(project, *context.value(), factories);
     assert(!missing.ok());
     assert(missing.status().code() == core::StatusCode::kInvalidArgument);
-    assert(created == 1);
+    assert(missing.status().message().find("component second_monitor:") == 0);
+    assert(created == 0);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = " \t";
+    auto invalid = config::CreateScheduler(project, *context.value(), factories);
+    assert(!invalid.ok());
+    assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+    assert(invalid.status().message().find("component second_monitor:") == 0);
+    assert(created == 0);
     assert(context.value()->ListComponentNames().empty());
 
     project.components.back().type = "unknown";
     auto unknown = config::CreateScheduler(project, *context.value(), factories);
     assert(!unknown.ok());
     assert(unknown.status().code() == core::StatusCode::kNotFound);
-    assert(created == 2);
+    assert(unknown.status().message() == "component second_monitor: component type is not registered: unknown");
+    assert(created == 0);
     assert(context.value()->ListComponentNames().empty());
 
     project.components.back().type = "null";

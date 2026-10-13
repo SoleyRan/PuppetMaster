@@ -613,19 +613,26 @@ core::Status ComponentFactoryRegistry::Register(std::string type, ComponentFacto
     return core::Status::Ok();
 }
 
-core::Result<runtime::ComponentPtr> ComponentFactoryRegistry::Create(
-    std::string_view type, const runtime::ComponentSpec& spec) const
+core::Status ComponentFactoryRegistry::ValidateType(std::string_view type) const
 {
     auto status = ValidateConfigId("component type", type);
     if (!status.ok()) {
+        return status;
+    }
+    if (factories_.find(std::string(type)) == factories_.end()) {
+        return core::Status::NotFound("component type is not registered: " + std::string(type));
+    }
+    return core::Status::Ok();
+}
+
+core::Result<runtime::ComponentPtr> ComponentFactoryRegistry::Create(
+    std::string_view type, const runtime::ComponentSpec& spec) const
+{
+    auto status = ValidateType(type);
+    if (!status.ok()) {
         return core::Result<runtime::ComponentPtr>::FromStatus(std::move(status));
     }
-    const auto found = factories_.find(std::string(type));
-    if (found == factories_.end()) {
-        return core::Result<runtime::ComponentPtr>::FromStatus(
-            core::Status::NotFound("component type is not registered: " + std::string(type)));
-    }
-    return found->second(spec);
+    return factories_.find(std::string(type))->second(spec);
 }
 
 core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
@@ -633,6 +640,18 @@ core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     runtime::RuntimeContext& runtime,
     const ComponentFactoryRegistry& factories)
 {
+    using SchedulerResult = core::Result<std::unique_ptr<scheduler::Scheduler>>;
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return SchedulerResult::FromStatus(std::move(status));
+    }
+    for (const auto& component : project.components) {
+        status = factories.ValidateType(component.type);
+        if (!status.ok()) {
+            return SchedulerResult::FromStatus(
+                core::Status::Error(status.code(), "component " + component.name + ": " + status.message()));
+        }
+    }
     return CreateScheduler(project, runtime,
         [&project, &factories](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
             auto component = project.FindComponent(spec.name.view());
