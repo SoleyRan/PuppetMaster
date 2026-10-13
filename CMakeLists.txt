@@ -26,6 +26,7 @@ option(PUPPETMASTER_ENABLE_FASTDDS "Build the optional FastDDS transport adapter
 option(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE
     "Build the opt-in FastDDS cross-process smoke executable." OFF)
 option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
+option(PUPPETMASTER_ENABLE_JSON_CONFIG "Build the optional JSON configuration adapter." OFF)
 set(
     PUPPETMASTER_GOODLOG_GIT_TAG
     "2eaaa2b67388dcfd41eaf8f3dd57e7f987bc31fa"
@@ -44,6 +45,20 @@ endif()
 if(DEFINED BUILD_TEST)
     message(DEPRECATION "BUILD_TEST is deprecated; use PUPPETMASTER_BUILD_TESTS instead.")
     set(PUPPETMASTER_BUILD_TESTS "${BUILD_TEST}")
+endif()
+
+if(PUPPETMASTER_ENABLE_JSON_CONFIG AND NOT TARGET nlohmann_json::nlohmann_json)
+    find_package(nlohmann_json 3.11 CONFIG QUIET)
+
+    if(NOT nlohmann_json_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(
+            nlohmann_json
+            GIT_REPOSITORY https://github.com/nlohmann/json.git
+            GIT_TAG v3.11.3
+        )
+        FetchContent_MakeAvailable(nlohmann_json)
+    endif()
 endif()
 
 if(PUPPETMASTER_ENABLE_GOODLOG AND NOT TARGET GoodLog::good_log)

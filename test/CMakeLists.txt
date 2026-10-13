@@ -116,6 +116,21 @@ add_test(
     COMMAND puppet_master_configuration_system_test
 )
 
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_executable(puppet_master_json_config_loader_test
+        json_config_loader_test.cpp
+    )
+
+    target_link_libraries(puppet_master_json_config_loader_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.json_config_loader
+        COMMAND puppet_master_json_config_loader_test
+    )
+endif()
+
 add_executable(puppet_master_compatibility_facade_test
     compatibility_facade_test.cpp
 )

@@ -15,6 +15,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/logging/logger.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/compat/itage_facade.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/configuration.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
@@ -252,6 +253,60 @@ install(
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_library(puppet_master_json_config_adapter
+        configuration/json_loader.cpp
+        "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
+    )
+
+    add_library(PuppetMaster::JsonConfigAdapter ALIAS puppet_master_json_config_adapter)
+
+    target_compile_features(puppet_master_json_config_adapter PUBLIC cxx_std_17)
+
+    target_link_libraries(puppet_master_json_config_adapter
+        PUBLIC
+            PuppetMaster::PuppetMaster
+            nlohmann_json::nlohmann_json
+    )
+
+    target_compile_definitions(puppet_master_json_config_adapter
+        PRIVATE PUPPET_MASTER_EXPORTS
+    )
+
+    if(NOT BUILD_SHARED_LIBS)
+        target_compile_definitions(puppet_master_json_config_adapter PUBLIC PUPPET_MASTER_STATIC_DEFINE)
+    endif()
+
+    target_include_directories(puppet_master_json_config_adapter
+        PUBLIC
+            "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+            "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    )
+
+    if(MSVC)
+        target_compile_options(puppet_master_json_config_adapter PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(puppet_master_json_config_adapter PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
+    set_target_properties(puppet_master_json_config_adapter
+        PROPERTIES
+            EXPORT_NAME JsonConfigAdapter
+            OUTPUT_NAME puppet_master_json_config_adapter
+            POSITION_INDEPENDENT_CODE ON
+            VERSION "${PROJECT_VERSION}"
+            SOVERSION "${PROJECT_VERSION_MAJOR}"
+    )
+
+    install(
+        TARGETS puppet_master_json_config_adapter
+        EXPORT PuppetMasterTargets
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    )
+endif()
 
 if(PUPPETMASTER_ENABLE_GOODLOG)
     add_library(puppet_master_goodlog_adapter
