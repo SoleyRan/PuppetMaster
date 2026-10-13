@@ -540,6 +540,52 @@ core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     return scheduler_instance;
 }
 
+core::Status ComponentFactoryRegistry::Register(std::string type, ComponentFactory factory)
+{
+    auto status = ValidateConfigId("component type", type);
+    if (!status.ok()) {
+        return status;
+    }
+    if (!factory) {
+        return core::Status::InvalidArgument("component factory must not be empty");
+    }
+    if (factories_.find(type) != factories_.end()) {
+        return core::Status::AlreadyExists("component type is already registered: " + type);
+    }
+    factories_.emplace(std::move(type), std::move(factory));
+    return core::Status::Ok();
+}
+
+core::Result<runtime::ComponentPtr> ComponentFactoryRegistry::Create(
+    std::string_view type, const runtime::ComponentSpec& spec) const
+{
+    auto status = ValidateConfigId("component type", type);
+    if (!status.ok()) {
+        return core::Result<runtime::ComponentPtr>::FromStatus(std::move(status));
+    }
+    const auto found = factories_.find(std::string(type));
+    if (found == factories_.end()) {
+        return core::Result<runtime::ComponentPtr>::FromStatus(
+            core::Status::NotFound("component type is not registered: " + std::string(type)));
+    }
+    return found->second(spec);
+}
+
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime,
+    const ComponentFactoryRegistry& factories)
+{
+    return CreateScheduler(project, runtime,
+        [&project, &factories](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            auto component = project.FindComponent(spec.name.view());
+            if (!component.ok()) {
+                return core::Result<runtime::ComponentPtr>::FromStatus(component.status());
+            }
+            return factories.Create(component.value().type, spec);
+        });
+}
+
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime)
 {
     auto status = project.Validate();

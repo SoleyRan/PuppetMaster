@@ -297,6 +297,123 @@ void FactoryFailuresLeaveRuntimeUnchanged()
     assert(context.value()->ListComponentNames().empty());
 }
 
+void RegistryRejectsInvalidRegistration()
+{
+    config::ComponentFactoryRegistry factories;
+    auto factory = [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+        runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+        return component;
+    };
+    assert(factories.Register("", factory).code() == core::StatusCode::kInvalidArgument);
+    assert(factories.Register(" \t\n", factory).code() == core::StatusCode::kInvalidArgument);
+    assert(factories.Register("monitor", {}).code() == core::StatusCode::kInvalidArgument);
+    assert(factories.Register("monitor", factory).ok());
+    assert(factories.Register("monitor", factory).code() == core::StatusCode::kAlreadyExists);
+    auto spec = MakeSpeedProject().BuildComponentSpec("speed_monitor").value();
+    assert(factories.Create("", spec).status().code() == core::StatusCode::kInvalidArgument);
+    assert(factories.Create(" \t", spec).status().code() == core::StatusCode::kInvalidArgument);
+    assert(factories.Create("unknown", spec).status().code() == core::StatusCode::kNotFound);
+    assert(factories.Create("monitor", spec).ok());
+}
+
+void RegistryDispatchesDifferentTypes()
+{
+    auto project = MakeSpeedProject();
+    project.components.front().type = "speed";
+    assert(project.AddComponent(config::ComponentConfig {
+        "second_monitor", "second", {}, {}, {}, "other"
+    }).ok());
+    config::ComponentFactoryRegistry factories;
+    runtime::ComponentPtr speed;
+    runtime::ComponentPtr other;
+    assert(factories.Register("speed",
+        [&speed](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            assert(spec.name.str() == "speed_monitor");
+            speed = std::make_shared<SpecComponent>(spec);
+            return speed;
+        }).ok());
+    assert(factories.Register("other",
+        [&other](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            assert(spec.name.str() == "second_monitor");
+            other = std::make_shared<SpecComponent>(spec);
+            return other;
+        }).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto sched = config::CreateScheduler(project, *context.value(), factories);
+    assert(sched.ok());
+    assert(sched.value()->stats().registered_components == 2);
+    assert(speed && other && speed != other);
+    assert(context.value()->FindComponentInstance(core::ComponentName::Create("speed_monitor").value()).value() == speed);
+    assert(context.value()->FindComponentInstance(core::ComponentName::Create("second_monitor").value()).value() == other);
+}
+
+void RegistryFailuresLeaveRuntimeUnchanged()
+{
+    auto project = MakeSpeedProject();
+    project.components.front().type = "speed";
+    assert(project.AddComponent(config::ComponentConfig {
+        "second_monitor", "second", {}, {}, {}, ""
+    }).ok());
+    config::ComponentFactoryRegistry factories;
+    int created = 0;
+    assert(factories.Register("speed",
+        [&created](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        }).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto missing = config::CreateScheduler(project, *context.value(), factories);
+    assert(!missing.ok());
+    assert(missing.status().code() == core::StatusCode::kInvalidArgument);
+    assert(created == 1);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = "unknown";
+    auto unknown = config::CreateScheduler(project, *context.value(), factories);
+    assert(!unknown.ok());
+    assert(unknown.status().code() == core::StatusCode::kNotFound);
+    assert(created == 2);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = "null";
+    assert(factories.Register("null",
+        [](const runtime::ComponentSpec&) -> core::Result<runtime::ComponentPtr> {
+            return runtime::ComponentPtr {};
+        }).ok());
+    auto null_instance = config::CreateScheduler(project, *context.value(), factories);
+    assert(!null_instance.ok());
+    assert(null_instance.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = "mismatched";
+    assert(factories.Register("mismatched",
+        [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            auto changed = spec;
+            changed.description = "wrong description";
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(changed);
+            return component;
+        }).ok());
+    auto mismatched = config::CreateScheduler(project, *context.value(), factories);
+    assert(!mismatched.ok());
+    assert(mismatched.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = "failing";
+    assert(factories.Register("failing",
+        [](const runtime::ComponentSpec&) -> core::Result<runtime::ComponentPtr> {
+            return core::Result<runtime::ComponentPtr>::FromStatus(
+                core::Status::Unavailable("factory failure"));
+        }).ok());
+    auto failing = config::CreateScheduler(project, *context.value(), factories);
+    assert(!failing.ok());
+    assert(failing.status().code() == core::StatusCode::kUnavailable);
+    assert(failing.status().message() == "factory failure");
+    assert(context.value()->ListComponentNames().empty());
+}
+
 }  // namespace
 
 int main()
@@ -314,5 +431,8 @@ int main()
     DuplicateRuntimeComponentIsRejected();
     FactoryCreatesComponentInstances();
     FactoryFailuresLeaveRuntimeUnchanged();
+    RegistryRejectsInvalidRegistration();
+    RegistryDispatchesDifferentTypes();
+    RegistryFailuresLeaveRuntimeUnchanged();
     return 0;
 }
