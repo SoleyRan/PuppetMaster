@@ -116,6 +116,13 @@ add_test(
     COMMAND puppet_master_configuration_system_test
 )
 
+if(TARGET puppet_master_configuration_system_demo)
+    add_test(
+        NAME puppet_master.configuration_system_demo
+        COMMAND puppet_master_configuration_system_demo
+    )
+endif()
+
 if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_executable(puppet_master_json_config_loader_test
         json_config_loader_test.cpp

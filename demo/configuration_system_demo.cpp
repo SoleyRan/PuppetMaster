@@ -53,7 +53,8 @@ core::Result<config::ProjectConfig> BuildProjectConfig()
         "runs when speed data arrives",
         {"speed"},
         {},
-        {speed_trigger}
+        {speed_trigger},
+        "speed"
     });
     if (!status.ok()) {
         return core::Result<config::ProjectConfig>::FromStatus(std::move(status));
@@ -196,18 +197,24 @@ int main(int argc, char* argv[])
     }
 
     std::shared_ptr<ConfiguredSpeedMonitor> monitor;
-    auto sched = config::CreateScheduler(project.value(), *context.value(),
+    config::ComponentFactoryRegistry factories;
+    auto status = factories.Register("speed",
         [&monitor](const runtime::ComponentSpec& component_spec) -> core::Result<runtime::ComponentPtr> {
             monitor = std::make_shared<ConfiguredSpeedMonitor>(component_spec);
             runtime::ComponentPtr component = monitor;
             return component;
         });
+    if (!status.ok()) {
+        return Fail("failed to register speed component factory", status);
+    }
+
+    auto sched = config::CreateScheduler(project.value(), *context.value(), factories);
     if (!sched.ok()) {
         return Fail("failed to create configured scheduler", sched.status());
     }
 
     const auto component_name = spec.name;
-    auto status = BringUp(*context.value(), component_name);
+    status = BringUp(*context.value(), component_name);
     if (!status.ok()) {
         return Fail("failed to bring up component", status);
     }
@@ -233,11 +240,20 @@ int main(int argc, char* argv[])
         return Fail("scheduler did not become idle", status);
     }
 
+    status = sched.value()->Stop();
+    if (!status.ok()) {
+        return Fail("failed to stop scheduler", status);
+    }
+    if (monitor->execute_count() != 1 || monitor->last_payload() != payload) {
+        std::cerr << "unexpected speed monitor result: expected one execution with payload " << payload
+                  << ", got " << monitor->execute_count() << " with payload " << monitor->last_payload() << '\n';
+        return 1;
+    }
+
     std::cout << "component: " << component_name.str() << '\n';
     std::cout << "executions: " << monitor->execute_count() << '\n';
     std::cout << "last payload: " << monitor->last_payload() << '\n';
 
-    sched.value()->Stop();
     context.value()->StopComponent(component_name);
     context.value()->ShutdownComponent(component_name);
     return 0;
