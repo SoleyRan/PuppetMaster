@@ -10,6 +10,7 @@
 #include <puppet_master/core/types.h>
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/context.h>
+#include <puppet_master/scheduler/scheduler.h>
 #include <puppet_master/transport/transport.h>
 
 namespace puppet_master::configuration {
@@ -56,6 +57,7 @@ struct ComponentConfig {
 // usable before choosing a file format such as YAML, JSON, or TOML.
 struct ProjectConfig {
     runtime::RuntimeOptions runtime_options;
+    scheduler::SchedulerOptions scheduler_options;
     std::vector<TopicConfig> topics;
     std::vector<ComponentConfig> components;
 
@@ -65,6 +67,7 @@ struct ProjectConfig {
     core::Status Validate() const;
 
     core::Result<runtime::RuntimeOptions> ToRuntimeOptions() const;
+    core::Result<scheduler::SchedulerOptions> ToSchedulerOptions() const;
     core::Result<TopicConfig> FindTopic(std::string_view id) const;
     core::Result<ComponentConfig> FindComponent(std::string_view name) const;
     core::Result<transport::EndpointConfig> BuildEndpoint(std::string_view topic_id) const;

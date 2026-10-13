@@ -65,6 +65,20 @@ void EnumParsersAcceptHumanReadableValues()
     assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
 }
 
+void SchedulerOptionsAreValidatedAndExposed()
+{
+    config::ProjectConfig project;
+    project.scheduler_options.worker_count = 3;
+    auto options = project.ToSchedulerOptions();
+    assert(options.ok());
+    assert(options.value().worker_count == 3);
+    assert(project.Validate().ok());
+
+    project.scheduler_options.worker_count = 0;
+    assert(!project.ToSchedulerOptions().ok());
+    assert(project.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
 void ProjectConfigBuildsEndpointAndComponentSpec()
 {
     const auto project = MakeSpeedProject();
@@ -167,6 +181,7 @@ void ProjectConfigAppliesComponentSpecsToRuntime()
 int main()
 {
     EnumParsersAcceptHumanReadableValues();
+    SchedulerOptionsAreValidatedAndExposed();
     ProjectConfigBuildsEndpointAndComponentSpec();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();

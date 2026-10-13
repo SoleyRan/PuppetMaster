@@ -108,7 +108,7 @@ const Json& Array(const Json& object, const char* key, const std::string& path)
 
 ProjectConfig Decode(const Json& root)
 {
-    CheckObject(root, "$", {"runtime", "topics", "components"});
+    CheckObject(root, "$", {"runtime", "scheduler", "topics", "components"});
     ProjectConfig project;
     if (root.contains("runtime")) {
         const auto& options = root.at("runtime");
@@ -123,6 +123,11 @@ ProjectConfig Decode(const Json& root)
         project.runtime_options.default_transport_name = std::move(parsed_name).value();
         Read(options, "register_inmemory_transport", project.runtime_options.register_inmemory_transport, "$.runtime");
         Read(options, "open_registered_transports", project.runtime_options.open_registered_transports, "$.runtime");
+    }
+    if (root.contains("scheduler")) {
+        const auto& options = root.at("scheduler");
+        CheckObject(options, "$.scheduler", {"worker_count"});
+        Read(options, "worker_count", project.scheduler_options.worker_count, "$.scheduler");
     }
     std::size_t index = 0;
     for (const auto& value : Array(root, "topics", "$")) {

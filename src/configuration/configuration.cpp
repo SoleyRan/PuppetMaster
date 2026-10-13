@@ -306,6 +306,11 @@ core::Status ProjectConfig::Validate() const
         return status;
     }
 
+    status = scheduler_options.Validate();
+    if (!status.ok()) {
+        return status;
+    }
+
     status = ValidateUniqueIds(topics);
     if (!status.ok()) {
         return status;
@@ -340,6 +345,15 @@ core::Result<runtime::RuntimeOptions> ProjectConfig::ToRuntimeOptions() const
         return core::Result<runtime::RuntimeOptions>::FromStatus(std::move(status));
     }
     return runtime_options;
+}
+
+core::Result<scheduler::SchedulerOptions> ProjectConfig::ToSchedulerOptions() const
+{
+    auto status = scheduler_options.Validate();
+    if (!status.ok()) {
+        return core::Result<scheduler::SchedulerOptions>::FromStatus(std::move(status));
+    }
+    return scheduler_options;
 }
 
 core::Result<TopicConfig> ProjectConfig::FindTopic(std::string_view id) const

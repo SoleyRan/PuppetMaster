@@ -16,6 +16,7 @@ const char* kValidConfig = R"json({
         "register_inmemory_transport": true,
         "open_registered_transports": false
     },
+    "scheduler": {"worker_count": 3},
     "topics": [{
         "id": "speed",
         "name": "/vehicle/speed",
@@ -48,6 +49,8 @@ void ValidJsonBuildsProject()
     const auto& project = result.value();
     assert(project.runtime_options.default_transport_name.str() == "runtime");
     assert(!project.runtime_options.open_registered_transports);
+    assert(project.ToSchedulerOptions().ok());
+    assert(project.ToSchedulerOptions().value().worker_count == 3);
     assert(project.topics.size() == 1);
     assert(project.topics.front().message_policy.freshness == core::FreshnessPolicy::kQueued);
     assert(project.topics.front().message_policy.queue_depth == 8);
@@ -69,6 +72,7 @@ void OmittedSchedulingFieldsUseDefaults()
     auto result = config::ParseJsonConfig(
         R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual"}]}]})json");
     assert(result.ok());
+    assert(result.value().ToSchedulerOptions().value().worker_count == 1);
     auto spec = result.value().BuildComponentSpec("monitor");
     assert(spec.ok());
     assert(spec.value().triggers.front().priority == 0);
@@ -109,6 +113,23 @@ void InvalidJsonIsRejected()
     auto deadline_out_of_range = config::ParseJsonConfig(
         R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","deadline_ns":9223372036854775808}]}]})json");
     assert(!deadline_out_of_range.ok());
+
+    auto invalid_worker_count = config::ParseJsonConfig(
+        R"json({"scheduler":{"worker_count":0}})json");
+    assert(!invalid_worker_count.ok());
+    assert(invalid_worker_count.status().code() == core::StatusCode::kInvalidArgument);
+
+    auto wrong_worker_count_type = config::ParseJsonConfig(
+        R"json({"scheduler":{"worker_count":"two"}})json");
+    assert(!wrong_worker_count_type.ok());
+
+    auto negative_worker_count = config::ParseJsonConfig(
+        R"json({"scheduler":{"worker_count":-1}})json");
+    assert(!negative_worker_count.ok());
+
+    auto unknown_scheduler_field = config::ParseJsonConfig(
+        R"json({"scheduler":{"unexpected":true}})json");
+    assert(!unknown_scheduler_field.ok());
 
     auto unknown_trigger_field = config::ParseJsonConfig(
         R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","unknown":true}]}]})json");
