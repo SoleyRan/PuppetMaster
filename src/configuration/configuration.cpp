@@ -162,6 +162,8 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
     trigger.kind = kind;
     trigger.period = period;
     trigger.dependency_policy = dependency_policy;
+    trigger.priority = priority;
+    trigger.deadline = deadline;
 
     if (kind == core::TriggerKind::kData && data_topics.empty()) {
         return core::Result<core::TriggerSpec>::FromStatus(

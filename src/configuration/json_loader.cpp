@@ -158,12 +158,16 @@ ProjectConfig Decode(const Json& root)
         std::size_t trigger_index = 0;
         for (const auto& entry : Array(value, "triggers", path)) {
             const auto trigger_path = path + ".triggers[" + std::to_string(trigger_index++) + "]";
-            CheckObject(entry, trigger_path, {"kind", "period_ns", "dependency_policy", "data_topics", "task_dependencies"});
+            CheckObject(entry, trigger_path, {"kind", "period_ns", "dependency_policy", "data_topics", "task_dependencies", "priority", "deadline_ns"});
             TriggerConfig trigger;
             ReadEnum(entry, "kind", trigger.kind, ParseTriggerKind, trigger_path);
             auto period = trigger.period.count();
             Read(entry, "period_ns", period, trigger_path);
             trigger.period = core::Nanoseconds(period);
+            Read(entry, "priority", trigger.priority, trigger_path);
+            auto deadline = trigger.deadline.count();
+            Read(entry, "deadline_ns", deadline, trigger_path);
+            trigger.deadline = core::Nanoseconds(deadline);
             ReadEnum(entry, "dependency_policy", trigger.dependency_policy, ParseDependencyPolicy, trigger_path);
             Read(entry, "data_topics", trigger.data_topics, trigger_path);
             Read(entry, "task_dependencies", trigger.task_dependencies, trigger_path);

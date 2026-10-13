@@ -128,6 +128,23 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     assert(status.code() == core::StatusCode::kInvalidArgument);
 }
 
+void TriggerSchedulingFieldsReachComponentSpec()
+{
+    auto project = MakeSpeedProject();
+    auto& trigger = project.components.front().triggers.front();
+    assert(trigger.priority == 0);
+    assert(trigger.deadline == core::Nanoseconds::zero());
+    trigger.priority = -7;
+    trigger.deadline = core::Nanoseconds(1250);
+    assert(project.Validate().ok());
+    auto spec = project.BuildComponentSpec("speed_monitor");
+    assert(spec.ok());
+    assert(spec.value().triggers.front().priority == -7);
+    assert(spec.value().triggers.front().deadline == core::Nanoseconds(1250));
+    trigger.deadline = core::Nanoseconds(-1);
+    assert(project.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
 void ProjectConfigAppliesComponentSpecsToRuntime()
 {
     const auto project = MakeSpeedProject();
@@ -154,6 +171,7 @@ int main()
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
     return 0;
 }

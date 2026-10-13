@@ -34,7 +34,9 @@ const char* kValidConfig = R"json({
         "triggers": [{
             "kind": "data",
             "dependency_policy": "any",
-            "data_topics": ["speed"]
+            "data_topics": ["speed"],
+            "priority": -7,
+            "deadline_ns": 1250
         }]
     }]
 })json";
@@ -51,11 +53,26 @@ void ValidJsonBuildsProject()
     assert(project.topics.front().message_policy.queue_depth == 8);
     assert(project.components.size() == 1);
     assert(project.components.front().triggers.front().kind == core::TriggerKind::kData);
+    assert(project.components.front().triggers.front().priority == -7);
+    assert(project.components.front().triggers.front().deadline == core::Nanoseconds(1250));
     auto endpoint = project.BuildEndpoint("speed");
     assert(endpoint.ok());
     auto component = project.BuildComponentSpec("speed_monitor");
     assert(component.ok());
+    assert(component.value().triggers.front().priority == -7);
+    assert(component.value().triggers.front().deadline == core::Nanoseconds(1250));
     assert(component.value().triggers.front().data_dependencies.front().str() == "/vehicle/speed");
+}
+
+void OmittedSchedulingFieldsUseDefaults()
+{
+    auto result = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual"}]}]})json");
+    assert(result.ok());
+    auto spec = result.value().BuildComponentSpec("monitor");
+    assert(spec.ok());
+    assert(spec.value().triggers.front().priority == 0);
+    assert(spec.value().triggers.front().deadline == core::Nanoseconds::zero());
 }
 
 void InvalidJsonIsRejected()
@@ -75,6 +92,27 @@ void InvalidJsonIsRejected()
         R"json({"components":[{"name":"monitor","readers":["missing"]}]})json");
     assert(!invalid_reference.ok());
     assert(invalid_reference.status().code() == core::StatusCode::kNotFound);
+
+    auto negative_deadline = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","deadline_ns":-1}]}]})json");
+    assert(!negative_deadline.ok());
+    assert(negative_deadline.status().code() == core::StatusCode::kInvalidArgument);
+
+    auto wrong_priority_type = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","priority":"high"}]}]})json");
+    assert(!wrong_priority_type.ok());
+
+    auto priority_out_of_range = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","priority":2147483648}]}]})json");
+    assert(!priority_out_of_range.ok());
+
+    auto deadline_out_of_range = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","deadline_ns":9223372036854775808}]}]})json");
+    assert(!deadline_out_of_range.ok());
+
+    auto unknown_trigger_field = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","unknown":true}]}]})json");
+    assert(!unknown_trigger_field.ok());
 }
 
 void JsonFileIsLoaded()
@@ -97,6 +135,7 @@ void JsonFileIsLoaded()
 int main()
 {
     ValidJsonBuildsProject();
+    OmittedSchedulingFieldsUseDefaults();
     InvalidJsonIsRejected();
     JsonFileIsLoaded();
     return 0;

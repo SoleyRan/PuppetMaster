@@ -34,6 +34,8 @@ struct TriggerConfig {
     core::DependencyPolicy dependency_policy {core::DependencyPolicy::kAll};
     std::vector<std::string> data_topics;
     std::vector<std::string> task_dependencies;
+    std::int32_t priority {0};
+    core::Nanoseconds deadline {0};
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<core::TriggerSpec> ToTriggerSpec(const ProjectConfig& project) const;
