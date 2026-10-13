@@ -4,9 +4,11 @@
 #include <string>
 
 #include <puppet_master/configuration/json_loader.h>
+#include <puppet_master/runtime/context.h>
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
+namespace runtime = puppet_master::runtime;
 
 namespace {
 
@@ -65,6 +67,31 @@ void ValidJsonBuildsProject()
     assert(component.value().triggers.front().priority == -7);
     assert(component.value().triggers.front().deadline == core::Nanoseconds(1250));
     assert(component.value().triggers.front().data_dependencies.front().str() == "/vehicle/speed");
+}
+
+void JsonConfigCreatesConfiguredScheduler()
+{
+    auto parsed = config::ParseJsonConfig(kValidConfig);
+    assert(parsed.ok());
+    auto runtime_options = parsed.value().ToRuntimeOptions();
+    assert(runtime_options.ok());
+    auto context = runtime::RuntimeContext::Create(runtime_options.value());
+    assert(context.ok());
+
+    auto scheduler_instance = config::CreateScheduler(parsed.value(), *context.value());
+    assert(scheduler_instance.ok());
+    assert(scheduler_instance.value()->stats().registered_components == 1);
+
+    auto name = core::ComponentName::Create("speed_monitor");
+    assert(name.ok());
+    auto spec = context.value()->FindComponent(name.value());
+    assert(spec.ok());
+    assert(spec.value().triggers.front().priority == -7);
+    assert(spec.value().triggers.front().deadline == core::Nanoseconds(1250));
+    assert(!context.value()->FindComponentInstance(name.value()).ok());
+    assert(scheduler_instance.value()->Start().ok());
+    assert(scheduler_instance.value()->is_running());
+    assert(scheduler_instance.value()->Stop().ok());
 }
 
 void OmittedSchedulingFieldsUseDefaults()
@@ -156,6 +183,7 @@ void JsonFileIsLoaded()
 int main()
 {
     ValidJsonBuildsProject();
+    JsonConfigCreatesConfiguredScheduler();
     OmittedSchedulingFieldsUseDefaults();
     InvalidJsonIsRejected();
     JsonFileIsLoaded();

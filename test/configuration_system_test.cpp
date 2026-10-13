@@ -185,7 +185,42 @@ void ProjectConfigCreatesConfiguredScheduler()
 
     auto scheduler_instance = config::CreateScheduler(project, *context.value());
     assert(scheduler_instance.ok());
-    assert(scheduler_instance.value()->RegisterAllComponents().code() == core::StatusCode::kAlreadyExists);
+    assert(scheduler_instance.value()->stats().registered_components == 1);
+    auto name = core::ComponentName::Create("speed_monitor");
+    assert(name.ok());
+    assert(context.value()->FindComponent(name.value()).ok());
+    assert(!context.value()->FindComponentInstance(name.value()).ok());
+    assert(scheduler_instance.value()->RegisterComponent(name.value()).code() == core::StatusCode::kAlreadyExists);
+    assert(scheduler_instance.value()->RegisterAllComponents().ok());
+    assert(scheduler_instance.value()->Start().ok());
+    assert(scheduler_instance.value()->is_running());
+    assert(scheduler_instance.value()->Stop().ok());
+}
+
+void InvalidProjectDoesNotRegisterComponents()
+{
+    auto project = MakeSpeedProject();
+    project.scheduler_options.worker_count = 0;
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(!scheduler_instance.ok());
+    assert(scheduler_instance.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+}
+
+void DuplicateRuntimeComponentIsRejected()
+{
+    auto project = MakeSpeedProject();
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    assert(config::ApplyComponentSpecs(project, *context.value()).ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(!scheduler_instance.ok());
+    assert(scheduler_instance.status().code() == core::StatusCode::kAlreadyExists);
+    assert(context.value()->ListComponentNames().size() == 1);
 }
 
 }  // namespace
@@ -201,5 +236,7 @@ int main()
     TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
     ProjectConfigCreatesConfiguredScheduler();
+    InvalidProjectDoesNotRegisterComponents();
+    DuplicateRuntimeComponentIsRejected();
     return 0;
 }
