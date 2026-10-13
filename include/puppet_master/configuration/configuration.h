@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -50,6 +51,7 @@ struct ComponentConfig {
     std::vector<std::string> readers;
     std::vector<std::string> writers;
     std::vector<TriggerConfig> triggers;
+    std::string type;
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<runtime::ComponentSpec> ToComponentSpec(const ProjectConfig& project) const;
@@ -78,6 +80,16 @@ struct ProjectConfig {
 
 using ComponentFactory = std::function<core::Result<runtime::ComponentPtr>(const runtime::ComponentSpec&)>;
 
+class ComponentFactoryRegistry {
+public:
+    core::Status Register(std::string type, ComponentFactory factory);
+    core::Result<runtime::ComponentPtr> Create(
+        std::string_view type, const runtime::ComponentSpec& spec) const;
+
+private:
+    std::map<std::string, ComponentFactory> factories_;
+};
+
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime);
 core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     const ProjectConfig& project,
@@ -86,6 +98,10 @@ core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     const ProjectConfig& project,
     runtime::RuntimeContext& runtime,
     const ComponentFactory& factory);
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime,
+    const ComponentFactoryRegistry& factories);
 
 core::Result<core::TransportKind> ParseTransportKind(std::string_view value);
 core::Result<core::TriggerKind> ParseTriggerKind(std::string_view value);

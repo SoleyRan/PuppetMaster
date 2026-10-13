@@ -66,6 +66,7 @@ const char* kValidConfig = R"json({
     }],
     "components": [{
         "name": "speed_monitor",
+        "type": "speed",
         "description": "runs when speed changes",
         "readers": ["speed"],
         "triggers": [{
@@ -91,6 +92,7 @@ void ValidJsonBuildsProject()
     assert(project.topics.front().message_policy.freshness == core::FreshnessPolicy::kQueued);
     assert(project.topics.front().message_policy.queue_depth == 8);
     assert(project.components.size() == 1);
+    assert(project.components.front().type == "speed");
     assert(project.components.front().triggers.front().kind == core::TriggerKind::kData);
     assert(project.components.front().triggers.front().priority == -7);
     assert(project.components.front().triggers.front().deadline == core::Nanoseconds(1250));
@@ -135,12 +137,14 @@ void JsonConfigRunsFactoryComponent()
     auto context = runtime::RuntimeContext::Create(parsed.value().ToRuntimeOptions().value());
     assert(context.ok());
     std::shared_ptr<SpeedMonitor> monitor;
-    auto sched = config::CreateScheduler(parsed.value(), *context.value(),
+    config::ComponentFactoryRegistry factories;
+    assert(factories.Register("speed",
         [&monitor](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
             monitor = std::make_shared<SpeedMonitor>(spec);
             runtime::ComponentPtr component = monitor;
             return component;
-        });
+        }).ok());
+    auto sched = config::CreateScheduler(parsed.value(), *context.value(), factories);
     assert(sched.ok());
     auto name = core::ComponentName::Create("speed_monitor").value();
     assert(context.value()->FindComponentInstance(name).ok());
@@ -165,6 +169,10 @@ void OmittedSchedulingFieldsUseDefaults()
         R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual"}]}]})json");
     assert(result.ok());
     assert(result.value().ToSchedulerOptions().value().worker_count == 1);
+    assert(result.value().components.front().type.empty());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    assert(config::CreateScheduler(result.value(), *context.value()).ok());
     auto spec = result.value().BuildComponentSpec("monitor");
     assert(spec.ok());
     assert(spec.value().triggers.front().priority == 0);
@@ -179,6 +187,11 @@ void InvalidJsonIsRejected()
 
     auto wrong_type = config::ParseJsonConfig(R"json({"topics": "not-an-array"})json");
     assert(!wrong_type.ok());
+
+    auto wrong_component_type = config::ParseJsonConfig(
+        R"json({"components":[{"name":"monitor","type":12}]})json");
+    assert(!wrong_component_type.ok());
+    assert(wrong_component_type.status().code() == core::StatusCode::kInvalidArgument);
 
     auto out_of_range = config::ParseJsonConfig(
         R"json({"topics":[{"id":"speed","name":"/speed","message_type":"demo.Speed","message_policy":{"queue_depth":0}}]})json");

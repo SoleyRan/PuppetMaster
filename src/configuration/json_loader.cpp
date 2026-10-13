@@ -154,9 +154,10 @@ ProjectConfig Decode(const Json& root)
     index = 0;
     for (const auto& value : Array(root, "components", "$")) {
         const auto path = "$.components[" + std::to_string(index++) + "]";
-        CheckObject(value, path, {"name", "description", "readers", "writers", "triggers"});
+        CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type"});
         ComponentConfig component;
         Read(value, "name", component.name, path);
+        Read(value, "type", component.type, path);
         Read(value, "description", component.description, path);
         Read(value, "readers", component.readers, path);
         Read(value, "writers", component.writers, path);

@@ -52,6 +52,17 @@ target_link_libraries(puppet_master_configuration_system_demo
         PuppetMaster::PuppetMaster
 )
 
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    target_link_libraries(puppet_master_configuration_system_demo
+        PRIVATE
+            PuppetMaster::JsonConfigAdapter
+    )
+    target_compile_definitions(puppet_master_configuration_system_demo
+        PRIVATE
+            PUPPETMASTER_DEMO_WITH_JSON_CONFIG
+    )
+endif()
+
 add_executable(puppet_master_compatibility_facade_demo
     compatibility_facade_demo.cpp
 )

@@ -6,10 +6,13 @@
 
 #include <puppet_master/puppet_master.h>
 
+#ifdef PUPPETMASTER_DEMO_WITH_JSON_CONFIG
+#include <puppet_master/configuration/json_loader.h>
+#endif
+
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
-namespace scheduler = puppet_master::scheduler;
 namespace transport = puppet_master::transport;
 
 namespace {
@@ -50,7 +53,8 @@ core::Result<config::ProjectConfig> BuildProjectConfig()
         "runs when speed data arrives",
         {"speed"},
         {},
-        {speed_trigger}
+        {speed_trigger},
+        "speed"
     });
     if (!status.ok()) {
         return core::Result<config::ProjectConfig>::FromStatus(std::move(status));
@@ -142,11 +146,44 @@ private:
 
 }  // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
+    if (argc > 2) {
+        std::cerr << "usage: " << argv[0] << " [config.json]\n";
+        return 1;
+    }
+
+#ifdef PUPPETMASTER_DEMO_WITH_JSON_CONFIG
+    auto project = argc == 2 ? config::LoadJsonConfig(argv[1]) : BuildProjectConfig();
+#else
+    if (argc == 2) {
+        std::cerr << "JSON configuration support is disabled; rebuild with PUPPETMASTER_ENABLE_JSON_CONFIG=ON\n";
+        return 1;
+    }
     auto project = BuildProjectConfig();
+#endif
     if (!project.ok()) {
-        return Fail("failed to build project config", project.status());
+        return Fail("failed to load project config", project.status());
+    }
+
+    auto endpoint = project.value().BuildEndpoint("speed");
+    if (!endpoint.ok()) {
+        return Fail("failed to build speed endpoint", endpoint.status());
+    }
+
+    auto monitor_spec = project.value().BuildComponentSpec("speed_monitor");
+    if (!monitor_spec.ok()) {
+        return Fail("failed to build speed monitor spec", monitor_spec.status());
+    }
+    const auto& spec = monitor_spec.value();
+    if (project.value().components.size() != 1 || spec.readers.size() != 1 ||
+        spec.readers.front().topic.name != endpoint.value().topic.name ||
+        endpoint.value().topic.transport != core::TransportKind::kInMemory ||
+        spec.triggers.size() != 1 || spec.triggers.front().kind != core::TriggerKind::kData ||
+        spec.triggers.front().data_dependencies.size() != 1 ||
+        spec.triggers.front().data_dependencies.front() != endpoint.value().topic.name) {
+        std::cerr << "config must contain only speed_monitor with one reader and data trigger for an in-memory speed topic\n";
+        return 1;
     }
 
     auto options = project.value().ToRuntimeOptions();
@@ -159,37 +196,32 @@ int main()
         return Fail("failed to create runtime context", context.status());
     }
 
-    auto monitor_spec = project.value().BuildComponentSpec("speed_monitor");
-    if (!monitor_spec.ok()) {
-        return Fail("failed to build component spec", monitor_spec.status());
-    }
-
-    auto monitor = std::make_shared<ConfiguredSpeedMonitor>(monitor_spec.value());
-    auto status = context.value()->RegisterComponent(monitor);
+    std::shared_ptr<ConfiguredSpeedMonitor> monitor;
+    config::ComponentFactoryRegistry factories;
+    auto status = factories.Register("speed",
+        [&monitor](const runtime::ComponentSpec& component_spec) -> core::Result<runtime::ComponentPtr> {
+            monitor = std::make_shared<ConfiguredSpeedMonitor>(component_spec);
+            runtime::ComponentPtr component = monitor;
+            return component;
+        });
     if (!status.ok()) {
-        return Fail("failed to register component", status);
+        return Fail("failed to register speed component factory", status);
     }
 
-    const auto component_name = monitor->Describe().name;
+    auto sched = config::CreateScheduler(project.value(), *context.value(), factories);
+    if (!sched.ok()) {
+        return Fail("failed to create configured scheduler", sched.status());
+    }
+
+    const auto component_name = spec.name;
     status = BringUp(*context.value(), component_name);
     if (!status.ok()) {
         return Fail("failed to bring up component", status);
     }
 
-    scheduler::Scheduler sched(*context.value());
-    status = sched.RegisterAllComponents();
-    if (!status.ok()) {
-        return Fail("failed to register scheduler components", status);
-    }
-
-    status = sched.Start();
+    status = sched.value()->Start();
     if (!status.ok()) {
         return Fail("failed to start scheduler", status);
-    }
-
-    auto endpoint = project.value().BuildEndpoint("speed");
-    if (!endpoint.ok()) {
-        return Fail("failed to build speed endpoint", endpoint.status());
     }
 
     auto writer = context.value()->CreateWriter(endpoint.value());
@@ -203,16 +235,25 @@ int main()
         return Fail("failed to publish speed", status);
     }
 
-    status = sched.WaitIdle(std::chrono::milliseconds(500));
+    status = sched.value()->WaitIdle(std::chrono::milliseconds(500));
     if (!status.ok()) {
         return Fail("scheduler did not become idle", status);
+    }
+
+    status = sched.value()->Stop();
+    if (!status.ok()) {
+        return Fail("failed to stop scheduler", status);
+    }
+    if (monitor->execute_count() != 1 || monitor->last_payload() != payload) {
+        std::cerr << "unexpected speed monitor result: expected one execution with payload " << payload
+                  << ", got " << monitor->execute_count() << " with payload " << monitor->last_payload() << '\n';
+        return 1;
     }
 
     std::cout << "component: " << component_name.str() << '\n';
     std::cout << "executions: " << monitor->execute_count() << '\n';
     std::cout << "last payload: " << monitor->last_payload() << '\n';
 
-    sched.Stop();
     context.value()->StopComponent(component_name);
     context.value()->ShutdownComponent(component_name);
     return 0;
