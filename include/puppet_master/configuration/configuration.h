@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -75,6 +76,9 @@ struct ProjectConfig {
 };
 
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime);
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime);
 
 core::Result<core::TransportKind> ParseTransportKind(std::string_view value);
 core::Result<core::TriggerKind> ParseTriggerKind(std::string_view value);

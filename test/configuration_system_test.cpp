@@ -176,6 +176,18 @@ void ProjectConfigAppliesComponentSpecsToRuntime()
     assert(spec.value().readers.size() == 1);
 }
 
+void ProjectConfigCreatesConfiguredScheduler()
+{
+    auto project = MakeSpeedProject();
+    project.scheduler_options.worker_count = 2;
+    auto context = runtime::RuntimeContext::Create(project.ToRuntimeOptions().value());
+    assert(context.ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(scheduler_instance.ok());
+    assert(scheduler_instance.value()->RegisterAllComponents().code() == core::StatusCode::kAlreadyExists);
+}
+
 }  // namespace
 
 int main()
@@ -188,5 +200,6 @@ int main()
     ProjectValidationRejectsTriggerFieldMismatch();
     TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
+    ProjectConfigCreatesConfiguredScheduler();
     return 0;
 }

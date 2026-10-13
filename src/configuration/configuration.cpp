@@ -407,6 +407,34 @@ core::Result<runtime::ComponentSpec> ProjectConfig::BuildComponentSpec(
     return component.value().ToComponentSpec(*this);
 }
 
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime)
+{
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    status = ApplyComponentSpecs(project, runtime);
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    auto options = project.ToSchedulerOptions();
+    if (!options.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(options.status());
+    }
+
+    auto scheduler_instance = std::make_unique<scheduler::Scheduler>(runtime, options.value());
+    status = scheduler_instance->RegisterAllComponents();
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    return scheduler_instance;
+}
+
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime)
 {
     auto status = project.Validate();
