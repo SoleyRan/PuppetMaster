@@ -1,7 +1,11 @@
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <utility>
 
 #include <puppet_master/configuration/json_loader.h>
 #include <puppet_master/runtime/context.h>
@@ -9,8 +13,38 @@
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
+namespace transport = puppet_master::transport;
 
 namespace {
+
+class SpeedMonitor final : public runtime::Component {
+public:
+    explicit SpeedMonitor(runtime::ComponentSpec spec) : spec_(std::move(spec)) {}
+    runtime::ComponentSpec Describe() const override { return spec_; }
+    core::Status Configure(runtime::ComponentContext& context) override
+    {
+        auto reader = context.CreateReader(spec_.readers.front());
+        if (!reader.ok()) {
+            return reader.status();
+        }
+        reader_ = reader.value();
+        return core::Status::Ok();
+    }
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        auto message = reader_->Read();
+        if (!message.ok()) {
+            return message.status();
+        }
+        ++executions_;
+        return core::Status::Ok();
+    }
+    int executions() const { return executions_.load(); }
+private:
+    runtime::ComponentSpec spec_;
+    transport::ReaderPtr reader_;
+    std::atomic<int> executions_ {0};
+};
 
 const char* kValidConfig = R"json({
     "runtime": {
@@ -92,6 +126,37 @@ void JsonConfigCreatesConfiguredScheduler()
     assert(scheduler_instance.value()->Start().ok());
     assert(scheduler_instance.value()->is_running());
     assert(scheduler_instance.value()->Stop().ok());
+}
+
+void JsonConfigRunsFactoryComponent()
+{
+    auto parsed = config::ParseJsonConfig(kValidConfig);
+    assert(parsed.ok());
+    auto context = runtime::RuntimeContext::Create(parsed.value().ToRuntimeOptions().value());
+    assert(context.ok());
+    std::shared_ptr<SpeedMonitor> monitor;
+    auto sched = config::CreateScheduler(parsed.value(), *context.value(),
+        [&monitor](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            monitor = std::make_shared<SpeedMonitor>(spec);
+            runtime::ComponentPtr component = monitor;
+            return component;
+        });
+    assert(sched.ok());
+    auto name = core::ComponentName::Create("speed_monitor").value();
+    assert(context.value()->FindComponentInstance(name).ok());
+    assert(context.value()->ConfigureComponent(name).ok());
+    assert(context.value()->InitializeComponent(name).ok());
+    assert(context.value()->StartComponent(name).ok());
+    assert(sched.value()->Start().ok());
+    auto writer = context.value()->CreateWriter(parsed.value().BuildEndpoint("speed").value());
+    assert(writer.ok());
+    const std::string payload = "speed=12.5";
+    assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+    assert(sched.value()->WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(monitor->executions() == 1);
+    assert(sched.value()->Stop().ok());
+    assert(context.value()->StopComponent(name).ok());
+    assert(context.value()->ShutdownComponent(name).ok());
 }
 
 void OmittedSchedulingFieldsUseDefaults()
@@ -184,6 +249,7 @@ int main()
 {
     ValidJsonBuildsProject();
     JsonConfigCreatesConfiguredScheduler();
+    JsonConfigRunsFactoryComponent();
     OmittedSchedulingFieldsUseDefaults();
     InvalidJsonIsRejected();
     JsonFileIsLoaded();

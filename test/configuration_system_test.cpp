@@ -1,5 +1,7 @@
 #include <cassert>
+#include <memory>
 #include <string>
+#include <utility>
 
 #include <puppet_master/puppet_master.h>
 
@@ -8,6 +10,14 @@ namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
 
 namespace {
+
+class SpecComponent final : public runtime::Component {
+public:
+    explicit SpecComponent(runtime::ComponentSpec spec) : spec_(std::move(spec)) {}
+    runtime::ComponentSpec Describe() const override { return spec_; }
+private:
+    runtime::ComponentSpec spec_;
+};
 
 config::ProjectConfig MakeSpeedProject()
 {
@@ -223,6 +233,70 @@ void DuplicateRuntimeComponentIsRejected()
     assert(context.value()->ListComponentNames().size() == 1);
 }
 
+void FactoryCreatesComponentInstances()
+{
+    auto project = MakeSpeedProject();
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto factory = [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+        runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+        return component;
+    };
+    auto sched = config::CreateScheduler(project, *context.value(), factory);
+    assert(sched.ok());
+    assert(sched.value()->stats().registered_components == 1);
+    auto name = core::ComponentName::Create("speed_monitor").value();
+    assert(context.value()->FindComponentInstance(name).ok());
+    assert(context.value()->GetComponentState(name).value() == runtime::ComponentState::kCreated);
+    assert(context.value()->ConfigureComponent(name).ok());
+    assert(context.value()->InitializeComponent(name).ok());
+    assert(context.value()->StartComponent(name).ok());
+    assert(context.value()->StopComponent(name).ok());
+    assert(context.value()->ShutdownComponent(name).ok());
+    auto duplicate = config::CreateScheduler(project, *context.value(), factory);
+    assert(!duplicate.ok());
+    assert(duplicate.status().code() == core::StatusCode::kAlreadyExists);
+}
+
+void FactoryFailuresLeaveRuntimeUnchanged()
+{
+    auto project = MakeSpeedProject();
+    assert(project.AddComponent(config::ComponentConfig {"second_monitor", "second", {}, {}, {}}).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto failing = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            if (spec.name.str() == "second_monitor") {
+                return core::Result<runtime::ComponentPtr>::FromStatus(
+                    core::Status::NotFound("factory not registered"));
+            }
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        });
+    assert(!failing.ok());
+    assert(failing.status().code() == core::StatusCode::kNotFound);
+    assert(context.value()->ListComponentNames().empty());
+
+    auto mismatched = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            auto changed = spec;
+            changed.triggers.clear();
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(changed);
+            return component;
+        });
+    assert(!mismatched.ok());
+    assert(mismatched.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+
+    auto null_instance = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec&) -> core::Result<runtime::ComponentPtr> {
+            return runtime::ComponentPtr {};
+        });
+    assert(!null_instance.ok());
+    assert(null_instance.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+}
+
 }  // namespace
 
 int main()
@@ -238,5 +312,7 @@ int main()
     ProjectConfigCreatesConfiguredScheduler();
     InvalidProjectDoesNotRegisterComponents();
     DuplicateRuntimeComponentIsRejected();
+    FactoryCreatesComponentInstances();
+    FactoryFailuresLeaveRuntimeUnchanged();
     return 0;
 }

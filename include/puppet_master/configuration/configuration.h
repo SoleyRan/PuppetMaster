@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -75,10 +76,16 @@ struct ProjectConfig {
     core::Result<runtime::ComponentSpec> BuildComponentSpec(std::string_view component_name) const;
 };
 
+using ComponentFactory = std::function<core::Result<runtime::ComponentPtr>(const runtime::ComponentSpec&)>;
+
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime);
 core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     const ProjectConfig& project,
     runtime::RuntimeContext& runtime);
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime,
+    const ComponentFactory& factory);
 
 core::Result<core::TransportKind> ParseTransportKind(std::string_view value);
 core::Result<core::TriggerKind> ParseTriggerKind(std::string_view value);
