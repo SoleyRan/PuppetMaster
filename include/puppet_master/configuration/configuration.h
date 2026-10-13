@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,6 +12,7 @@
 #include <puppet_master/core/types.h>
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/context.h>
+#include <puppet_master/scheduler/scheduler.h>
 #include <puppet_master/transport/transport.h>
 
 namespace puppet_master::configuration {
@@ -34,6 +37,8 @@ struct TriggerConfig {
     core::DependencyPolicy dependency_policy {core::DependencyPolicy::kAll};
     std::vector<std::string> data_topics;
     std::vector<std::string> task_dependencies;
+    std::int32_t priority {0};
+    core::Nanoseconds deadline {0};
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<core::TriggerSpec> ToTriggerSpec(const ProjectConfig& project) const;
@@ -54,6 +59,7 @@ struct ComponentConfig {
 // usable before choosing a file format such as YAML, JSON, or TOML.
 struct ProjectConfig {
     runtime::RuntimeOptions runtime_options;
+    scheduler::SchedulerOptions scheduler_options;
     std::vector<TopicConfig> topics;
     std::vector<ComponentConfig> components;
 
@@ -63,13 +69,23 @@ struct ProjectConfig {
     core::Status Validate() const;
 
     core::Result<runtime::RuntimeOptions> ToRuntimeOptions() const;
+    core::Result<scheduler::SchedulerOptions> ToSchedulerOptions() const;
     core::Result<TopicConfig> FindTopic(std::string_view id) const;
     core::Result<ComponentConfig> FindComponent(std::string_view name) const;
     core::Result<transport::EndpointConfig> BuildEndpoint(std::string_view topic_id) const;
     core::Result<runtime::ComponentSpec> BuildComponentSpec(std::string_view component_name) const;
 };
 
+using ComponentFactory = std::function<core::Result<runtime::ComponentPtr>(const runtime::ComponentSpec&)>;
+
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime);
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime);
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime,
+    const ComponentFactory& factory);
 
 core::Result<core::TransportKind> ParseTransportKind(std::string_view value);
 core::Result<core::TriggerKind> ParseTriggerKind(std::string_view value);

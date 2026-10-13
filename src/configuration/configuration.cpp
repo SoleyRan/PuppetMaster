@@ -75,6 +75,56 @@ core::Status ValidateUniqueComponents(const std::vector<ComponentConfig>& compon
     return core::Status::Ok();
 }
 
+bool SamePolicy(const core::MessagePolicy& lhs, const core::MessagePolicy& rhs)
+{
+    return lhs.delivery == rhs.delivery && lhs.retention == rhs.retention
+        && lhs.freshness == rhs.freshness && lhs.overflow == rhs.overflow
+        && lhs.queue_depth == rhs.queue_depth;
+}
+
+bool SameEndpoints(
+    const std::vector<transport::EndpointConfig>& lhs,
+    const std::vector<transport::EndpointConfig>& rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].topic.name != rhs[i].topic.name
+            || lhs[i].topic.transport != rhs[i].topic.transport
+            || !SamePolicy(lhs[i].topic.message_policy, rhs[i].topic.message_policy)
+            || lhs[i].message.type_name != rhs[i].message.type_name
+            || lhs[i].message.encoding != rhs[i].message.encoding) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameTriggers(const std::vector<core::TriggerSpec>& lhs, const std::vector<core::TriggerSpec>& rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].kind != rhs[i].kind || lhs[i].period != rhs[i].period
+            || lhs[i].dependency_policy != rhs[i].dependency_policy
+            || lhs[i].data_dependencies != rhs[i].data_dependencies
+            || lhs[i].task_dependencies != rhs[i].task_dependencies
+            || lhs[i].priority != rhs[i].priority || lhs[i].deadline != rhs[i].deadline) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameSpec(const runtime::ComponentSpec& lhs, const runtime::ComponentSpec& rhs)
+{
+    return lhs.name == rhs.name && lhs.description == rhs.description
+        && SameEndpoints(lhs.readers, rhs.readers) && SameEndpoints(lhs.writers, rhs.writers)
+        && SameTriggers(lhs.triggers, rhs.triggers);
+}
+
 }  // namespace
 
 core::Status TopicConfig::Validate() const
@@ -162,6 +212,8 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
     trigger.kind = kind;
     trigger.period = period;
     trigger.dependency_policy = dependency_policy;
+    trigger.priority = priority;
+    trigger.deadline = deadline;
 
     if (kind == core::TriggerKind::kData && data_topics.empty()) {
         return core::Result<core::TriggerSpec>::FromStatus(
@@ -304,6 +356,11 @@ core::Status ProjectConfig::Validate() const
         return status;
     }
 
+    status = scheduler_options.Validate();
+    if (!status.ok()) {
+        return status;
+    }
+
     status = ValidateUniqueIds(topics);
     if (!status.ok()) {
         return status;
@@ -338,6 +395,15 @@ core::Result<runtime::RuntimeOptions> ProjectConfig::ToRuntimeOptions() const
         return core::Result<runtime::RuntimeOptions>::FromStatus(std::move(status));
     }
     return runtime_options;
+}
+
+core::Result<scheduler::SchedulerOptions> ProjectConfig::ToSchedulerOptions() const
+{
+    auto status = scheduler_options.Validate();
+    if (!status.ok()) {
+        return core::Result<scheduler::SchedulerOptions>::FromStatus(std::move(status));
+    }
+    return scheduler_options;
 }
 
 core::Result<TopicConfig> ProjectConfig::FindTopic(std::string_view id) const
@@ -389,6 +455,89 @@ core::Result<runtime::ComponentSpec> ProjectConfig::BuildComponentSpec(
     }
 
     return component.value().ToComponentSpec(*this);
+}
+
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime)
+{
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    status = ApplyComponentSpecs(project, runtime);
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    auto options = project.ToSchedulerOptions();
+    if (!options.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(options.status());
+    }
+
+    auto scheduler_instance = std::make_unique<scheduler::Scheduler>(runtime, options.value());
+    status = scheduler_instance->RegisterAllComponents();
+    if (!status.ok()) {
+        return core::Result<std::unique_ptr<scheduler::Scheduler>>::FromStatus(std::move(status));
+    }
+
+    return scheduler_instance;
+}
+
+core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
+    const ProjectConfig& project,
+    runtime::RuntimeContext& runtime,
+    const ComponentFactory& factory)
+{
+    using SchedulerResult = core::Result<std::unique_ptr<scheduler::Scheduler>>;
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return SchedulerResult::FromStatus(std::move(status));
+    }
+    if (!factory) {
+        return SchedulerResult::FromStatus(core::Status::InvalidArgument("component factory must not be empty"));
+    }
+
+    std::vector<runtime::ComponentPtr> instances;
+    instances.reserve(project.components.size());
+    for (const auto& component : project.components) {
+        auto spec = component.ToComponentSpec(project);
+        if (!spec.ok()) {
+            return SchedulerResult::FromStatus(spec.status());
+        }
+        if (runtime.FindComponent(spec.value().name).ok()) {
+            return SchedulerResult::FromStatus(
+                core::Status::AlreadyExists("component is already registered: " + component.name));
+        }
+        auto instance = factory(spec.value());
+        if (!instance.ok()) {
+            return SchedulerResult::FromStatus(instance.status());
+        }
+        if (!instance.value()) {
+            return SchedulerResult::FromStatus(
+                core::Status::InvalidArgument("component factory returned null: " + component.name));
+        }
+        if (!SameSpec(spec.value(), instance.value()->Describe())) {
+            return SchedulerResult::FromStatus(
+                core::Status::InvalidArgument("component factory returned mismatched spec: " + component.name));
+        }
+        instances.push_back(std::move(instance.value()));
+    }
+
+    for (auto& instance : instances) {
+        status = runtime.RegisterComponent(std::move(instance));
+        if (!status.ok()) {
+            return SchedulerResult::FromStatus(std::move(status));
+        }
+    }
+
+    auto scheduler_instance = std::make_unique<scheduler::Scheduler>(runtime, project.scheduler_options);
+    status = scheduler_instance->RegisterAllComponents();
+    if (!status.ok()) {
+        return SchedulerResult::FromStatus(std::move(status));
+    }
+    return scheduler_instance;
 }
 
 core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeContext& runtime)

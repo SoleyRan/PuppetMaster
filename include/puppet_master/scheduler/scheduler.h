@@ -20,6 +20,13 @@ struct SchedulerStats {
 
 struct SchedulerOptions {
     std::size_t worker_count {1};
+
+    core::Status Validate() const
+    {
+        return worker_count == 0
+            ? core::Status::InvalidArgument("scheduler worker_count must be greater than zero")
+            : core::Status::Ok();
+    }
 };
 
 // Scheduler turns TriggerSpec declarations into ExecuteComponent() calls.

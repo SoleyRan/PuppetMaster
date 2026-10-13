@@ -211,11 +211,11 @@ struct Scheduler::Impl {
             if (stopping) {
                 return core::Status::FailedPrecondition("scheduler is stopping");
             }
-            if (options.worker_count == 0) {
-                return core::Status::InvalidArgument("scheduler worker_count must be greater than zero");
+            auto status = options.Validate();
+            if (!status.ok()) {
+                return status;
             }
-
-            auto status = InstallTaskTriggers();
+            status = InstallTaskTriggers();
             if (!status.ok()) {
                 return status;
             }

@@ -1,5 +1,7 @@
 #include <cassert>
+#include <memory>
 #include <string>
+#include <utility>
 
 #include <puppet_master/puppet_master.h>
 
@@ -8,6 +10,14 @@ namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
 
 namespace {
+
+class SpecComponent final : public runtime::Component {
+public:
+    explicit SpecComponent(runtime::ComponentSpec spec) : spec_(std::move(spec)) {}
+    runtime::ComponentSpec Describe() const override { return spec_; }
+private:
+    runtime::ComponentSpec spec_;
+};
 
 config::ProjectConfig MakeSpeedProject()
 {
@@ -63,6 +73,20 @@ void EnumParsersAcceptHumanReadableValues()
     auto invalid = config::ParseRetentionPolicy("forever");
     assert(!invalid.ok());
     assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+}
+
+void SchedulerOptionsAreValidatedAndExposed()
+{
+    config::ProjectConfig project;
+    project.scheduler_options.worker_count = 3;
+    auto options = project.ToSchedulerOptions();
+    assert(options.ok());
+    assert(options.value().worker_count == 3);
+    assert(project.Validate().ok());
+
+    project.scheduler_options.worker_count = 0;
+    assert(!project.ToSchedulerOptions().ok());
+    assert(project.Validate().code() == core::StatusCode::kInvalidArgument);
 }
 
 void ProjectConfigBuildsEndpointAndComponentSpec()
@@ -128,6 +152,23 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     assert(status.code() == core::StatusCode::kInvalidArgument);
 }
 
+void TriggerSchedulingFieldsReachComponentSpec()
+{
+    auto project = MakeSpeedProject();
+    auto& trigger = project.components.front().triggers.front();
+    assert(trigger.priority == 0);
+    assert(trigger.deadline == core::Nanoseconds::zero());
+    trigger.priority = -7;
+    trigger.deadline = core::Nanoseconds(1250);
+    assert(project.Validate().ok());
+    auto spec = project.BuildComponentSpec("speed_monitor");
+    assert(spec.ok());
+    assert(spec.value().triggers.front().priority == -7);
+    assert(spec.value().triggers.front().deadline == core::Nanoseconds(1250));
+    trigger.deadline = core::Nanoseconds(-1);
+    assert(project.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
 void ProjectConfigAppliesComponentSpecsToRuntime()
 {
     const auto project = MakeSpeedProject();
@@ -145,15 +186,133 @@ void ProjectConfigAppliesComponentSpecsToRuntime()
     assert(spec.value().readers.size() == 1);
 }
 
+void ProjectConfigCreatesConfiguredScheduler()
+{
+    auto project = MakeSpeedProject();
+    project.scheduler_options.worker_count = 2;
+    auto context = runtime::RuntimeContext::Create(project.ToRuntimeOptions().value());
+    assert(context.ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(scheduler_instance.ok());
+    assert(scheduler_instance.value()->stats().registered_components == 1);
+    auto name = core::ComponentName::Create("speed_monitor");
+    assert(name.ok());
+    assert(context.value()->FindComponent(name.value()).ok());
+    assert(!context.value()->FindComponentInstance(name.value()).ok());
+    assert(scheduler_instance.value()->RegisterComponent(name.value()).code() == core::StatusCode::kAlreadyExists);
+    assert(scheduler_instance.value()->RegisterAllComponents().ok());
+    assert(scheduler_instance.value()->Start().ok());
+    assert(scheduler_instance.value()->is_running());
+    assert(scheduler_instance.value()->Stop().ok());
+}
+
+void InvalidProjectDoesNotRegisterComponents()
+{
+    auto project = MakeSpeedProject();
+    project.scheduler_options.worker_count = 0;
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(!scheduler_instance.ok());
+    assert(scheduler_instance.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+}
+
+void DuplicateRuntimeComponentIsRejected()
+{
+    auto project = MakeSpeedProject();
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    assert(config::ApplyComponentSpecs(project, *context.value()).ok());
+
+    auto scheduler_instance = config::CreateScheduler(project, *context.value());
+    assert(!scheduler_instance.ok());
+    assert(scheduler_instance.status().code() == core::StatusCode::kAlreadyExists);
+    assert(context.value()->ListComponentNames().size() == 1);
+}
+
+void FactoryCreatesComponentInstances()
+{
+    auto project = MakeSpeedProject();
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto factory = [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+        runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+        return component;
+    };
+    auto sched = config::CreateScheduler(project, *context.value(), factory);
+    assert(sched.ok());
+    assert(sched.value()->stats().registered_components == 1);
+    auto name = core::ComponentName::Create("speed_monitor").value();
+    assert(context.value()->FindComponentInstance(name).ok());
+    assert(context.value()->GetComponentState(name).value() == runtime::ComponentState::kCreated);
+    assert(context.value()->ConfigureComponent(name).ok());
+    assert(context.value()->InitializeComponent(name).ok());
+    assert(context.value()->StartComponent(name).ok());
+    assert(context.value()->StopComponent(name).ok());
+    assert(context.value()->ShutdownComponent(name).ok());
+    auto duplicate = config::CreateScheduler(project, *context.value(), factory);
+    assert(!duplicate.ok());
+    assert(duplicate.status().code() == core::StatusCode::kAlreadyExists);
+}
+
+void FactoryFailuresLeaveRuntimeUnchanged()
+{
+    auto project = MakeSpeedProject();
+    assert(project.AddComponent(config::ComponentConfig {"second_monitor", "second", {}, {}, {}}).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto failing = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            if (spec.name.str() == "second_monitor") {
+                return core::Result<runtime::ComponentPtr>::FromStatus(
+                    core::Status::NotFound("factory not registered"));
+            }
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        });
+    assert(!failing.ok());
+    assert(failing.status().code() == core::StatusCode::kNotFound);
+    assert(context.value()->ListComponentNames().empty());
+
+    auto mismatched = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            auto changed = spec;
+            changed.triggers.clear();
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(changed);
+            return component;
+        });
+    assert(!mismatched.ok());
+    assert(mismatched.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+
+    auto null_instance = config::CreateScheduler(project, *context.value(),
+        [](const runtime::ComponentSpec&) -> core::Result<runtime::ComponentPtr> {
+            return runtime::ComponentPtr {};
+        });
+    assert(!null_instance.ok());
+    assert(null_instance.status().code() == core::StatusCode::kInvalidArgument);
+    assert(context.value()->ListComponentNames().empty());
+}
+
 }  // namespace
 
 int main()
 {
     EnumParsersAcceptHumanReadableValues();
+    SchedulerOptionsAreValidatedAndExposed();
     ProjectConfigBuildsEndpointAndComponentSpec();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
+    ProjectConfigCreatesConfiguredScheduler();
+    InvalidProjectDoesNotRegisterComponents();
+    DuplicateRuntimeComponentIsRejected();
+    FactoryCreatesComponentInstances();
+    FactoryFailuresLeaveRuntimeUnchanged();
     return 0;
 }
