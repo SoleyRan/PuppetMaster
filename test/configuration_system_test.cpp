@@ -111,6 +111,72 @@ void ProjectConfigBuildsEndpointAndComponentSpec()
     assert(spec.value().triggers.front().data_dependencies.front().str() == "/vehicle/speed");
 }
 
+void TopicDescriptorConflictsAreRejectedBeforeAssembly()
+{
+    const auto add_topic = [](config::ProjectConfig& project, std::string id, std::string type,
+                              std::string encoding, core::TransportKind transport = core::TransportKind::kInMemory) {
+        assert(project.AddTopic(config::TopicConfig {
+            std::move(id), "/shared", transport, std::move(type), std::move(encoding), {}
+        }).ok());
+    };
+
+    for (const auto& descriptors : {
+             std::pair<std::string, std::string> {"demo.Distance", "text/plain"},
+             std::pair<std::string, std::string> {"demo.Speed", "application/json"},
+         }) {
+        config::ProjectConfig project;
+        add_topic(project, "first", "demo.Speed", "text/plain");
+        add_topic(project, "second", descriptors.first, descriptors.second);
+        auto status = project.Validate();
+        assert(!status.ok());
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("first") != std::string::npos);
+        assert(status.message().find("second") != std::string::npos);
+
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"first"}, {}, {}
+        }).ok());
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& spec)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        }).ok());
+        assert(config::ApplyComponentSpecs(project, *context.value()).code()
+            == core::StatusCode::kInvalidArgument);
+        auto specs_only = config::CreateScheduler(project, *context.value());
+        assert(!specs_only.ok());
+        assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    }
+}
+
+void TopicAliasesMayShareNamesAcrossTransports()
+{
+    config::ProjectConfig project;
+    core::MessagePolicy alternate_policy;
+    alternate_policy.freshness = core::FreshnessPolicy::kQueued;
+    alternate_policy.queue_depth = 4;
+    assert(project.AddTopic(config::TopicConfig {
+        "in_memory_one", "/shared", core::TransportKind::kInMemory, "demo.Speed", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "in_memory_two", "/shared", core::TransportKind::kInMemory, "demo.Speed", "text/plain", alternate_policy
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "fastdds", "/shared", core::TransportKind::kFastDds, "demo.Distance", "application/json", {}
+    }).ok());
+    assert(project.Validate().ok());
+}
+
 void ProjectValidationRejectsMissingDataReader()
 {
     auto project = MakeSpeedProject();
@@ -524,6 +590,8 @@ int main()
     EnumParsersAcceptHumanReadableValues();
     SchedulerOptionsAreValidatedAndExposed();
     ProjectConfigBuildsEndpointAndComponentSpec();
+    TopicDescriptorConflictsAreRejectedBeforeAssembly();
+    TopicAliasesMayShareNamesAcrossTransports();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();

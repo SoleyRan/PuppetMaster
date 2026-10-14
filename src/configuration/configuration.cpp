@@ -435,6 +435,20 @@ core::Status ProjectConfig::Validate() const
         }
     }
 
+    std::map<std::pair<core::TransportKind, std::string>, const TopicConfig*> declared_topics;
+    for (const auto& topic : topics) {
+        const auto key = std::make_pair(topic.transport, topic.name);
+        const auto inserted = declared_topics.emplace(key, &topic);
+        if (!inserted.second) {
+            const auto& first = *inserted.first->second;
+            if (first.message_type != topic.message_type || first.encoding != topic.encoding) {
+                return core::Status::InvalidArgument(
+                    "topic ids " + first.id + " and " + topic.id + " declare conflicting message descriptors for "
+                    + std::string(core::ToString(topic.transport)) + " topic " + topic.name);
+            }
+        }
+    }
+
     for (const auto& component : components) {
         status = component.Validate(*this);
         if (!status.ok()) {

@@ -242,6 +242,28 @@ void OmittedSchedulingFieldsUseDefaults()
     assert(spec.value().triggers.front().deadline == core::Nanoseconds::zero());
 }
 
+void JsonTopicDescriptorsAreValidated()
+{
+    for (const auto* json : {
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Distance","encoding":"text/plain"}]})json",
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","encoding":"application/json"}]})json",
+         }) {
+        auto conflict = config::ParseJsonConfig(json);
+        assert(!conflict.ok());
+        assert(conflict.status().code() == core::StatusCode::kInvalidArgument);
+        assert(conflict.status().message().find("first") != std::string::npos);
+        assert(conflict.status().message().find("second") != std::string::npos);
+    }
+
+    auto aliases = config::ParseJsonConfig(R"json({"topics":[
+        {"id":"first","name":"/shared","transport":"in_memory","message_type":"demo.Speed","encoding":"text/plain"},
+        {"id":"second","name":"/shared","transport":"in_memory","message_type":"demo.Speed","encoding":"text/plain","message_policy":{"freshness":"queued","queue_depth":4}},
+        {"id":"third","name":"/shared","transport":"fastdds","message_type":"demo.Distance","encoding":"application/json"}
+    ]})json");
+    assert(aliases.ok());
+    assert(aliases.value().topics.size() == 3);
+}
+
 void InvalidJsonIsRejected()
 {
     auto unknown = config::ParseJsonConfig(R"json({"unexpected": true})json");
@@ -344,6 +366,7 @@ int main()
     JsonConfigRunsFactoryComponent();
     JsonConfigRunsForwardDeclaredTaskDependency();
     OmittedSchedulingFieldsUseDefaults();
+    JsonTopicDescriptorsAreValidated();
     InvalidJsonIsRejected();
     JsonFileIsLoaded();
     return 0;
