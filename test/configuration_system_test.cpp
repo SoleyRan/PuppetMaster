@@ -395,6 +395,41 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     assert(status.code() == core::StatusCode::kInvalidArgument);
 }
 
+void DependencyPoliciesMatchTriggerKinds()
+{
+    config::ProjectConfig project;
+    config::TriggerConfig periodic;
+    periodic.kind = core::TriggerKind::kPeriodic;
+    periodic.period = core::Nanoseconds(1000);
+    config::TriggerConfig manual;
+    manual.kind = core::TriggerKind::kManual;
+
+    assert(periodic.ToTriggerSpec(project).ok());
+    assert(manual.ToTriggerSpec(project).ok());
+    for (auto trigger : {periodic, manual}) {
+        trigger.dependency_policy = core::DependencyPolicy::kAny;
+        auto result = trigger.ToTriggerSpec(project);
+        assert(!result.ok());
+        assert(result.status().code() == core::StatusCode::kInvalidArgument);
+        assert(result.status().message().find("dependency_policy") != std::string::npos);
+        assert(trigger.Validate(project).code() == core::StatusCode::kInvalidArgument);
+    }
+
+    auto data_project = MakeSpeedProject();
+    assert(data_project.Validate().ok());
+    auto data = data_project.components.front().triggers.front().ToTriggerSpec(data_project);
+    assert(data.ok());
+    assert(data.value().dependency_policy == core::DependencyPolicy::kAny);
+
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"upstream"};
+    task.dependency_policy = core::DependencyPolicy::kAny;
+    auto task_spec = task.ToTriggerSpec(project);
+    assert(task_spec.ok());
+    assert(task_spec.value().dependency_policy == core::DependencyPolicy::kAny);
+}
+
 void TaskDependencyGraphsAreValidatedBeforeAssembly()
 {
     config::TriggerConfig task;
@@ -810,6 +845,7 @@ int main()
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    DependencyPoliciesMatchTriggerKinds();
     TaskDependencyGraphsAreValidatedBeforeAssembly();
     TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams();
     TriggerSchedulingFieldsReachComponentSpec();

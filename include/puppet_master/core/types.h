@@ -243,6 +243,11 @@ struct TriggerSpec {
         if (kind == TriggerKind::kPeriodic && period <= Nanoseconds::zero()) {
             return Status::InvalidArgument("periodic trigger period must be greater than zero");
         }
+        if (kind != TriggerKind::kData && kind != TriggerKind::kTaskDependency
+            && dependency_policy != DependencyPolicy::kAll) {
+            return Status::InvalidArgument(
+                "trigger dependency_policy can only be used with data or task dependency triggers");
+        }
         if (deadline < Nanoseconds::zero()) {
             return Status::InvalidArgument("trigger deadline must not be negative");
         }

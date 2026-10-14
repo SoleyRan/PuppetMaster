@@ -248,6 +248,12 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
             core::Status::InvalidArgument("trigger period can only be used with periodic triggers"));
     }
 
+    if (kind != core::TriggerKind::kData && kind != core::TriggerKind::kTaskDependency
+        && dependency_policy != core::DependencyPolicy::kAll) {
+        return core::Result<core::TriggerSpec>::FromStatus(core::Status::InvalidArgument(
+            "trigger dependency_policy can only be used with data or task dependency triggers"));
+    }
+
     if (kind != core::TriggerKind::kData && !data_topics.empty()) {
         return core::Result<core::TriggerSpec>::FromStatus(
             core::Status::InvalidArgument("trigger data_topics can only be used with data triggers"));

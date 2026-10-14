@@ -391,6 +391,37 @@ void PeriodicTriggerExecutesComponent()
     assert(component->execute_count() > 0);
 }
 
+void NonDependencyTriggersRejectAnyPolicyAtRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    for (const auto kind : {core::TriggerKind::kPeriodic, core::TriggerKind::kManual}) {
+        const auto name = MakeComponentName(kind == core::TriggerKind::kPeriodic
+            ? "invalid_periodic_policy" : "invalid_manual_policy");
+        core::TriggerSpec trigger;
+        trigger.kind = kind;
+        trigger.period = kind == core::TriggerKind::kPeriodic
+            ? std::chrono::milliseconds(5) : core::Nanoseconds::zero();
+        trigger.dependency_policy = core::DependencyPolicy::kAny;
+        runtime::ComponentSpec spec {name, "invalid dependency policy", {}, {}, {trigger}};
+        assert(trigger.Validate().code() == core::StatusCode::kInvalidArgument);
+        auto status = context.value()->RegisterComponent(spec);
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("dependency_policy") != std::string::npos);
+    }
+
+    const auto name = MakeComponentName("valid_periodic_policy");
+    core::TriggerSpec periodic;
+    periodic.kind = core::TriggerKind::kPeriodic;
+    periodic.period = std::chrono::milliseconds(5);
+    assert(context.value()->RegisterComponent(runtime::ComponentSpec {
+        name, "default dependency policy", {}, {}, {periodic}
+    }).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.stats().registered_components == 1);
+}
+
 void PeriodicDeadlineMissIsObservable()
 {
     std::size_t deadline_logs = 0;
@@ -1287,6 +1318,7 @@ int main()
 {
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
+    NonDependencyTriggersRejectAnyPolicyAtRegistration();
     PeriodicDeadlineMissIsObservable();
     DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
     AmbiguousDataReadersAreRejectedAtSchedulerRegistration();
