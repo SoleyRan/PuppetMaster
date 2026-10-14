@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 
@@ -71,6 +73,61 @@ core::Status ValidateUniqueComponents(const std::vector<ComponentConfig>& compon
             return core::Status::AlreadyExists("component name is duplicated: " + component.name);
         }
         seen.emplace(component.name, true);
+    }
+    return core::Status::Ok();
+}
+
+core::Status ValidateTaskDependencies(const std::vector<ComponentConfig>& components)
+{
+    std::map<std::string, std::size_t> indegree;
+    std::map<std::string, std::vector<std::string>> dependents;
+    for (const auto& component : components) {
+        indegree.emplace(component.name, 0);
+    }
+
+    for (const auto& component : components) {
+        for (std::size_t index = 0; index < component.triggers.size(); ++index) {
+            const auto& trigger = component.triggers[index];
+            if (trigger.kind != core::TriggerKind::kTaskDependency) {
+                continue;
+            }
+            std::set<std::string> seen;
+            for (const auto& upstream : trigger.task_dependencies) {
+                const auto location = "component " + component.name + " trigger " + std::to_string(index);
+                if (upstream == component.name) {
+                    return core::Status::InvalidArgument(location + " has self task dependency: " + upstream);
+                }
+                if (!seen.insert(upstream).second) {
+                    return core::Status::InvalidArgument(location + " has duplicate task dependency: " + upstream);
+                }
+                if (indegree.find(upstream) == indegree.end()) {
+                    return core::Status::InvalidArgument(location + " references unknown task dependency: " + upstream);
+                }
+                dependents[upstream].push_back(component.name);
+                ++indegree[component.name];
+            }
+        }
+    }
+
+    std::deque<std::string> ready;
+    for (const auto& entry : indegree) {
+        if (entry.second == 0) {
+            ready.push_back(entry.first);
+        }
+    }
+    std::size_t visited = 0;
+    while (!ready.empty()) {
+        const auto upstream = ready.front();
+        ready.pop_front();
+        ++visited;
+        for (const auto& dependent : dependents[upstream]) {
+            if (--indegree[dependent] == 0) {
+                ready.push_back(dependent);
+            }
+        }
+    }
+    if (visited != components.size()) {
+        return core::Status::InvalidArgument("task dependency graph contains a cycle");
     }
     return core::Status::Ok();
 }
@@ -378,6 +435,20 @@ core::Status ProjectConfig::Validate() const
         }
     }
 
+    std::map<std::pair<core::TransportKind, std::string>, const TopicConfig*> declared_topics;
+    for (const auto& topic : topics) {
+        const auto key = std::make_pair(topic.transport, topic.name);
+        const auto inserted = declared_topics.emplace(key, &topic);
+        if (!inserted.second) {
+            const auto& first = *inserted.first->second;
+            if (first.message_type != topic.message_type || first.encoding != topic.encoding) {
+                return core::Status::InvalidArgument(
+                    "topic ids " + first.id + " and " + topic.id + " declare conflicting message descriptors for "
+                    + std::string(core::ToString(topic.transport)) + " topic " + topic.name);
+            }
+        }
+    }
+
     for (const auto& component : components) {
         status = component.Validate(*this);
         if (!status.ok()) {
@@ -385,7 +456,7 @@ core::Status ProjectConfig::Validate() const
         }
     }
 
-    return core::Status::Ok();
+    return ValidateTaskDependencies(components);
 }
 
 core::Result<runtime::RuntimeOptions> ProjectConfig::ToRuntimeOptions() const
@@ -556,19 +627,26 @@ core::Status ComponentFactoryRegistry::Register(std::string type, ComponentFacto
     return core::Status::Ok();
 }
 
-core::Result<runtime::ComponentPtr> ComponentFactoryRegistry::Create(
-    std::string_view type, const runtime::ComponentSpec& spec) const
+core::Status ComponentFactoryRegistry::ValidateType(std::string_view type) const
 {
     auto status = ValidateConfigId("component type", type);
     if (!status.ok()) {
+        return status;
+    }
+    if (factories_.find(std::string(type)) == factories_.end()) {
+        return core::Status::NotFound("component type is not registered: " + std::string(type));
+    }
+    return core::Status::Ok();
+}
+
+core::Result<runtime::ComponentPtr> ComponentFactoryRegistry::Create(
+    std::string_view type, const runtime::ComponentSpec& spec) const
+{
+    auto status = ValidateType(type);
+    if (!status.ok()) {
         return core::Result<runtime::ComponentPtr>::FromStatus(std::move(status));
     }
-    const auto found = factories_.find(std::string(type));
-    if (found == factories_.end()) {
-        return core::Result<runtime::ComponentPtr>::FromStatus(
-            core::Status::NotFound("component type is not registered: " + std::string(type)));
-    }
-    return found->second(spec);
+    return factories_.find(std::string(type))->second(spec);
 }
 
 core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
@@ -576,6 +654,18 @@ core::Result<std::unique_ptr<scheduler::Scheduler>> CreateScheduler(
     runtime::RuntimeContext& runtime,
     const ComponentFactoryRegistry& factories)
 {
+    using SchedulerResult = core::Result<std::unique_ptr<scheduler::Scheduler>>;
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return SchedulerResult::FromStatus(std::move(status));
+    }
+    for (const auto& component : project.components) {
+        status = factories.ValidateType(component.type);
+        if (!status.ok()) {
+            return SchedulerResult::FromStatus(
+                core::Status::Error(status.code(), "component " + component.name + ": " + status.message()));
+        }
+    }
     return CreateScheduler(project, runtime,
         [&project, &factories](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
             auto component = project.FindComponent(spec.name.view());
@@ -591,6 +681,16 @@ core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeC
     auto status = project.Validate();
     if (!status.ok()) {
         return status;
+    }
+
+    for (const auto& component : project.components) {
+        auto spec = component.ToComponentSpec(project);
+        if (!spec.ok()) {
+            return spec.status();
+        }
+        if (runtime.FindComponent(spec.value().name).ok()) {
+            return core::Status::AlreadyExists("component is already registered: " + component.name);
+        }
     }
 
     for (const auto& component : project.components) {

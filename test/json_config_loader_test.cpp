@@ -46,6 +46,21 @@ private:
     std::atomic<int> executions_ {0};
 };
 
+class CountingComponent final : public runtime::Component {
+public:
+    explicit CountingComponent(runtime::ComponentSpec spec) : spec_(std::move(spec)) {}
+    runtime::ComponentSpec Describe() const override { return spec_; }
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        ++executions_;
+        return core::Status::Ok();
+    }
+    int executions() const { return executions_.load(); }
+private:
+    runtime::ComponentSpec spec_;
+    std::atomic<int> executions_ {0};
+};
+
 const char* kValidConfig = R"json({
     "runtime": {
         "default_transport_name": "runtime",
@@ -163,6 +178,54 @@ void JsonConfigRunsFactoryComponent()
     assert(context.value()->ShutdownComponent(name).ok());
 }
 
+void JsonConfigRunsForwardDeclaredTaskDependency()
+{
+    auto parsed = config::ParseJsonConfig(R"json({
+        "components": [
+            {"name":"downstream","type":"counter","triggers":[
+                {"kind":"task","task_dependencies":["upstream"]}]},
+            {"name":"upstream","type":"counter","triggers":[{"kind":"manual"}]}
+        ]
+    })json");
+    assert(parsed.ok());
+    auto context = runtime::RuntimeContext::Create(parsed.value().ToRuntimeOptions().value());
+    assert(context.ok());
+    std::shared_ptr<CountingComponent> upstream;
+    std::shared_ptr<CountingComponent> downstream;
+    config::ComponentFactoryRegistry factories;
+    assert(factories.Register("counter",
+        [&upstream, &downstream](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            auto instance = std::make_shared<CountingComponent>(spec);
+            if (spec.name.str() == "upstream") {
+                upstream = instance;
+            } else {
+                downstream = instance;
+            }
+            runtime::ComponentPtr component = instance;
+            return component;
+        }).ok());
+    auto sched = config::CreateScheduler(parsed.value(), *context.value(), factories);
+    assert(sched.ok());
+    assert(upstream && downstream);
+    auto upstream_name = core::ComponentName::Create("upstream").value();
+    auto downstream_name = core::ComponentName::Create("downstream").value();
+    for (const auto& name : {downstream_name, upstream_name}) {
+        assert(context.value()->ConfigureComponent(name).ok());
+        assert(context.value()->InitializeComponent(name).ok());
+        assert(context.value()->StartComponent(name).ok());
+    }
+    assert(sched.value()->Start().ok());
+    assert(sched.value()->Trigger(upstream_name).ok());
+    assert(sched.value()->WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(upstream->executions() == 1);
+    assert(downstream->executions() == 1);
+    assert(sched.value()->Stop().ok());
+    for (const auto& name : {downstream_name, upstream_name}) {
+        assert(context.value()->StopComponent(name).ok());
+        assert(context.value()->ShutdownComponent(name).ok());
+    }
+}
+
 void OmittedSchedulingFieldsUseDefaults()
 {
     auto result = config::ParseJsonConfig(
@@ -177,6 +240,28 @@ void OmittedSchedulingFieldsUseDefaults()
     assert(spec.ok());
     assert(spec.value().triggers.front().priority == 0);
     assert(spec.value().triggers.front().deadline == core::Nanoseconds::zero());
+}
+
+void JsonTopicDescriptorsAreValidated()
+{
+    for (const auto* json : {
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Distance","encoding":"text/plain"}]})json",
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","encoding":"application/json"}]})json",
+         }) {
+        auto conflict = config::ParseJsonConfig(json);
+        assert(!conflict.ok());
+        assert(conflict.status().code() == core::StatusCode::kInvalidArgument);
+        assert(conflict.status().message().find("first") != std::string::npos);
+        assert(conflict.status().message().find("second") != std::string::npos);
+    }
+
+    auto aliases = config::ParseJsonConfig(R"json({"topics":[
+        {"id":"first","name":"/shared","transport":"in_memory","message_type":"demo.Speed","encoding":"text/plain"},
+        {"id":"second","name":"/shared","transport":"in_memory","message_type":"demo.Speed","encoding":"text/plain","message_policy":{"freshness":"queued","queue_depth":4}},
+        {"id":"third","name":"/shared","transport":"fastdds","message_type":"demo.Distance","encoding":"application/json"}
+    ]})json");
+    assert(aliases.ok());
+    assert(aliases.value().topics.size() == 3);
 }
 
 void InvalidJsonIsRejected()
@@ -239,6 +324,22 @@ void InvalidJsonIsRejected()
     auto unknown_trigger_field = config::ParseJsonConfig(
         R"json({"components":[{"name":"monitor","triggers":[{"kind":"manual","unknown":true}]}]})json");
     assert(!unknown_trigger_field.ok());
+
+    for (const auto* json : {
+             R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["missing"]}]}]})json",
+             R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["a"]}]}]})json",
+             R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["b","b"]}]},{"name":"b","triggers":[{"kind":"manual"}]}]})json",
+             R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["b"]}]},{"name":"b","triggers":[{"kind":"task","task_dependencies":["a"]}]}]})json",
+             R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["b"]}]},{"name":"b","triggers":[{"kind":"task","task_dependencies":["c"]}]},{"name":"c","triggers":[{"kind":"task","task_dependencies":["a"]}]}]})json",
+         }) {
+        auto invalid_dependency = config::ParseJsonConfig(json);
+        assert(!invalid_dependency.ok());
+        assert(invalid_dependency.status().code() == core::StatusCode::kInvalidArgument);
+    }
+
+    auto distinct_triggers = config::ParseJsonConfig(
+        R"json({"components":[{"name":"a","triggers":[{"kind":"task","task_dependencies":["upstream"]},{"kind":"task","task_dependencies":["upstream"]}]},{"name":"upstream","triggers":[{"kind":"manual"}]}]})json");
+    assert(distinct_triggers.ok());
 }
 
 void JsonFileIsLoaded()
@@ -263,7 +364,9 @@ int main()
     ValidJsonBuildsProject();
     JsonConfigCreatesConfiguredScheduler();
     JsonConfigRunsFactoryComponent();
+    JsonConfigRunsForwardDeclaredTaskDependency();
     OmittedSchedulingFieldsUseDefaults();
+    JsonTopicDescriptorsAreValidated();
     InvalidJsonIsRejected();
     JsonFileIsLoaded();
     return 0;

@@ -83,6 +83,7 @@ using ComponentFactory = std::function<core::Result<runtime::ComponentPtr>(const
 class ComponentFactoryRegistry {
 public:
     core::Status Register(std::string type, ComponentFactory factory);
+    core::Status ValidateType(std::string_view type) const;
     core::Result<runtime::ComponentPtr> Create(
         std::string_view type, const runtime::ComponentSpec& spec) const;
 

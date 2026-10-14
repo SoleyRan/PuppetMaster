@@ -111,6 +111,72 @@ void ProjectConfigBuildsEndpointAndComponentSpec()
     assert(spec.value().triggers.front().data_dependencies.front().str() == "/vehicle/speed");
 }
 
+void TopicDescriptorConflictsAreRejectedBeforeAssembly()
+{
+    const auto add_topic = [](config::ProjectConfig& project, std::string id, std::string type,
+                              std::string encoding, core::TransportKind transport = core::TransportKind::kInMemory) {
+        assert(project.AddTopic(config::TopicConfig {
+            std::move(id), "/shared", transport, std::move(type), std::move(encoding), {}
+        }).ok());
+    };
+
+    for (const auto& descriptors : {
+             std::pair<std::string, std::string> {"demo.Distance", "text/plain"},
+             std::pair<std::string, std::string> {"demo.Speed", "application/json"},
+         }) {
+        config::ProjectConfig project;
+        add_topic(project, "first", "demo.Speed", "text/plain");
+        add_topic(project, "second", descriptors.first, descriptors.second);
+        auto status = project.Validate();
+        assert(!status.ok());
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("first") != std::string::npos);
+        assert(status.message().find("second") != std::string::npos);
+
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"first"}, {}, {}
+        }).ok());
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& spec)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        }).ok());
+        assert(config::ApplyComponentSpecs(project, *context.value()).code()
+            == core::StatusCode::kInvalidArgument);
+        auto specs_only = config::CreateScheduler(project, *context.value());
+        assert(!specs_only.ok());
+        assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    }
+}
+
+void TopicAliasesMayShareNamesAcrossTransports()
+{
+    config::ProjectConfig project;
+    core::MessagePolicy alternate_policy;
+    alternate_policy.freshness = core::FreshnessPolicy::kQueued;
+    alternate_policy.queue_depth = 4;
+    assert(project.AddTopic(config::TopicConfig {
+        "in_memory_one", "/shared", core::TransportKind::kInMemory, "demo.Speed", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "in_memory_two", "/shared", core::TransportKind::kInMemory, "demo.Speed", "text/plain", alternate_policy
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "fastdds", "/shared", core::TransportKind::kFastDds, "demo.Distance", "application/json", {}
+    }).ok());
+    assert(project.Validate().ok());
+}
+
 void ProjectValidationRejectsMissingDataReader()
 {
     auto project = MakeSpeedProject();
@@ -150,6 +216,94 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     auto status = project.Validate();
     assert(!status.ok());
     assert(status.code() == core::StatusCode::kInvalidArgument);
+}
+
+void TaskDependencyGraphsAreValidatedBeforeAssembly()
+{
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"b"};
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {
+        "a", "", {}, {}, {task}, "counter"
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "b", "", {}, {}, {}, "counter"
+    }).ok());
+    assert(project.Validate().ok());
+
+    config::ComponentFactoryRegistry factories;
+    int created = 0;
+    assert(factories.Register("counter",
+        [&created](const runtime::ComponentSpec& spec) -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(spec);
+            return component;
+        }).ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto reject = [&](const std::string& expected_message) {
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find(expected_message) != std::string::npos);
+        assert(config::ApplyComponentSpecs(project, *context.value()).code()
+            == core::StatusCode::kInvalidArgument);
+        auto specs_only = config::CreateScheduler(project, *context.value());
+        assert(!specs_only.ok());
+        assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+        auto instances = config::CreateScheduler(project, *context.value(), factories);
+        assert(!instances.ok());
+        assert(instances.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    };
+
+    project.components.front().triggers.front().task_dependencies = {"missing"};
+    reject("component a trigger 0 references unknown task dependency: missing");
+    project.components.front().triggers.front().task_dependencies = {"a"};
+    reject("component a trigger 0 has self task dependency: a");
+    project.components.front().triggers.front().task_dependencies = {"b", "b"};
+    reject("component a trigger 0 has duplicate task dependency: b");
+
+    project.components.front().triggers.front().task_dependencies = {"b"};
+    task.task_dependencies = {"a"};
+    project.components.back().triggers = {task};
+    reject("task dependency graph contains a cycle");
+
+    project.components.back().triggers.front().task_dependencies = {"c"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "c", "", {}, {}, {task}, "counter"
+    }).ok());
+    reject("task dependency graph contains a cycle");
+}
+
+void TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams()
+{
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"left", "right"};
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {
+        "sink", "", {}, {}, {task}
+    }).ok());
+    task.task_dependencies = {"root"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "left", "", {}, {}, {task, task}
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "right", "", {}, {}, {task}
+    }).ok());
+    assert(project.AddComponent(config::ComponentConfig {
+        "root", "", {}, {}, {}
+    }).ok());
+    assert(project.Validate().ok());
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    auto sched = config::CreateScheduler(project, *context.value());
+    assert(sched.ok());
+    assert(sched.value()->stats().registered_components == 4);
+    assert(sched.value()->Start().ok());
+    assert(sched.value()->Stop().ok());
 }
 
 void TriggerSchedulingFieldsReachComponentSpec()
@@ -233,6 +387,41 @@ void DuplicateRuntimeComponentIsRejected()
     assert(context.value()->ListComponentNames().size() == 1);
 }
 
+void LaterRuntimeNameConflictLeavesNoPartialRegistration()
+{
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {"first", "", {}, {}, {}}).ok());
+    assert(project.AddComponent(config::ComponentConfig {"second", "", {}, {}, {}}).ok());
+    assert(project.Validate().ok());
+
+    for (bool create_scheduler : {false, true}) {
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        auto second = project.BuildComponentSpec("second");
+        assert(second.ok());
+        assert(context.value()->RegisterComponent(second.value()).ok());
+
+        if (create_scheduler) {
+            auto scheduler_instance = config::CreateScheduler(project, *context.value());
+            assert(!scheduler_instance.ok());
+            assert(scheduler_instance.status().code() == core::StatusCode::kAlreadyExists);
+            assert(scheduler_instance.status().message().find("second") != std::string::npos);
+        } else {
+            auto status = config::ApplyComponentSpecs(project, *context.value());
+            assert(status.code() == core::StatusCode::kAlreadyExists);
+            assert(status.message().find("second") != std::string::npos);
+        }
+        auto names = context.value()->ListComponentNames();
+        assert(names.size() == 1);
+        assert(names.front().str() == "second");
+    }
+
+    auto empty_context = runtime::RuntimeContext::Create();
+    assert(empty_context.ok());
+    assert(config::ApplyComponentSpecs(project, *empty_context.value()).ok());
+    assert(empty_context.value()->ListComponentNames().size() == 2);
+}
+
 void FactoryCreatesComponentInstances()
 {
     auto project = MakeSpeedProject();
@@ -309,6 +498,11 @@ void RegistryRejectsInvalidRegistration()
     assert(factories.Register("monitor", {}).code() == core::StatusCode::kInvalidArgument);
     assert(factories.Register("monitor", factory).ok());
     assert(factories.Register("monitor", factory).code() == core::StatusCode::kAlreadyExists);
+    const auto& registered = factories;
+    assert(registered.ValidateType("").code() == core::StatusCode::kInvalidArgument);
+    assert(registered.ValidateType(" \t").code() == core::StatusCode::kInvalidArgument);
+    assert(registered.ValidateType("unknown").code() == core::StatusCode::kNotFound);
+    assert(registered.ValidateType("monitor").ok());
     auto spec = MakeSpeedProject().BuildComponentSpec("speed_monitor").value();
     assert(factories.Create("", spec).status().code() == core::StatusCode::kInvalidArgument);
     assert(factories.Create(" \t", spec).status().code() == core::StatusCode::kInvalidArgument);
@@ -368,14 +562,24 @@ void RegistryFailuresLeaveRuntimeUnchanged()
     auto missing = config::CreateScheduler(project, *context.value(), factories);
     assert(!missing.ok());
     assert(missing.status().code() == core::StatusCode::kInvalidArgument);
-    assert(created == 1);
+    assert(missing.status().message().find("component second_monitor:") == 0);
+    assert(created == 0);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.back().type = " \t";
+    auto invalid = config::CreateScheduler(project, *context.value(), factories);
+    assert(!invalid.ok());
+    assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+    assert(invalid.status().message().find("component second_monitor:") == 0);
+    assert(created == 0);
     assert(context.value()->ListComponentNames().empty());
 
     project.components.back().type = "unknown";
     auto unknown = config::CreateScheduler(project, *context.value(), factories);
     assert(!unknown.ok());
     assert(unknown.status().code() == core::StatusCode::kNotFound);
-    assert(created == 2);
+    assert(unknown.status().message() == "component second_monitor: component type is not registered: unknown");
+    assert(created == 0);
     assert(context.value()->ListComponentNames().empty());
 
     project.components.back().type = "null";
@@ -421,14 +625,19 @@ int main()
     EnumParsersAcceptHumanReadableValues();
     SchedulerOptionsAreValidatedAndExposed();
     ProjectConfigBuildsEndpointAndComponentSpec();
+    TopicDescriptorConflictsAreRejectedBeforeAssembly();
+    TopicAliasesMayShareNamesAcrossTransports();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    TaskDependencyGraphsAreValidatedBeforeAssembly();
+    TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams();
     TriggerSchedulingFieldsReachComponentSpec();
     ProjectConfigAppliesComponentSpecsToRuntime();
     ProjectConfigCreatesConfiguredScheduler();
     InvalidProjectDoesNotRegisterComponents();
     DuplicateRuntimeComponentIsRejected();
+    LaterRuntimeNameConflictLeavesNoPartialRegistration();
     FactoryCreatesComponentInstances();
     FactoryFailuresLeaveRuntimeUnchanged();
     RegistryRejectsInvalidRegistration();
