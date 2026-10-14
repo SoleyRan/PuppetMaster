@@ -455,6 +455,44 @@ void DuplicateDataDependenciesAreRejectedAtSchedulerRegistration()
     assert(sched.stats().registered_components == 0);
 }
 
+void AmbiguousDataReadersAreRejectedAtSchedulerRegistration()
+{
+    for (const auto transport : {core::TransportKind::kInMemory, core::TransportKind::kFastDds}) {
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        const auto name = MakeComponentName("ambiguous_data_consumer");
+        const auto first = MakeEndpoint("/scheduler/ambiguous");
+        auto second = first;
+        second.topic.transport = transport;
+        runtime::ComponentSpec spec {
+            name, "ambiguous data readers", {second, first}, {},
+            {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                               {first.topic.name}, {}}}
+        };
+        assert(context.value()->RegisterComponent(spec).ok());
+        scheduler::Scheduler sched(*context.value());
+        auto status = sched.RegisterComponent(name);
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find(first.topic.name.str()) != std::string::npos);
+        assert(sched.stats().registered_components == 0);
+    }
+
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("unambiguous_data_consumer");
+    const auto endpoint = MakeEndpoint("/scheduler/unambiguous");
+    auto unrelated = MakeEndpoint("/scheduler/unrelated");
+    runtime::ComponentSpec spec {
+        name, "one matching data reader", {unrelated, endpoint}, {},
+        {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                           {endpoint.topic.name}, {}}}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.stats().registered_components == 1);
+}
+
 void DataTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1220,6 +1258,7 @@ int main()
     PeriodicTriggerExecutesComponent();
     PeriodicDeadlineMissIsObservable();
     DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
+    AmbiguousDataReadersAreRejectedAtSchedulerRegistration();
     DataTriggerExecutesComponent();
     DataTriggerCoalescesRepeatedArrivals();
     AllDataTriggerWaitsForEveryTopic();

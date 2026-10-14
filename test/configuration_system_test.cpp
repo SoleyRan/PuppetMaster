@@ -178,6 +178,60 @@ void TopicAliasesMayShareNamesAcrossTransports()
     assert(project.Validate().ok());
 }
 
+void DataTriggerRejectsAmbiguousReadersBeforeAssembly()
+{
+    for (const auto transport : {core::TransportKind::kInMemory, core::TransportKind::kFastDds}) {
+        config::ProjectConfig project;
+        assert(project.AddTopic(config::TopicConfig {
+            "first", "/shared", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+        }).ok());
+        assert(project.AddTopic(config::TopicConfig {
+            "second", "/shared", transport, "demo.Payload", "text/plain", {}
+        }).ok());
+        config::TriggerConfig manual;
+        manual.kind = core::TriggerKind::kManual;
+        config::TriggerConfig data;
+        data.kind = core::TriggerKind::kData;
+        data.data_topics = {"first"};
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"second", "first"}, {}, {manual, data}, "monitor"
+        }).ok());
+
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("component monitor trigger 1") != std::string::npos);
+        assert(status.message().find("/shared") != std::string::npos);
+        auto spec = project.BuildComponentSpec("monitor");
+        assert(!spec.ok());
+        assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+        assert(spec.status().message().find("/shared") != std::string::npos);
+
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+            return component;
+        }).ok());
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+
+        project.components.front().readers = {"first"};
+        assert(project.Validate().ok());
+        assert(project.BuildComponentSpec("monitor").ok());
+        project.components.front().readers = {"first", "second"};
+        project.components.front().triggers = {manual};
+        assert(project.Validate().ok());
+        assert(project.BuildComponentSpec("monitor").ok());
+    }
+}
+
 void DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly()
 {
     const auto make_project = [](std::vector<std::string> dependencies) {
@@ -686,6 +740,7 @@ int main()
     ProjectConfigBuildsEndpointAndComponentSpec();
     TopicDescriptorConflictsAreRejectedBeforeAssembly();
     TopicAliasesMayShareNamesAcrossTransports();
+    DataTriggerRejectsAmbiguousReadersBeforeAssembly();
     DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();

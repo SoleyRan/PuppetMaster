@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <set>
@@ -46,6 +47,13 @@ core::Result<transport::EndpointConfig> FindReaderEndpoint(
         return core::Result<transport::EndpointConfig>::FromStatus(
             core::Status::InvalidArgument(
                 "data trigger topic has no matching reader endpoint: " + topic.str()));
+    }
+    if (std::find_if(std::next(found), spec.readers.end(), [&topic](const auto& endpoint) {
+            return endpoint.topic.name == topic;
+        }) != spec.readers.end()) {
+        return core::Result<transport::EndpointConfig>::FromStatus(
+            core::Status::InvalidArgument(
+                "data trigger topic has multiple matching reader endpoints: " + topic.str()));
     }
 
     return *found;

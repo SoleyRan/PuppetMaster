@@ -375,6 +375,17 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
                     + ": " + trigger.status().message()));
         }
         spec.triggers.push_back(trigger.value());
+        if (trigger.value().kind == core::TriggerKind::kData) {
+            for (const auto& topic : trigger.value().data_dependencies) {
+                const auto matches = std::count_if(spec.readers.begin(), spec.readers.end(),
+                    [&topic](const auto& reader) { return reader.topic.name == topic; });
+                if (matches > 1) {
+                    return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                        "component " + name + " trigger " + std::to_string(index)
+                            + " has multiple reader endpoints for topic " + topic.str()));
+                }
+            }
+        }
     }
 
     auto status = spec.Validate();
