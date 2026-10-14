@@ -290,6 +290,70 @@ void DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly()
     assert(valid.BuildComponentSpec("monitor").ok());
 }
 
+void DataTriggersSharingTopicAreRejectedBeforeAssembly()
+{
+    config::ProjectConfig project;
+    assert(project.AddTopic(config::TopicConfig {
+        "first", "/shared", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "alias", "/shared", core::TransportKind::kFastDds, "demo.Payload", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "other", "/other", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+    }).ok());
+    config::TriggerConfig manual;
+    manual.kind = core::TriggerKind::kManual;
+    config::TriggerConfig first;
+    first.kind = core::TriggerKind::kData;
+    first.data_topics = {"first"};
+    config::TriggerConfig second = first;
+    second.data_topics = {"alias"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "monitor", "", {"first", "other"}, {}, {manual, first, second}, "monitor"
+    }).ok());
+
+    auto status = project.Validate();
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find("component monitor") != std::string::npos);
+    assert(status.message().find("1 and 2") != std::string::npos);
+    assert(status.message().find("/shared") != std::string::npos);
+    auto spec = project.BuildComponentSpec("monitor");
+    assert(!spec.ok());
+    assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+    assert(spec.status().message().find("1 and 2") != std::string::npos);
+
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    int created = 0;
+    config::ComponentFactoryRegistry factories;
+    assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+        -> core::Result<runtime::ComponentPtr> {
+        ++created;
+        runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+        return component;
+    }).ok());
+    assert(config::ApplyComponentSpecs(project, *context.value()).code()
+        == core::StatusCode::kInvalidArgument);
+    auto specs_only = config::CreateScheduler(project, *context.value());
+    assert(!specs_only.ok());
+    assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+    auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+    assert(!scheduler.ok());
+    assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+    assert(created == 0);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.front().triggers.back().data_topics = {"other"};
+    assert(project.Validate().ok());
+    spec = project.BuildComponentSpec("monitor");
+    assert(spec.ok());
+    assert(spec.value().triggers.size() == 3);
+    auto valid_scheduler = config::CreateScheduler(project, *context.value());
+    assert(valid_scheduler.ok());
+    assert(valid_scheduler.value()->stats().registered_components == 1);
+}
+
 void ProjectValidationRejectsMissingDataReader()
 {
     auto project = MakeSpeedProject();
@@ -742,6 +806,7 @@ int main()
     TopicAliasesMayShareNamesAcrossTransports();
     DataTriggerRejectsAmbiguousReadersBeforeAssembly();
     DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly();
+    DataTriggersSharingTopicAreRejectedBeforeAssembly();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();

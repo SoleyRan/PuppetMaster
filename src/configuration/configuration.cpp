@@ -367,6 +367,7 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         spec.writers.push_back(endpoint.value());
     }
 
+    std::map<core::TopicName, std::size_t> data_trigger_topics;
     for (std::size_t index = 0; index < triggers.size(); ++index) {
         auto trigger = triggers[index].ToTriggerSpec(project);
         if (!trigger.ok()) {
@@ -383,6 +384,12 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
                     return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
                         "component " + name + " trigger " + std::to_string(index)
                             + " has multiple reader endpoints for topic " + topic.str()));
+                }
+                const auto inserted = data_trigger_topics.emplace(topic, index);
+                if (!inserted.second) {
+                    return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                        "component " + name + " triggers " + std::to_string(inserted.first->second)
+                            + " and " + std::to_string(index) + " share data topic " + topic.str()));
                 }
             }
         }

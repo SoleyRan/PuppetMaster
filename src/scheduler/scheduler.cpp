@@ -106,10 +106,22 @@ core::Status ValidateComponentSpec(const runtime::ComponentSpec& spec)
         return status;
     }
 
-    for (const auto& trigger : spec.triggers) {
+    std::map<core::TopicName, std::size_t> data_trigger_topics;
+    for (std::size_t index = 0; index < spec.triggers.size(); ++index) {
+        const auto& trigger = spec.triggers[index];
         status = ValidateTrigger(spec, trigger);
         if (!status.ok()) {
             return status;
+        }
+        if (trigger.kind == core::TriggerKind::kData) {
+            for (const auto& topic : trigger.data_dependencies) {
+                const auto inserted = data_trigger_topics.emplace(topic, index);
+                if (!inserted.second) {
+                    return core::Status::InvalidArgument(
+                        "component " + spec.name.str() + " triggers " + std::to_string(inserted.first->second)
+                            + " and " + std::to_string(index) + " share data topic " + topic.str());
+                }
+            }
         }
     }
 

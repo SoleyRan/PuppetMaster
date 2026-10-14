@@ -493,6 +493,37 @@ void AmbiguousDataReadersAreRejectedAtSchedulerRegistration()
     assert(sched.stats().registered_components == 1);
 }
 
+void DataTriggersSharingTopicAreRejectedAtSchedulerRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("shared_data_consumer");
+    const auto first = MakeEndpoint("/scheduler/shared");
+    const auto second = MakeEndpoint("/scheduler/other");
+    const core::TriggerSpec data {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                                  {first.topic.name}, {}};
+    runtime::ComponentSpec spec {
+        name, "separate data triggers", {first, second}, {},
+        {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}, data, data}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    auto status = sched.RegisterComponent(name);
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find(name.str()) != std::string::npos);
+    assert(status.message().find("1 and 2") != std::string::npos);
+    assert(status.message().find(first.topic.name.str()) != std::string::npos);
+    assert(sched.stats().registered_components == 0);
+
+    auto valid_context = runtime::RuntimeContext::Create();
+    assert(valid_context.ok());
+    spec.triggers.back().data_dependencies = {second.topic.name};
+    assert(valid_context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler valid_sched(*valid_context.value());
+    assert(valid_sched.RegisterComponent(name).ok());
+    assert(valid_sched.stats().registered_components == 1);
+}
+
 void DataTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1259,6 +1290,7 @@ int main()
     PeriodicDeadlineMissIsObservable();
     DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
     AmbiguousDataReadersAreRejectedAtSchedulerRegistration();
+    DataTriggersSharingTopicAreRejectedAtSchedulerRegistration();
     DataTriggerExecutesComponent();
     DataTriggerCoalescesRepeatedArrivals();
     AllDataTriggerWaitsForEveryTopic();
