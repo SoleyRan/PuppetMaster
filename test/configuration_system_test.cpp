@@ -387,6 +387,41 @@ void DuplicateRuntimeComponentIsRejected()
     assert(context.value()->ListComponentNames().size() == 1);
 }
 
+void LaterRuntimeNameConflictLeavesNoPartialRegistration()
+{
+    config::ProjectConfig project;
+    assert(project.AddComponent(config::ComponentConfig {"first", "", {}, {}, {}}).ok());
+    assert(project.AddComponent(config::ComponentConfig {"second", "", {}, {}, {}}).ok());
+    assert(project.Validate().ok());
+
+    for (bool create_scheduler : {false, true}) {
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        auto second = project.BuildComponentSpec("second");
+        assert(second.ok());
+        assert(context.value()->RegisterComponent(second.value()).ok());
+
+        if (create_scheduler) {
+            auto scheduler_instance = config::CreateScheduler(project, *context.value());
+            assert(!scheduler_instance.ok());
+            assert(scheduler_instance.status().code() == core::StatusCode::kAlreadyExists);
+            assert(scheduler_instance.status().message().find("second") != std::string::npos);
+        } else {
+            auto status = config::ApplyComponentSpecs(project, *context.value());
+            assert(status.code() == core::StatusCode::kAlreadyExists);
+            assert(status.message().find("second") != std::string::npos);
+        }
+        auto names = context.value()->ListComponentNames();
+        assert(names.size() == 1);
+        assert(names.front().str() == "second");
+    }
+
+    auto empty_context = runtime::RuntimeContext::Create();
+    assert(empty_context.ok());
+    assert(config::ApplyComponentSpecs(project, *empty_context.value()).ok());
+    assert(empty_context.value()->ListComponentNames().size() == 2);
+}
+
 void FactoryCreatesComponentInstances()
 {
     auto project = MakeSpeedProject();
@@ -602,6 +637,7 @@ int main()
     ProjectConfigCreatesConfiguredScheduler();
     InvalidProjectDoesNotRegisterComponents();
     DuplicateRuntimeComponentIsRejected();
+    LaterRuntimeNameConflictLeavesNoPartialRegistration();
     FactoryCreatesComponentInstances();
     FactoryFailuresLeaveRuntimeUnchanged();
     RegistryRejectsInvalidRegistration();

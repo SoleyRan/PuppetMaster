@@ -688,6 +688,16 @@ core::Status ApplyComponentSpecs(const ProjectConfig& project, runtime::RuntimeC
         if (!spec.ok()) {
             return spec.status();
         }
+        if (runtime.FindComponent(spec.value().name).ok()) {
+            return core::Status::AlreadyExists("component is already registered: " + component.name);
+        }
+    }
+
+    for (const auto& component : project.components) {
+        auto spec = component.ToComponentSpec(project);
+        if (!spec.ok()) {
+            return spec.status();
+        }
 
         status = runtime.RegisterComponent(spec.value());
         if (!status.ok()) {
