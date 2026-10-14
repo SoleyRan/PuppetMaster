@@ -436,6 +436,25 @@ void PeriodicDeadlineMissIsObservable()
     assert(deadline_logs == snapshot.tasks.front().deadline_misses);
 }
 
+void DuplicateDataDependenciesAreRejectedAtSchedulerRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("duplicate_data_consumer");
+    const auto endpoint = MakeEndpoint("/scheduler/duplicate");
+    runtime::ComponentSpec spec {
+        name, "duplicate data dependency", {endpoint}, {},
+        {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAll,
+                           {endpoint.topic.name, endpoint.topic.name}, {}}}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    auto status = sched.RegisterComponent(name);
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find(endpoint.topic.name.str()) != std::string::npos);
+    assert(sched.stats().registered_components == 0);
+}
+
 void DataTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1200,6 +1219,7 @@ int main()
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
     PeriodicDeadlineMissIsObservable();
+    DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
     DataTriggerExecutesComponent();
     DataTriggerCoalescesRepeatedArrivals();
     AllDataTriggerWaitsForEveryTopic();

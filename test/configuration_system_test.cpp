@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <puppet_master/puppet_master.h>
 
@@ -175,6 +176,64 @@ void TopicAliasesMayShareNamesAcrossTransports()
         "fastdds", "/shared", core::TransportKind::kFastDds, "demo.Distance", "application/json", {}
     }).ok());
     assert(project.Validate().ok());
+}
+
+void DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly()
+{
+    const auto make_project = [](std::vector<std::string> dependencies) {
+        config::ProjectConfig project;
+        for (const auto* id : {"first", "second", "third"}) {
+            assert(project.AddTopic(config::TopicConfig {
+                id, std::string("/") + id, core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+            }).ok());
+        }
+        assert(project.AddTopic(config::TopicConfig {
+            "alias", "/first", core::TransportKind::kFastDds, "demo.Payload", "text/plain", {}
+        }).ok());
+        config::TriggerConfig trigger;
+        trigger.kind = core::TriggerKind::kData;
+        trigger.data_topics = std::move(dependencies);
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"first", "second", "third", "alias"}, {}, {trigger}, "monitor"
+        }).ok());
+        return project;
+    };
+
+    for (const auto& dependencies : {std::vector<std::string> {"first", "first"},
+                                     std::vector<std::string> {"first", "alias"}}) {
+        auto project = make_project(dependencies);
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("component monitor trigger 0") != std::string::npos);
+        assert(status.message().find(dependencies.front()) != std::string::npos);
+        assert(status.message().find(dependencies.back()) != std::string::npos);
+
+        auto trigger = project.components.front().triggers.front().ToTriggerSpec(project);
+        assert(!trigger.ok());
+        assert(trigger.status().code() == core::StatusCode::kInvalidArgument);
+        auto spec = project.BuildComponentSpec("monitor");
+        assert(!spec.ok());
+        assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+            return component;
+        }).ok());
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    }
+
+    auto valid = make_project({"first", "second"});
+    assert(valid.Validate().ok());
+    assert(valid.BuildComponentSpec("monitor").ok());
 }
 
 void ProjectValidationRejectsMissingDataReader()
@@ -627,6 +686,7 @@ int main()
     ProjectConfigBuildsEndpointAndComponentSpec();
     TopicDescriptorConflictsAreRejectedBeforeAssembly();
     TopicAliasesMayShareNamesAcrossTransports();
+    DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();

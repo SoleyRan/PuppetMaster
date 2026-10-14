@@ -72,7 +72,11 @@ core::Status ValidateTrigger(const runtime::ComponentSpec& spec, const core::Tri
             return core::Status::InvalidArgument("data trigger requires at least one topic dependency");
         }
 
+        std::set<core::TopicName> seen;
         for (const auto& topic : trigger.data_dependencies) {
+            if (!seen.insert(topic).second) {
+                return core::Status::InvalidArgument("data trigger has duplicate topic dependency: " + topic.str());
+            }
             auto endpoint = FindReaderEndpoint(spec, topic);
             if (!endpoint.ok()) {
                 return endpoint.status();
