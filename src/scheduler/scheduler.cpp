@@ -246,6 +246,7 @@ struct Scheduler::Impl {
 
             stopping = false;
             starting = true;
+            starting_thread = std::this_thread::get_id();
             running = true;
             last_status = core::Status::Ok();
         }
@@ -254,6 +255,7 @@ struct Scheduler::Impl {
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 starting = false;
+                starting_thread = {};
             }
             lifecycle.notify_all();
         };
@@ -323,6 +325,9 @@ struct Scheduler::Impl {
                 }
             }
             if (!from_start) {
+                if (starting && starting_thread == caller) {
+                    return core::Status::FailedPrecondition("scheduler cannot stop itself while starting");
+                }
                 lifecycle.wait(lock, [this]() { return !starting; });
             }
             if (stopping) {
@@ -868,6 +873,7 @@ private:
     core::Status last_status;
     bool running {false};
     bool starting {false};
+    std::thread::id starting_thread;
     bool stopping {false};
 };
 

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <puppet_master/puppet_master.h>
+#include <puppet_master/transport/inmemory/inmemory_transport.h>
 
 namespace core = puppet_master::core;
 namespace observability = puppet_master::observability;
@@ -419,6 +420,63 @@ void StopDuringStartLeavesSchedulerRestartable()
     }
     assert(sched.Start().ok());
     assert(sched.Stop().ok());
+}
+
+class StartupCallbackTransport final : public transport::Transport {
+public:
+    const core::TransportName& name() const noexcept override { return inner_.name(); }
+    core::TransportKind kind() const noexcept override { return inner_.kind(); }
+    transport::TransportCapabilities capabilities() const noexcept override { return inner_.capabilities(); }
+    core::Status Open() override { return inner_.Open(); }
+    core::Status Close() noexcept override { return inner_.Close(); }
+    bool is_open() const noexcept override { return inner_.is_open(); }
+    core::Result<transport::ReaderPtr> CreateReader(const transport::EndpointConfig& endpoint) override
+    {
+        if (on_create_reader) {
+            on_create_reader();
+        }
+        return inner_.CreateReader(endpoint);
+    }
+    core::Result<transport::WriterPtr> CreateWriter(const transport::EndpointConfig& endpoint) override
+    {
+        return inner_.CreateWriter(endpoint);
+    }
+
+    std::function<void()> on_create_reader;
+
+private:
+    transport::inmemory::InMemoryTransport inner_ {core::TransportName::Unsafe("inmemory")};
+};
+
+void StartupCallbackCannotStopItsOwnScheduler()
+{
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    auto backend = std::make_shared<StartupCallbackTransport>();
+    assert(context.value()->RegisterTransport(backend).ok());
+    assert(backend->Open().ok());
+    const auto name = MakeComponentName("startup_reentrant_consumer");
+    auto component = std::make_shared<DataConsumer>(name, MakeEndpoint("/scheduler/startup_reentrant"));
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    int callbacks = 0;
+    backend->on_create_reader = [&]() {
+        ++callbacks;
+        assert(sched.Stop().code() == core::StatusCode::kFailedPrecondition);
+        assert(sched.Start().code() == core::StatusCode::kFailedPrecondition);
+    };
+    assert(sched.Start().ok());
+    assert(callbacks == 1);
+    assert(sched.is_running());
+    assert(sched.Stop().ok());
+    assert(sched.Start().ok());
+    assert(callbacks == 2);
+    assert(sched.Stop().ok());
+    backend->on_create_reader = {};
 }
 
 void NonDependencyTriggersRejectAnyPolicyAtRegistration()
@@ -1361,6 +1419,7 @@ int main()
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
     StopDuringStartLeavesSchedulerRestartable();
+    StartupCallbackCannotStopItsOwnScheduler();
     NonDependencyTriggersRejectAnyPolicyAtRegistration();
     PeriodicDeadlineMissIsObservable();
     DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
