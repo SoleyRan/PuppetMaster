@@ -424,6 +424,12 @@ struct Scheduler::Impl {
     core::Status WaitIdle(core::Nanoseconds timeout)
     {
         std::unique_lock<std::mutex> lock(mutex);
+        const auto caller = std::this_thread::get_id();
+        for (const auto& worker : workers) {
+            if (worker.get_id() == caller) {
+                return core::Status::FailedPrecondition("scheduler worker cannot wait for itself to become idle");
+            }
+        }
         const auto ready = [this]() {
             return pending_events.empty() && active_events == 0;
         };

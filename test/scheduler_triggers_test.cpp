@@ -346,6 +346,51 @@ private:
     int execute_count_ {0};
 };
 
+class SelfWaitingComponent final : public runtime::Component {
+public:
+    explicit SelfWaitingComponent(core::ComponentName name)
+        : spec_ {std::move(name), "checks worker idle wait", {}, {},
+                 {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}}
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override { return spec_; }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        wait_status = sched->WaitIdle(core::Nanoseconds::zero());
+        ++executions;
+        return core::Status::Ok();
+    }
+
+    scheduler::Scheduler* sched {nullptr};
+    core::Status wait_status;
+    std::atomic<int> executions {0};
+
+private:
+    runtime::ComponentSpec spec_;
+};
+
+void WorkerCannotWaitForItselfToBecomeIdle()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("self_waiting_component");
+    auto component = std::make_shared<SelfWaitingComponent>(name);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    component->sched = &sched;
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->executions == 1);
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(sched.Stop().ok());
+}
+
 void ManualTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1416,6 +1461,7 @@ void ZeroWorkerCountIsRejected()
 
 int main()
 {
+    WorkerCannotWaitForItselfToBecomeIdle();
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
     StopDuringStartLeavesSchedulerRestartable();
