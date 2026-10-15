@@ -507,9 +507,11 @@ private:
             return;
         }
         const auto queued_at = core::SteadyClock::now();
-        const auto due_time = deadline > core::Nanoseconds::zero()
-            ? queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline)
-            : core::SteadyClock::time_point::max();
+        auto due_time = core::SteadyClock::time_point::max();
+        if (deadline > core::Nanoseconds::zero()
+            && deadline < std::chrono::duration_cast<core::Nanoseconds>(due_time - queued_at)) {
+            due_time = queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline);
+        }
         pending_events.push_back(ScheduledEvent {name, deadline, priority, due_time, queued_at});
         event_available.notify_one();
     }

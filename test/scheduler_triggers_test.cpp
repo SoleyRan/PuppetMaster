@@ -1128,6 +1128,18 @@ void AbsoluteDeadlineOrderingAndCoalescing()
         });
 }
 
+void OversizedDeadlineDoesNotWrapQueueOrder()
+{
+    CheckQueuedOrder(
+        {OrderedSpec("oversized", ManualPolicy(0, core::Nanoseconds::max())),
+         OrderedSpec("finite", ManualPolicy(0, std::chrono::seconds(1)))},
+        [](runtime::RuntimeContext&, scheduler::Scheduler& sched) {
+            assert(sched.Trigger(MakeComponentName("oversized")).ok());
+            assert(sched.Trigger(MakeComponentName("finite")).ok());
+        },
+        {"finite", "oversized"});
+}
+
 void QueuedDeadlineMissMatchesEventsAndLog()
 {
     std::vector<observability::Event> events;
@@ -1335,6 +1347,7 @@ int main()
     SameComponentExecutesSeriallyAndCoalescesTriggers();
     PriorityAndFifoOrdering();
     AbsoluteDeadlineOrderingAndCoalescing();
+    OversizedDeadlineDoesNotWrapQueueOrder();
     QueuedDeadlineMissMatchesEventsAndLog();
     NonperiodicDeadlineAndCoalescedMetadata();
     DataAndTaskPoliciesReachQueue();
