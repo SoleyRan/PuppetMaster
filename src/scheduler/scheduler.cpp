@@ -228,12 +228,12 @@ struct Scheduler::Impl {
     core::Status Start(std::weak_ptr<Impl> weak_self)
     {
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::unique_lock<std::mutex> lock(mutex);
+            if (starting || stopping) {
+                return core::Status::FailedPrecondition("scheduler lifecycle operation is in progress");
+            }
             if (running) {
                 return core::Status::Ok();
-            }
-            if (stopping) {
-                return core::Status::FailedPrecondition("scheduler is stopping");
             }
             auto status = options.Validate();
             if (!status.ok()) {
@@ -245,29 +245,49 @@ struct Scheduler::Impl {
             }
 
             stopping = false;
+            starting = true;
             running = true;
             last_status = core::Status::Ok();
         }
 
-        for (std::size_t index = 0; index < options.worker_count; ++index) {
-            workers.emplace_back([weak_self]() {
-                if (auto self = weak_self.lock()) {
-                    self->DispatchLoop();
-                }
-            });
+        const auto finish_start = [this]() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                starting = false;
+            }
+            lifecycle.notify_all();
+        };
+
+        try {
+            for (std::size_t index = 0; index < options.worker_count; ++index) {
+                std::lock_guard<std::mutex> lock(mutex);
+                workers.emplace_back([weak_self]() {
+                    if (auto self = weak_self.lock()) {
+                        self->DispatchLoop();
+                    }
+                });
+            }
+
+            auto status = InstallDataTriggers(weak_self);
+            if (!status.ok()) {
+                Stop(true);
+                finish_start();
+                return status;
+            }
+
+            status = StartPeriodicTriggers(weak_self);
+            if (!status.ok()) {
+                Stop(true);
+                finish_start();
+                return status;
+            }
+        } catch (...) {
+            Stop(true);
+            finish_start();
+            throw;
         }
 
-        auto status = InstallDataTriggers(weak_self);
-        if (!status.ok()) {
-            Stop();
-            return status;
-        }
-
-        status = StartPeriodicTriggers(weak_self);
-        if (!status.ok()) {
-            Stop();
-            return status;
-        }
+        finish_start();
 
         if (const auto observer = runtime.observer()) {
             observer->Log(observability::LogRecord {
@@ -284,19 +304,13 @@ struct Scheduler::Impl {
         return core::Status::Ok();
     }
 
-    core::Status Stop()
+    core::Status Stop(bool from_start = false)
     {
         std::vector<std::thread> periodic_threads_to_join;
         std::vector<std::thread> workers_to_join;
 
         {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (stopping) {
-                return core::Status::FailedPrecondition("scheduler is already stopping");
-            }
-            if (!running) {
-                return core::Status::Ok();
-            }
+            std::unique_lock<std::mutex> lock(mutex);
             const auto caller = std::this_thread::get_id();
             for (const auto& worker : workers) {
                 if (worker.get_id() == caller) {
@@ -307,6 +321,15 @@ struct Scheduler::Impl {
                 if (timer.get_id() == caller) {
                     return core::Status::FailedPrecondition("scheduler timer cannot stop itself");
                 }
+            }
+            if (!from_start) {
+                lifecycle.wait(lock, [this]() { return !starting; });
+            }
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is already stopping");
+            }
+            if (!running) {
+                return core::Status::Ok();
             }
 
             stopping = true;
@@ -828,6 +851,7 @@ private:
     runtime::RuntimeContext& runtime;
     SchedulerOptions options;
     mutable std::mutex mutex;
+    std::condition_variable lifecycle;
     std::condition_variable event_available;
     std::condition_variable periodic_stop;
     std::condition_variable idle;
@@ -843,6 +867,7 @@ private:
     std::size_t coalesced_events {0};
     core::Status last_status;
     bool running {false};
+    bool starting {false};
     bool stopping {false};
 };
 

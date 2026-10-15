@@ -391,6 +391,36 @@ void PeriodicTriggerExecutesComponent()
     assert(component->execute_count() > 0);
 }
 
+void StopDuringStartLeavesSchedulerRestartable()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    scheduler::SchedulerOptions options;
+    options.worker_count = 8;
+    scheduler::Scheduler sched(*context.value(), options);
+    for (int index = 0; index < 24; ++index) {
+        const auto name = MakeComponentName("startup_timer_" + std::to_string(index));
+        auto component = std::make_shared<PeriodicCounter>(name, std::chrono::seconds(10));
+        assert(context.value()->RegisterComponent(component).ok());
+        assert(BringUp(*context.value(), name).ok());
+        assert(sched.RegisterComponent(name).ok());
+    }
+
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        core::Status start_status;
+        std::thread starter([&]() { start_status = sched.Start(); });
+        while (!sched.is_running()) {
+            std::this_thread::yield();
+        }
+        assert(sched.Stop().ok());
+        starter.join();
+        assert(start_status.ok());
+        assert(!sched.is_running());
+    }
+    assert(sched.Start().ok());
+    assert(sched.Stop().ok());
+}
+
 void NonDependencyTriggersRejectAnyPolicyAtRegistration()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1330,6 +1360,7 @@ int main()
 {
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
+    StopDuringStartLeavesSchedulerRestartable();
     NonDependencyTriggersRejectAnyPolicyAtRegistration();
     PeriodicDeadlineMissIsObservable();
     DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
