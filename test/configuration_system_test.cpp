@@ -286,6 +286,7 @@ void DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly()
     }
 
     auto valid = make_project({"first", "second"});
+    valid.components.front().readers = {"first", "second"};
     assert(valid.Validate().ok());
     assert(valid.BuildComponentSpec("monitor").ok());
 }
