@@ -143,7 +143,11 @@ public:
 
             data_available_.notify_all();
             if (callback) {
-                callback();
+                try {
+                    callback();
+                } catch (...) {
+                    return core::Status::Internal("in-memory reader callback failed");
+                }
             }
             return core::Status::Ok();
         }
