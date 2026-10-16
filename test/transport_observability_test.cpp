@@ -125,11 +125,52 @@ void QueueDepthDoesNotRequireAnApplicationCallback()
     assert(snapshot.topics.front().max_queue_depth == 3);
 }
 
+void QueueDepthAggregatesReadersOnTheSameTopic()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    const auto endpoint = MakeQueuedEndpoint();
+    auto first_reader = context.value()->CreateReader(endpoint);
+    auto second_reader = context.value()->CreateReader(endpoint);
+    auto writer = context.value()->CreateWriter(endpoint);
+    assert(first_reader.ok());
+    assert(second_reader.ok());
+    assert(writer.ok());
+
+    const std::string payload = "shared";
+    assert(writer.value()->Write(
+        transport::ByteView::From(payload.data(), payload.size())).ok());
+    assert(writer.value()->Write(
+        transport::ByteView::From(payload.data(), payload.size())).ok());
+
+    auto first_pending = first_reader.value()->PendingMessageCount();
+    auto second_pending = second_reader.value()->PendingMessageCount();
+    assert(first_pending.ok());
+    assert(second_pending.ok());
+    assert(first_pending.value() == 2);
+    assert(second_pending.value() == 2);
+
+    auto message = first_reader.value()->Read();
+    assert(message.ok());
+
+    const auto snapshot = context.value()->observer()->Snapshot();
+    assert(snapshot.topics.size() == 1);
+    assert(snapshot.topics.front().queue_depth == 3);
+    assert(snapshot.topics.front().max_queue_depth == 4);
+
+    second_reader.value().reset();
+    const auto after_removal = context.value()->observer()->Snapshot();
+    assert(after_removal.topics.front().queue_depth == 1);
+    assert(after_removal.topics.front().max_queue_depth == 4);
+}
+
 }  // namespace
 
 int main()
 {
     TransportOperationsUpdateMetricsAndEvents();
     QueueDepthDoesNotRequireAnApplicationCallback();
+    QueueDepthAggregatesReadersOnTheSameTopic();
     return 0;
 }
