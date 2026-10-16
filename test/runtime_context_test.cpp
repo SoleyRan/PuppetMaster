@@ -150,6 +150,45 @@ void RuntimeContextReportsMissingTransportKind()
     assert(writer.status().code() == core::StatusCode::kNotFound);
 }
 
+class FailingCloseTransport final : public transport::Transport {
+public:
+    const core::TransportName& name() const noexcept override { return name_; }
+    core::TransportKind kind() const noexcept override { return core::TransportKind::kInMemory; }
+    transport::TransportCapabilities capabilities() const noexcept override { return {}; }
+    core::Status Open() override { open_ = true; return core::Status::Ok(); }
+    core::Status Close() noexcept override
+    {
+        open_ = false;
+        return core::Status::FailedPrecondition("transport close failed");
+    }
+    bool is_open() const noexcept override { return open_; }
+    core::Result<transport::ReaderPtr> CreateReader(const transport::EndpointConfig&) override
+    {
+        return core::Result<transport::ReaderPtr>::FromStatus(core::Status::Unsupported("reader"));
+    }
+    core::Result<transport::WriterPtr> CreateWriter(const transport::EndpointConfig&) override
+    {
+        return core::Result<transport::WriterPtr>::FromStatus(core::Status::Unsupported("writer"));
+    }
+private:
+    core::TransportName name_ {core::TransportName::Unsafe("failing")};
+    bool open_ {false};
+};
+
+void RuntimeContextReportsTransportCloseFailure()
+{
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    auto transport = std::make_shared<FailingCloseTransport>();
+    assert(context.value()->RegisterTransport(transport).ok());
+    auto status = context.value()->Close();
+    assert(status.code() == core::StatusCode::kFailedPrecondition);
+    assert(status.message() == "transport close failed");
+    assert(!context.value()->is_open());
+}
+
 void ClosedRuntimeContextRejectsEndpointCreation()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -171,6 +210,7 @@ int main()
     RuntimeContextCreatesEndpointsThroughTransport();
     DuplicateTransportRegistrationDoesNotOpenCandidate();
     RuntimeContextReportsMissingTransportKind();
+    RuntimeContextReportsTransportCloseFailure();
     ClosedRuntimeContextRejectsEndpointCreation();
     return 0;
 }

@@ -335,17 +335,21 @@ struct RuntimeContext::Impl {
 
     core::Status Close()
     {
+        core::Status result = core::Status::Ok();
         const auto names = ListTransportNames();
         for (const auto& name : names) {
             auto transport = FindTransport(name);
             if (transport.ok()) {
-                transport.value()->Close();
+                auto status = transport.value()->Close();
+                if (result.ok() && !status.ok()) {
+                    result = status;
+                }
             }
         }
 
         std::lock_guard<std::mutex> lock(mutex);
         open = false;
-        return core::Status::Ok();
+        return result;
     }
 
     bool IsOpen() const noexcept
