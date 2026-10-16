@@ -248,6 +248,12 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
             core::Status::InvalidArgument("trigger period can only be used with periodic triggers"));
     }
 
+    if (kind != core::TriggerKind::kData && kind != core::TriggerKind::kTaskDependency
+        && dependency_policy != core::DependencyPolicy::kAll) {
+        return core::Result<core::TriggerSpec>::FromStatus(core::Status::InvalidArgument(
+            "trigger dependency_policy can only be used with data or task dependency triggers"));
+    }
+
     if (kind != core::TriggerKind::kData && !data_topics.empty()) {
         return core::Result<core::TriggerSpec>::FromStatus(
             core::Status::InvalidArgument("trigger data_topics can only be used with data triggers"));
@@ -277,6 +283,7 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
             core::Status::InvalidArgument("data trigger requires at least one topic id"));
     }
 
+    std::map<core::TopicName, std::string> seen_data_topics;
     for (const auto& topic_id : data_topics) {
         auto topic = project.FindTopic(topic_id);
         if (!topic.ok()) {
@@ -286,6 +293,12 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
         auto topic_name = core::TopicName::Create(topic.value().name);
         if (!topic_name.ok()) {
             return core::Result<core::TriggerSpec>::FromStatus(topic_name.status());
+        }
+        const auto inserted = seen_data_topics.emplace(topic_name.value(), topic_id);
+        if (!inserted.second) {
+            return core::Result<core::TriggerSpec>::FromStatus(core::Status::InvalidArgument(
+                "data trigger has duplicate topic dependency ids " + inserted.first->second + " and " + topic_id
+                + " for topic " + topic_name.value().str()));
         }
         trigger.data_dependencies.push_back(topic_name.value());
     }
@@ -360,12 +373,32 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         spec.writers.push_back(endpoint.value());
     }
 
-    for (const auto& trigger_config : triggers) {
-        auto trigger = trigger_config.ToTriggerSpec(project);
+    std::map<core::TopicName, std::size_t> data_trigger_topics;
+    for (std::size_t index = 0; index < triggers.size(); ++index) {
+        auto trigger = triggers[index].ToTriggerSpec(project);
         if (!trigger.ok()) {
-            return core::Result<runtime::ComponentSpec>::FromStatus(trigger.status());
+            return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::Error(
+                trigger.status().code(), "component " + name + " trigger " + std::to_string(index)
+                    + ": " + trigger.status().message()));
         }
         spec.triggers.push_back(trigger.value());
+        if (trigger.value().kind == core::TriggerKind::kData) {
+            for (const auto& topic : trigger.value().data_dependencies) {
+                const auto matches = std::count_if(spec.readers.begin(), spec.readers.end(),
+                    [&topic](const auto& reader) { return reader.topic.name == topic; });
+                if (matches > 1) {
+                    return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                        "component " + name + " trigger " + std::to_string(index)
+                            + " has multiple reader endpoints for topic " + topic.str()));
+                }
+                const auto inserted = data_trigger_topics.emplace(topic, index);
+                if (!inserted.second) {
+                    return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                        "component " + name + " triggers " + std::to_string(inserted.first->second)
+                            + " and " + std::to_string(index) + " share data topic " + topic.str()));
+                }
+            }
+        }
     }
 
     auto status = spec.Validate();

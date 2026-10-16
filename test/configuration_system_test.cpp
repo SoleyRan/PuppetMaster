@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <puppet_master/puppet_master.h>
 
@@ -177,6 +178,183 @@ void TopicAliasesMayShareNamesAcrossTransports()
     assert(project.Validate().ok());
 }
 
+void DataTriggerRejectsAmbiguousReadersBeforeAssembly()
+{
+    for (const auto transport : {core::TransportKind::kInMemory, core::TransportKind::kFastDds}) {
+        config::ProjectConfig project;
+        assert(project.AddTopic(config::TopicConfig {
+            "first", "/shared", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+        }).ok());
+        assert(project.AddTopic(config::TopicConfig {
+            "second", "/shared", transport, "demo.Payload", "text/plain", {}
+        }).ok());
+        config::TriggerConfig manual;
+        manual.kind = core::TriggerKind::kManual;
+        config::TriggerConfig data;
+        data.kind = core::TriggerKind::kData;
+        data.data_topics = {"first"};
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"second", "first"}, {}, {manual, data}, "monitor"
+        }).ok());
+
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("component monitor trigger 1") != std::string::npos);
+        assert(status.message().find("/shared") != std::string::npos);
+        auto spec = project.BuildComponentSpec("monitor");
+        assert(!spec.ok());
+        assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+        assert(spec.status().message().find("/shared") != std::string::npos);
+
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+            return component;
+        }).ok());
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+
+        project.components.front().readers = {"first"};
+        assert(project.Validate().ok());
+        assert(project.BuildComponentSpec("monitor").ok());
+        project.components.front().readers = {"first", "second"};
+        project.components.front().triggers = {manual};
+        assert(project.Validate().ok());
+        assert(project.BuildComponentSpec("monitor").ok());
+    }
+}
+
+void DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly()
+{
+    const auto make_project = [](std::vector<std::string> dependencies) {
+        config::ProjectConfig project;
+        for (const auto* id : {"first", "second", "third"}) {
+            assert(project.AddTopic(config::TopicConfig {
+                id, std::string("/") + id, core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+            }).ok());
+        }
+        assert(project.AddTopic(config::TopicConfig {
+            "alias", "/first", core::TransportKind::kFastDds, "demo.Payload", "text/plain", {}
+        }).ok());
+        config::TriggerConfig trigger;
+        trigger.kind = core::TriggerKind::kData;
+        trigger.data_topics = std::move(dependencies);
+        assert(project.AddComponent(config::ComponentConfig {
+            "monitor", "", {"first", "second", "third", "alias"}, {}, {trigger}, "monitor"
+        }).ok());
+        return project;
+    };
+
+    for (const auto& dependencies : {std::vector<std::string> {"first", "first"},
+                                     std::vector<std::string> {"first", "alias"}}) {
+        auto project = make_project(dependencies);
+        auto status = project.Validate();
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("component monitor trigger 0") != std::string::npos);
+        assert(status.message().find(dependencies.front()) != std::string::npos);
+        assert(status.message().find(dependencies.back()) != std::string::npos);
+
+        auto trigger = project.components.front().triggers.front().ToTriggerSpec(project);
+        assert(!trigger.ok());
+        assert(trigger.status().code() == core::StatusCode::kInvalidArgument);
+        auto spec = project.BuildComponentSpec("monitor");
+        assert(!spec.ok());
+        assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        int created = 0;
+        config::ComponentFactoryRegistry factories;
+        assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+            -> core::Result<runtime::ComponentPtr> {
+            ++created;
+            runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+            return component;
+        }).ok());
+        auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+        assert(!scheduler.ok());
+        assert(created == 0);
+        assert(context.value()->ListComponentNames().empty());
+    }
+
+    auto valid = make_project({"first", "second"});
+    valid.components.front().readers = {"first", "second"};
+    assert(valid.Validate().ok());
+    assert(valid.BuildComponentSpec("monitor").ok());
+}
+
+void DataTriggersSharingTopicAreRejectedBeforeAssembly()
+{
+    config::ProjectConfig project;
+    assert(project.AddTopic(config::TopicConfig {
+        "first", "/shared", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "alias", "/shared", core::TransportKind::kFastDds, "demo.Payload", "text/plain", {}
+    }).ok());
+    assert(project.AddTopic(config::TopicConfig {
+        "other", "/other", core::TransportKind::kInMemory, "demo.Payload", "text/plain", {}
+    }).ok());
+    config::TriggerConfig manual;
+    manual.kind = core::TriggerKind::kManual;
+    config::TriggerConfig first;
+    first.kind = core::TriggerKind::kData;
+    first.data_topics = {"first"};
+    config::TriggerConfig second = first;
+    second.data_topics = {"alias"};
+    assert(project.AddComponent(config::ComponentConfig {
+        "monitor", "", {"first", "other"}, {}, {manual, first, second}, "monitor"
+    }).ok());
+
+    auto status = project.Validate();
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find("component monitor") != std::string::npos);
+    assert(status.message().find("1 and 2") != std::string::npos);
+    assert(status.message().find("/shared") != std::string::npos);
+    auto spec = project.BuildComponentSpec("monitor");
+    assert(!spec.ok());
+    assert(spec.status().code() == core::StatusCode::kInvalidArgument);
+    assert(spec.status().message().find("1 and 2") != std::string::npos);
+
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    int created = 0;
+    config::ComponentFactoryRegistry factories;
+    assert(factories.Register("monitor", [&created](const runtime::ComponentSpec& value)
+        -> core::Result<runtime::ComponentPtr> {
+        ++created;
+        runtime::ComponentPtr component = std::make_shared<SpecComponent>(value);
+        return component;
+    }).ok());
+    assert(config::ApplyComponentSpecs(project, *context.value()).code()
+        == core::StatusCode::kInvalidArgument);
+    auto specs_only = config::CreateScheduler(project, *context.value());
+    assert(!specs_only.ok());
+    assert(specs_only.status().code() == core::StatusCode::kInvalidArgument);
+    auto scheduler = config::CreateScheduler(project, *context.value(), factories);
+    assert(!scheduler.ok());
+    assert(scheduler.status().code() == core::StatusCode::kInvalidArgument);
+    assert(created == 0);
+    assert(context.value()->ListComponentNames().empty());
+
+    project.components.front().triggers.back().data_topics = {"other"};
+    assert(project.Validate().ok());
+    spec = project.BuildComponentSpec("monitor");
+    assert(spec.ok());
+    assert(spec.value().triggers.size() == 3);
+    auto valid_scheduler = config::CreateScheduler(project, *context.value());
+    assert(valid_scheduler.ok());
+    assert(valid_scheduler.value()->stats().registered_components == 1);
+}
+
 void ProjectValidationRejectsMissingDataReader()
 {
     auto project = MakeSpeedProject();
@@ -216,6 +394,41 @@ void ProjectValidationRejectsTriggerFieldMismatch()
     auto status = project.Validate();
     assert(!status.ok());
     assert(status.code() == core::StatusCode::kInvalidArgument);
+}
+
+void DependencyPoliciesMatchTriggerKinds()
+{
+    config::ProjectConfig project;
+    config::TriggerConfig periodic;
+    periodic.kind = core::TriggerKind::kPeriodic;
+    periodic.period = core::Nanoseconds(1000);
+    config::TriggerConfig manual;
+    manual.kind = core::TriggerKind::kManual;
+
+    assert(periodic.ToTriggerSpec(project).ok());
+    assert(manual.ToTriggerSpec(project).ok());
+    for (auto trigger : {periodic, manual}) {
+        trigger.dependency_policy = core::DependencyPolicy::kAny;
+        auto result = trigger.ToTriggerSpec(project);
+        assert(!result.ok());
+        assert(result.status().code() == core::StatusCode::kInvalidArgument);
+        assert(result.status().message().find("dependency_policy") != std::string::npos);
+        assert(trigger.Validate(project).code() == core::StatusCode::kInvalidArgument);
+    }
+
+    auto data_project = MakeSpeedProject();
+    assert(data_project.Validate().ok());
+    auto data = data_project.components.front().triggers.front().ToTriggerSpec(data_project);
+    assert(data.ok());
+    assert(data.value().dependency_policy == core::DependencyPolicy::kAny);
+
+    config::TriggerConfig task;
+    task.kind = core::TriggerKind::kTaskDependency;
+    task.task_dependencies = {"upstream"};
+    task.dependency_policy = core::DependencyPolicy::kAny;
+    auto task_spec = task.ToTriggerSpec(project);
+    assert(task_spec.ok());
+    assert(task_spec.value().dependency_policy == core::DependencyPolicy::kAny);
 }
 
 void TaskDependencyGraphsAreValidatedBeforeAssembly()
@@ -627,9 +840,13 @@ int main()
     ProjectConfigBuildsEndpointAndComponentSpec();
     TopicDescriptorConflictsAreRejectedBeforeAssembly();
     TopicAliasesMayShareNamesAcrossTransports();
+    DataTriggerRejectsAmbiguousReadersBeforeAssembly();
+    DataTriggerDependenciesRejectDuplicateIdsAndAliasesBeforeAssembly();
+    DataTriggersSharingTopicAreRejectedBeforeAssembly();
     ProjectValidationRejectsMissingDataReader();
     ProjectValidationRejectsUnknownTopicReference();
     ProjectValidationRejectsTriggerFieldMismatch();
+    DependencyPoliciesMatchTriggerKinds();
     TaskDependencyGraphsAreValidatedBeforeAssembly();
     TaskDependencyValidationAcceptsForwardReferencesAndSharedUpstreams();
     TriggerSchedulingFieldsReachComponentSpec();

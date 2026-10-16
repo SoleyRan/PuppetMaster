@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <set>
@@ -47,6 +48,13 @@ core::Result<transport::EndpointConfig> FindReaderEndpoint(
             core::Status::InvalidArgument(
                 "data trigger topic has no matching reader endpoint: " + topic.str()));
     }
+    if (std::find_if(std::next(found), spec.readers.end(), [&topic](const auto& endpoint) {
+            return endpoint.topic.name == topic;
+        }) != spec.readers.end()) {
+        return core::Result<transport::EndpointConfig>::FromStatus(
+            core::Status::InvalidArgument(
+                "data trigger topic has multiple matching reader endpoints: " + topic.str()));
+    }
 
     return *found;
 }
@@ -72,7 +80,11 @@ core::Status ValidateTrigger(const runtime::ComponentSpec& spec, const core::Tri
             return core::Status::InvalidArgument("data trigger requires at least one topic dependency");
         }
 
+        std::set<core::TopicName> seen;
         for (const auto& topic : trigger.data_dependencies) {
+            if (!seen.insert(topic).second) {
+                return core::Status::InvalidArgument("data trigger has duplicate topic dependency: " + topic.str());
+            }
             auto endpoint = FindReaderEndpoint(spec, topic);
             if (!endpoint.ok()) {
                 return endpoint.status();
@@ -94,10 +106,22 @@ core::Status ValidateComponentSpec(const runtime::ComponentSpec& spec)
         return status;
     }
 
-    for (const auto& trigger : spec.triggers) {
+    std::map<core::TopicName, std::size_t> data_trigger_topics;
+    for (std::size_t index = 0; index < spec.triggers.size(); ++index) {
+        const auto& trigger = spec.triggers[index];
         status = ValidateTrigger(spec, trigger);
         if (!status.ok()) {
             return status;
+        }
+        if (trigger.kind == core::TriggerKind::kData) {
+            for (const auto& topic : trigger.data_dependencies) {
+                const auto inserted = data_trigger_topics.emplace(topic, index);
+                if (!inserted.second) {
+                    return core::Status::InvalidArgument(
+                        "component " + spec.name.str() + " triggers " + std::to_string(inserted.first->second)
+                            + " and " + std::to_string(index) + " share data topic " + topic.str());
+                }
+            }
         }
     }
 
@@ -204,12 +228,12 @@ struct Scheduler::Impl {
     core::Status Start(std::weak_ptr<Impl> weak_self)
     {
         {
-            std::lock_guard<std::mutex> lock(mutex);
+            std::unique_lock<std::mutex> lock(mutex);
+            if (starting || stopping) {
+                return core::Status::FailedPrecondition("scheduler lifecycle operation is in progress");
+            }
             if (running) {
                 return core::Status::Ok();
-            }
-            if (stopping) {
-                return core::Status::FailedPrecondition("scheduler is stopping");
             }
             auto status = options.Validate();
             if (!status.ok()) {
@@ -221,29 +245,51 @@ struct Scheduler::Impl {
             }
 
             stopping = false;
+            starting = true;
+            starting_thread = std::this_thread::get_id();
             running = true;
             last_status = core::Status::Ok();
         }
 
-        for (std::size_t index = 0; index < options.worker_count; ++index) {
-            workers.emplace_back([weak_self]() {
-                if (auto self = weak_self.lock()) {
-                    self->DispatchLoop();
-                }
-            });
+        const auto finish_start = [this]() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                starting = false;
+                starting_thread = {};
+            }
+            lifecycle.notify_all();
+        };
+
+        try {
+            for (std::size_t index = 0; index < options.worker_count; ++index) {
+                std::lock_guard<std::mutex> lock(mutex);
+                workers.emplace_back([weak_self]() {
+                    if (auto self = weak_self.lock()) {
+                        self->DispatchLoop();
+                    }
+                });
+            }
+
+            auto status = InstallDataTriggers(weak_self);
+            if (!status.ok()) {
+                Stop(true);
+                finish_start();
+                return status;
+            }
+
+            status = StartPeriodicTriggers(weak_self);
+            if (!status.ok()) {
+                Stop(true);
+                finish_start();
+                return status;
+            }
+        } catch (...) {
+            Stop(true);
+            finish_start();
+            throw;
         }
 
-        auto status = InstallDataTriggers(weak_self);
-        if (!status.ok()) {
-            Stop();
-            return status;
-        }
-
-        status = StartPeriodicTriggers(weak_self);
-        if (!status.ok()) {
-            Stop();
-            return status;
-        }
+        finish_start();
 
         if (const auto observer = runtime.observer()) {
             observer->Log(observability::LogRecord {
@@ -260,29 +306,33 @@ struct Scheduler::Impl {
         return core::Status::Ok();
     }
 
-    core::Status Stop()
+    core::Status Stop(bool from_start = false)
     {
         std::vector<std::thread> periodic_threads_to_join;
         std::vector<std::thread> workers_to_join;
 
         {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (stopping) {
-                return core::Status::FailedPrecondition("scheduler is already stopping");
-            }
-            if (!running) {
-                return core::Status::Ok();
-            }
+            std::unique_lock<std::mutex> lock(mutex);
             const auto caller = std::this_thread::get_id();
-            for (const auto& worker : workers) {
-                if (worker.get_id() == caller) {
-                    return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
-                }
+            if (worker_ids.find(caller) != worker_ids.end()) {
+                return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
             }
             for (const auto& timer : periodic_threads) {
                 if (timer.get_id() == caller) {
                     return core::Status::FailedPrecondition("scheduler timer cannot stop itself");
                 }
+            }
+            if (!from_start) {
+                if (starting && starting_thread == caller) {
+                    return core::Status::FailedPrecondition("scheduler cannot stop itself while starting");
+                }
+                lifecycle.wait(lock, [this]() { return !starting; });
+            }
+            if (stopping) {
+                return core::Status::FailedPrecondition("scheduler is already stopping");
+            }
+            if (!running) {
+                return core::Status::Ok();
             }
 
             stopping = true;
@@ -372,6 +422,10 @@ struct Scheduler::Impl {
     core::Status WaitIdle(core::Nanoseconds timeout)
     {
         std::unique_lock<std::mutex> lock(mutex);
+        const auto caller = std::this_thread::get_id();
+        if (worker_ids.find(caller) != worker_ids.end()) {
+            return core::Status::FailedPrecondition("scheduler worker cannot wait for itself to become idle");
+        }
         const auto ready = [this]() {
             return pending_events.empty() && active_events == 0;
         };
@@ -483,9 +537,11 @@ private:
             return;
         }
         const auto queued_at = core::SteadyClock::now();
-        const auto due_time = deadline > core::Nanoseconds::zero()
-            ? queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline)
-            : core::SteadyClock::time_point::max();
+        auto due_time = core::SteadyClock::time_point::max();
+        if (deadline > core::Nanoseconds::zero()
+            && deadline < std::chrono::duration_cast<core::Nanoseconds>(due_time - queued_at)) {
+            due_time = queued_at + std::chrono::duration_cast<core::SteadyClock::duration>(deadline);
+        }
         pending_events.push_back(ScheduledEvent {name, deadline, priority, due_time, queued_at});
         event_available.notify_one();
     }
@@ -646,6 +702,10 @@ private:
 
     void DispatchLoop()
     {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            worker_ids.insert(std::this_thread::get_id());
+        }
         while (true) {
             ScheduledEvent event {
                 core::ComponentName::Unsafe("__invalid__"),
@@ -729,6 +789,7 @@ private:
         }
 
         std::lock_guard<std::mutex> lock(mutex);
+        worker_ids.erase(std::this_thread::get_id());
         if (pending_events.empty() && active_events == 0) {
             idle.notify_all();
         }
@@ -802,6 +863,7 @@ private:
     runtime::RuntimeContext& runtime;
     SchedulerOptions options;
     mutable std::mutex mutex;
+    std::condition_variable lifecycle;
     std::condition_variable event_available;
     std::condition_variable periodic_stop;
     std::condition_variable idle;
@@ -812,11 +874,14 @@ private:
     std::unordered_set<std::string> executing_components;
     std::vector<std::thread> periodic_threads;
     std::vector<std::thread> workers;
+    std::unordered_set<std::thread::id> worker_ids;
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
     std::size_t coalesced_events {0};
     core::Status last_status;
     bool running {false};
+    bool starting {false};
+    std::thread::id starting_thread;
     bool stopping {false};
 };
 

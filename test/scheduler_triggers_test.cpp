@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <puppet_master/puppet_master.h>
+#include <puppet_master/transport/inmemory/inmemory_transport.h>
 
 namespace core = puppet_master::core;
 namespace observability = puppet_master::observability;
@@ -345,6 +346,136 @@ private:
     int execute_count_ {0};
 };
 
+class SelfWaitingComponent final : public runtime::Component {
+public:
+    explicit SelfWaitingComponent(core::ComponentName name)
+        : spec_ {std::move(name), "checks worker idle wait", {}, {},
+                 {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}}
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override { return spec_; }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        wait_status = sched->WaitIdle(core::Nanoseconds::zero());
+        ++executions;
+        return core::Status::Ok();
+    }
+
+    scheduler::Scheduler* sched {nullptr};
+    core::Status wait_status;
+    std::atomic<int> executions {0};
+
+private:
+    runtime::ComponentSpec spec_;
+};
+
+class StopTimeSelfWaitingComponent final : public runtime::Component {
+public:
+    explicit StopTimeSelfWaitingComponent(core::ComponentName name)
+        : spec_ {std::move(name), "checks worker wait during stop", {}, {},
+                 {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}}
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override { return spec_; }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        entered.store(true);
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+        wait_status = sched->WaitIdle(std::chrono::milliseconds(20));
+        stop_status = sched->Stop();
+        return core::Status::Ok();
+    }
+
+    scheduler::Scheduler* sched {nullptr};
+    std::atomic<bool> entered {false};
+    std::atomic<bool> release {false};
+    core::Status wait_status;
+    core::Status stop_status;
+
+private:
+    runtime::ComponentSpec spec_;
+};
+
+void WorkerCannotWaitOrStopDuringShutdown()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("stop_time_self_waiting_component");
+    auto component = std::make_shared<StopTimeSelfWaitingComponent>(name);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    component->sched = &sched;
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    const auto entered_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (!component->entered.load() && core::SteadyClock::now() < entered_deadline) {
+        std::this_thread::yield();
+    }
+    assert(component->entered.load());
+
+    core::Status shutdown_status;
+    std::thread shutdown([&]() { shutdown_status = sched.Stop(); });
+    const auto stopping_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (sched.is_running() && core::SteadyClock::now() < stopping_deadline) {
+        std::this_thread::yield();
+    }
+    const bool stopping = !sched.is_running();
+    component->release.store(true);
+    shutdown.join();
+    assert(stopping);
+    assert(shutdown_status.ok());
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.message() == "scheduler worker cannot stop itself");
+
+    component->entered.store(false);
+    component->release.store(false);
+    component->wait_status = core::Status::Ok();
+    component->stop_status = core::Status::Ok();
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    const auto restart_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (!component->entered.load() && core::SteadyClock::now() < restart_deadline) {
+        std::this_thread::yield();
+    }
+    const bool restarted = component->entered.load();
+    component->release.store(true);
+    assert(restarted);
+    assert(sched.WaitIdle(std::chrono::seconds(1)).ok());
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(sched.Stop().ok());
+}
+
+void WorkerCannotWaitForItselfToBecomeIdle()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("self_waiting_component");
+    auto component = std::make_shared<SelfWaitingComponent>(name);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    component->sched = &sched;
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    assert(sched.WaitIdle(std::chrono::milliseconds(500)).ok());
+    assert(component->executions == 1);
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(sched.Stop().ok());
+}
+
 void ManualTriggerExecutesComponent()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -391,6 +522,124 @@ void PeriodicTriggerExecutesComponent()
     assert(component->execute_count() > 0);
 }
 
+void StopDuringStartLeavesSchedulerRestartable()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    scheduler::SchedulerOptions options;
+    options.worker_count = 8;
+    scheduler::Scheduler sched(*context.value(), options);
+    for (int index = 0; index < 24; ++index) {
+        const auto name = MakeComponentName("startup_timer_" + std::to_string(index));
+        auto component = std::make_shared<PeriodicCounter>(name, std::chrono::seconds(10));
+        assert(context.value()->RegisterComponent(component).ok());
+        assert(BringUp(*context.value(), name).ok());
+        assert(sched.RegisterComponent(name).ok());
+    }
+
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        core::Status start_status;
+        std::thread starter([&]() { start_status = sched.Start(); });
+        while (!sched.is_running()) {
+            std::this_thread::yield();
+        }
+        assert(sched.Stop().ok());
+        starter.join();
+        assert(start_status.ok());
+        assert(!sched.is_running());
+    }
+    assert(sched.Start().ok());
+    assert(sched.Stop().ok());
+}
+
+class StartupCallbackTransport final : public transport::Transport {
+public:
+    const core::TransportName& name() const noexcept override { return inner_.name(); }
+    core::TransportKind kind() const noexcept override { return inner_.kind(); }
+    transport::TransportCapabilities capabilities() const noexcept override { return inner_.capabilities(); }
+    core::Status Open() override { return inner_.Open(); }
+    core::Status Close() noexcept override { return inner_.Close(); }
+    bool is_open() const noexcept override { return inner_.is_open(); }
+    core::Result<transport::ReaderPtr> CreateReader(const transport::EndpointConfig& endpoint) override
+    {
+        if (on_create_reader) {
+            on_create_reader();
+        }
+        return inner_.CreateReader(endpoint);
+    }
+    core::Result<transport::WriterPtr> CreateWriter(const transport::EndpointConfig& endpoint) override
+    {
+        return inner_.CreateWriter(endpoint);
+    }
+
+    std::function<void()> on_create_reader;
+
+private:
+    transport::inmemory::InMemoryTransport inner_ {core::TransportName::Unsafe("inmemory")};
+};
+
+void StartupCallbackCannotStopItsOwnScheduler()
+{
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    auto backend = std::make_shared<StartupCallbackTransport>();
+    assert(context.value()->RegisterTransport(backend).ok());
+    assert(backend->Open().ok());
+    const auto name = MakeComponentName("startup_reentrant_consumer");
+    auto component = std::make_shared<DataConsumer>(name, MakeEndpoint("/scheduler/startup_reentrant"));
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    int callbacks = 0;
+    backend->on_create_reader = [&]() {
+        ++callbacks;
+        assert(sched.Stop().code() == core::StatusCode::kFailedPrecondition);
+        assert(sched.Start().code() == core::StatusCode::kFailedPrecondition);
+    };
+    assert(sched.Start().ok());
+    assert(callbacks == 1);
+    assert(sched.is_running());
+    assert(sched.Stop().ok());
+    assert(sched.Start().ok());
+    assert(callbacks == 2);
+    assert(sched.Stop().ok());
+    backend->on_create_reader = {};
+}
+
+void NonDependencyTriggersRejectAnyPolicyAtRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    for (const auto kind : {core::TriggerKind::kPeriodic, core::TriggerKind::kManual}) {
+        const auto name = MakeComponentName(kind == core::TriggerKind::kPeriodic
+            ? "invalid_periodic_policy" : "invalid_manual_policy");
+        core::TriggerSpec trigger;
+        trigger.kind = kind;
+        trigger.period = kind == core::TriggerKind::kPeriodic
+            ? std::chrono::milliseconds(5) : core::Nanoseconds::zero();
+        trigger.dependency_policy = core::DependencyPolicy::kAny;
+        runtime::ComponentSpec spec {name, "invalid dependency policy", {}, {}, {trigger}};
+        assert(trigger.Validate().code() == core::StatusCode::kInvalidArgument);
+        auto status = context.value()->RegisterComponent(spec);
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find("dependency_policy") != std::string::npos);
+    }
+
+    const auto name = MakeComponentName("valid_periodic_policy");
+    core::TriggerSpec periodic;
+    periodic.kind = core::TriggerKind::kPeriodic;
+    periodic.period = std::chrono::milliseconds(5);
+    assert(context.value()->RegisterComponent(runtime::ComponentSpec {
+        name, "default dependency policy", {}, {}, {periodic}
+    }).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.stats().registered_components == 1);
+}
+
 void PeriodicDeadlineMissIsObservable()
 {
     std::size_t deadline_logs = 0;
@@ -434,6 +683,94 @@ void PeriodicDeadlineMissIsObservable()
     assert(snapshot.tasks.front().deadline_misses > 0);
     assert(snapshot.tasks.front().max_execution_time > std::chrono::milliseconds(1));
     assert(deadline_logs == snapshot.tasks.front().deadline_misses);
+}
+
+void DuplicateDataDependenciesAreRejectedAtSchedulerRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("duplicate_data_consumer");
+    const auto endpoint = MakeEndpoint("/scheduler/duplicate");
+    runtime::ComponentSpec spec {
+        name, "duplicate data dependency", {endpoint}, {},
+        {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAll,
+                           {endpoint.topic.name, endpoint.topic.name}, {}}}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    auto status = sched.RegisterComponent(name);
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find(endpoint.topic.name.str()) != std::string::npos);
+    assert(sched.stats().registered_components == 0);
+}
+
+void AmbiguousDataReadersAreRejectedAtSchedulerRegistration()
+{
+    for (const auto transport : {core::TransportKind::kInMemory, core::TransportKind::kFastDds}) {
+        auto context = runtime::RuntimeContext::Create();
+        assert(context.ok());
+        const auto name = MakeComponentName("ambiguous_data_consumer");
+        const auto first = MakeEndpoint("/scheduler/ambiguous");
+        auto second = first;
+        second.topic.transport = transport;
+        runtime::ComponentSpec spec {
+            name, "ambiguous data readers", {second, first}, {},
+            {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                               {first.topic.name}, {}}}
+        };
+        assert(context.value()->RegisterComponent(spec).ok());
+        scheduler::Scheduler sched(*context.value());
+        auto status = sched.RegisterComponent(name);
+        assert(status.code() == core::StatusCode::kInvalidArgument);
+        assert(status.message().find(first.topic.name.str()) != std::string::npos);
+        assert(sched.stats().registered_components == 0);
+    }
+
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("unambiguous_data_consumer");
+    const auto endpoint = MakeEndpoint("/scheduler/unambiguous");
+    auto unrelated = MakeEndpoint("/scheduler/unrelated");
+    runtime::ComponentSpec spec {
+        name, "one matching data reader", {unrelated, endpoint}, {},
+        {core::TriggerSpec {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                           {endpoint.topic.name}, {}}}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.stats().registered_components == 1);
+}
+
+void DataTriggersSharingTopicAreRejectedAtSchedulerRegistration()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("shared_data_consumer");
+    const auto first = MakeEndpoint("/scheduler/shared");
+    const auto second = MakeEndpoint("/scheduler/other");
+    const core::TriggerSpec data {core::TriggerKind::kData, {}, core::DependencyPolicy::kAny,
+                                  {first.topic.name}, {}};
+    runtime::ComponentSpec spec {
+        name, "separate data triggers", {first, second}, {},
+        {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}, data, data}
+    };
+    assert(context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler sched(*context.value());
+    auto status = sched.RegisterComponent(name);
+    assert(status.code() == core::StatusCode::kInvalidArgument);
+    assert(status.message().find(name.str()) != std::string::npos);
+    assert(status.message().find("1 and 2") != std::string::npos);
+    assert(status.message().find(first.topic.name.str()) != std::string::npos);
+    assert(sched.stats().registered_components == 0);
+
+    auto valid_context = runtime::RuntimeContext::Create();
+    assert(valid_context.ok());
+    spec.triggers.back().data_dependencies = {second.topic.name};
+    assert(valid_context.value()->RegisterComponent(spec).ok());
+    scheduler::Scheduler valid_sched(*valid_context.value());
+    assert(valid_sched.RegisterComponent(name).ok());
+    assert(valid_sched.stats().registered_components == 1);
 }
 
 void DataTriggerExecutesComponent()
@@ -1009,6 +1346,18 @@ void AbsoluteDeadlineOrderingAndCoalescing()
         });
 }
 
+void OversizedDeadlineDoesNotWrapQueueOrder()
+{
+    CheckQueuedOrder(
+        {OrderedSpec("oversized", ManualPolicy(0, core::Nanoseconds::max())),
+         OrderedSpec("finite", ManualPolicy(0, std::chrono::seconds(1)))},
+        [](runtime::RuntimeContext&, scheduler::Scheduler& sched) {
+            assert(sched.Trigger(MakeComponentName("oversized")).ok());
+            assert(sched.Trigger(MakeComponentName("finite")).ok());
+        },
+        {"finite", "oversized"});
+}
+
 void QueuedDeadlineMissMatchesEventsAndLog()
 {
     std::vector<observability::Event> events;
@@ -1197,9 +1546,17 @@ void ZeroWorkerCountIsRejected()
 
 int main()
 {
+    WorkerCannotWaitOrStopDuringShutdown();
+    WorkerCannotWaitForItselfToBecomeIdle();
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
+    StopDuringStartLeavesSchedulerRestartable();
+    StartupCallbackCannotStopItsOwnScheduler();
+    NonDependencyTriggersRejectAnyPolicyAtRegistration();
     PeriodicDeadlineMissIsObservable();
+    DuplicateDataDependenciesAreRejectedAtSchedulerRegistration();
+    AmbiguousDataReadersAreRejectedAtSchedulerRegistration();
+    DataTriggersSharingTopicAreRejectedAtSchedulerRegistration();
     DataTriggerExecutesComponent();
     DataTriggerCoalescesRepeatedArrivals();
     AllDataTriggerWaitsForEveryTopic();
@@ -1212,6 +1569,7 @@ int main()
     SameComponentExecutesSeriallyAndCoalescesTriggers();
     PriorityAndFifoOrdering();
     AbsoluteDeadlineOrderingAndCoalescing();
+    OversizedDeadlineDoesNotWrapQueueOrder();
     QueuedDeadlineMissMatchesEventsAndLog();
     NonperiodicDeadlineAndCoalescedMetadata();
     DataAndTaskPoliciesReachQueue();
