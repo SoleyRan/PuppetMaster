@@ -118,6 +118,24 @@ void RuntimeContextCreatesEndpointsThroughTransport()
     assert(PayloadToString(message.value().payload) == "speed=12.5");
 }
 
+void DuplicateTransportRegistrationDoesNotOpenCandidate()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+
+    auto same_name = std::make_shared<transport::inmemory::InMemoryTransport>(
+        core::TransportName::Unsafe("inmemory"));
+    auto status = context.value()->RegisterTransport(same_name);
+    assert(status.code() == core::StatusCode::kAlreadyExists);
+    assert(!same_name->is_open());
+
+    auto same_kind = std::make_shared<transport::inmemory::InMemoryTransport>(
+        core::TransportName::Unsafe("other"));
+    status = context.value()->RegisterTransport(same_kind);
+    assert(status.code() == core::StatusCode::kAlreadyExists);
+    assert(!same_kind->is_open());
+}
+
 void RuntimeContextReportsMissingTransportKind()
 {
     runtime::RuntimeOptions options;
@@ -151,6 +169,7 @@ int main()
     RuntimeContextCreatesDefaultInMemoryTransport();
     RuntimeContextRegistersComponents();
     RuntimeContextCreatesEndpointsThroughTransport();
+    DuplicateTransportRegistrationDoesNotOpenCandidate();
     RuntimeContextReportsMissingTransportKind();
     ClosedRuntimeContextRejectsEndpointCreation();
     return 0;

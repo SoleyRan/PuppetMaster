@@ -257,18 +257,23 @@ struct RuntimeContext::Impl {
         const auto name = transport->name();
         const auto kind = transport->kind();
 
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (transports.Find(name).ok()) {
+                return core::Status::AlreadyExists("transport already registered: " + name.str());
+            }
+            const auto existing_kind = transport_by_kind.find(kind);
+            if (existing_kind != transport_by_kind.end() && existing_kind->second != name) {
+                return core::Status::AlreadyExists(
+                    std::string("transport kind already registered: ") + core::ToString(kind));
+            }
+        }
+
         if (IsOpen() || options.open_registered_transports) {
             auto status = OpenTransportIfNeeded(transport);
             if (!status.ok()) {
                 return status;
             }
-        }
-
-        std::lock_guard<std::mutex> lock(mutex);
-        const auto existing_kind = transport_by_kind.find(kind);
-        if (existing_kind != transport_by_kind.end() && existing_kind->second != name) {
-            return core::Status::AlreadyExists(
-                std::string("transport kind already registered: ") + core::ToString(kind));
         }
 
         auto status = transports.Register(std::move(transport));
