@@ -314,10 +314,8 @@ struct Scheduler::Impl {
         {
             std::unique_lock<std::mutex> lock(mutex);
             const auto caller = std::this_thread::get_id();
-            for (const auto& worker : workers) {
-                if (worker.get_id() == caller) {
-                    return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
-                }
+            if (worker_ids.find(caller) != worker_ids.end()) {
+                return core::Status::FailedPrecondition("scheduler worker cannot stop itself");
             }
             for (const auto& timer : periodic_threads) {
                 if (timer.get_id() == caller) {
@@ -425,10 +423,8 @@ struct Scheduler::Impl {
     {
         std::unique_lock<std::mutex> lock(mutex);
         const auto caller = std::this_thread::get_id();
-        for (const auto& worker : workers) {
-            if (worker.get_id() == caller) {
-                return core::Status::FailedPrecondition("scheduler worker cannot wait for itself to become idle");
-            }
+        if (worker_ids.find(caller) != worker_ids.end()) {
+            return core::Status::FailedPrecondition("scheduler worker cannot wait for itself to become idle");
         }
         const auto ready = [this]() {
             return pending_events.empty() && active_events == 0;
@@ -706,6 +702,10 @@ private:
 
     void DispatchLoop()
     {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            worker_ids.insert(std::this_thread::get_id());
+        }
         while (true) {
             ScheduledEvent event {
                 core::ComponentName::Unsafe("__invalid__"),
@@ -789,6 +789,7 @@ private:
         }
 
         std::lock_guard<std::mutex> lock(mutex);
+        worker_ids.erase(std::this_thread::get_id());
         if (pending_events.empty() && active_events == 0) {
             idle.notify_all();
         }
@@ -873,6 +874,7 @@ private:
     std::unordered_set<std::string> executing_components;
     std::vector<std::thread> periodic_threads;
     std::vector<std::thread> workers;
+    std::unordered_set<std::thread::id> worker_ids;
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
     std::size_t coalesced_events {0};

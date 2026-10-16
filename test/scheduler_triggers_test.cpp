@@ -371,6 +371,91 @@ private:
     runtime::ComponentSpec spec_;
 };
 
+class StopTimeSelfWaitingComponent final : public runtime::Component {
+public:
+    explicit StopTimeSelfWaitingComponent(core::ComponentName name)
+        : spec_ {std::move(name), "checks worker wait during stop", {}, {},
+                 {core::TriggerSpec {core::TriggerKind::kManual, {}, {}, {}, {}}}}
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override { return spec_; }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        entered.store(true);
+        while (!release.load()) {
+            std::this_thread::yield();
+        }
+        wait_status = sched->WaitIdle(std::chrono::milliseconds(20));
+        stop_status = sched->Stop();
+        return core::Status::Ok();
+    }
+
+    scheduler::Scheduler* sched {nullptr};
+    std::atomic<bool> entered {false};
+    std::atomic<bool> release {false};
+    core::Status wait_status;
+    core::Status stop_status;
+
+private:
+    runtime::ComponentSpec spec_;
+};
+
+void WorkerCannotWaitOrStopDuringShutdown()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    const auto name = MakeComponentName("stop_time_self_waiting_component");
+    auto component = std::make_shared<StopTimeSelfWaitingComponent>(name);
+    assert(context.value()->RegisterComponent(component).ok());
+    assert(BringUp(*context.value(), name).ok());
+
+    scheduler::Scheduler sched(*context.value());
+    component->sched = &sched;
+    assert(sched.RegisterComponent(name).ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    const auto entered_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (!component->entered.load() && core::SteadyClock::now() < entered_deadline) {
+        std::this_thread::yield();
+    }
+    assert(component->entered.load());
+
+    core::Status shutdown_status;
+    std::thread shutdown([&]() { shutdown_status = sched.Stop(); });
+    const auto stopping_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (sched.is_running() && core::SteadyClock::now() < stopping_deadline) {
+        std::this_thread::yield();
+    }
+    const bool stopping = !sched.is_running();
+    component->release.store(true);
+    shutdown.join();
+    assert(stopping);
+    assert(shutdown_status.ok());
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.message() == "scheduler worker cannot stop itself");
+
+    component->entered.store(false);
+    component->release.store(false);
+    component->wait_status = core::Status::Ok();
+    component->stop_status = core::Status::Ok();
+    assert(sched.Start().ok());
+    assert(sched.Trigger(name).ok());
+    const auto restart_deadline = core::SteadyClock::now() + std::chrono::seconds(1);
+    while (!component->entered.load() && core::SteadyClock::now() < restart_deadline) {
+        std::this_thread::yield();
+    }
+    const bool restarted = component->entered.load();
+    component->release.store(true);
+    assert(restarted);
+    assert(sched.WaitIdle(std::chrono::seconds(1)).ok());
+    assert(component->wait_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(component->stop_status.code() == core::StatusCode::kFailedPrecondition);
+    assert(sched.Stop().ok());
+}
+
 void WorkerCannotWaitForItselfToBecomeIdle()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1461,6 +1546,7 @@ void ZeroWorkerCountIsRejected()
 
 int main()
 {
+    WorkerCannotWaitOrStopDuringShutdown();
     WorkerCannotWaitForItselfToBecomeIdle();
     ManualTriggerExecutesComponent();
     PeriodicTriggerExecutesComponent();
