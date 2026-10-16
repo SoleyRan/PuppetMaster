@@ -3,6 +3,7 @@
 #include <chrono>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -92,17 +93,89 @@ void LogEndpointFailure(
     observer->Log(std::move(record));
 }
 
+class ReaderQueueDepths {
+public:
+    explicit ReaderQueueDepths(observability::ObserverPtr observer)
+        : observer_(std::move(observer))
+    {
+    }
+
+    std::size_t Add(const core::TopicName& topic)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto id = next_id_++;
+        pending_by_topic_[topic.str()].emplace(id, 0);
+        return id;
+    }
+
+    void Update(const core::TopicName& topic, std::size_t id, std::size_t pending)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto found = pending_by_topic_.find(topic.str());
+        if (found == pending_by_topic_.end()) {
+            return;
+        }
+        const auto reader = found->second.find(id);
+        if (reader == found->second.end()) {
+            return;
+        }
+        reader->second = pending;
+        RecordTotal(topic, found->second);
+    }
+
+    void Remove(const core::TopicName& topic, std::size_t id)
+    {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        const auto found = pending_by_topic_.find(topic.str());
+        if (found == pending_by_topic_.end() || found->second.erase(id) == 0) {
+            return;
+        }
+        if (found->second.empty()) {
+            pending_by_topic_.erase(found);
+            observer_->RecordQueueDepth(topic, 0);
+        } else {
+            RecordTotal(topic, found->second);
+        }
+    }
+
+private:
+    void RecordTotal(const core::TopicName& topic, const std::map<std::size_t, std::size_t>& readers)
+    {
+        if (!observer_) {
+            return;
+        }
+        std::size_t total = 0;
+        for (const auto& [id, pending] : readers) {
+            total += pending;
+        }
+        observer_->RecordQueueDepth(topic, total);
+    }
+
+    observability::ObserverPtr observer_;
+    std::recursive_mutex mutex_;
+    std::map<std::string, std::map<std::size_t, std::size_t>> pending_by_topic_;
+    std::size_t next_id_ {0};
+};
+
 class ObservedReader final : public transport::Reader {
 public:
     ObservedReader(
         transport::ReaderPtr reader,
-        observability::ObserverPtr observer)
+        observability::ObserverPtr observer,
+        std::shared_ptr<ReaderQueueDepths> queue_depths)
         : reader_(std::move(reader)),
-          observer_(std::move(observer))
+          observer_(std::move(observer)),
+          queue_depths_(std::move(queue_depths)),
+          reader_id_(queue_depths_->Add(reader_->topic_name()))
     {
         // Install the metrics callback immediately so queue peaks are visible
         // even when application code does not subscribe to data notifications.
         reader_->SetDataAvailableCallback(WrapCallback({}));
+    }
+
+    ~ObservedReader() override
+    {
+        queue_depths_->Remove(topic_name(), reader_id_);
     }
 
     const core::TopicName& topic_name() const noexcept override
@@ -157,16 +230,17 @@ private:
         transport::DataAvailableCallback callback) const
     {
         const std::weak_ptr<transport::Reader> weak_reader(reader_);
-        const std::weak_ptr<observability::Observer> weak_observer(observer_);
+        const std::weak_ptr<ReaderQueueDepths> weak_queue_depths(queue_depths_);
         const auto topic = topic_name();
+        const auto reader_id = reader_id_;
 
-        return [weak_reader, weak_observer, topic, callback = std::move(callback)]() {
+        return [weak_reader, weak_queue_depths, topic, reader_id, callback = std::move(callback)]() {
             auto reader = weak_reader.lock();
-            auto observer = weak_observer.lock();
-            if (reader && observer) {
+            auto queue_depths = weak_queue_depths.lock();
+            if (reader && queue_depths) {
                 auto pending = reader->PendingMessageCount();
                 if (pending.ok()) {
-                    observer->RecordQueueDepth(topic, pending.value());
+                    queue_depths->Update(topic, reader_id, pending.value());
                 }
             }
 
@@ -180,12 +254,14 @@ private:
     {
         auto pending = reader_->PendingMessageCount();
         if (pending.ok()) {
-            observer_->RecordQueueDepth(topic_name(), pending.value());
+            queue_depths_->Update(topic_name(), reader_id_, pending.value());
         }
     }
 
     transport::ReaderPtr reader_;
     observability::ObserverPtr observer_;
+    std::shared_ptr<ReaderQueueDepths> queue_depths_;
+    std::size_t reader_id_;
 };
 
 class ObservedWriter final : public transport::Writer {
@@ -244,7 +320,8 @@ core::Status RuntimeOptions::Validate() const
 struct RuntimeContext::Impl {
     explicit Impl(RuntimeOptions runtime_options)
         : options(std::move(runtime_options)),
-          observer(std::make_shared<observability::Observer>(options.observability_options))
+          observer(std::make_shared<observability::Observer>(options.observability_options)),
+          queue_depths(std::make_shared<ReaderQueueDepths>(observer))
     {
     }
 
@@ -257,18 +334,23 @@ struct RuntimeContext::Impl {
         const auto name = transport->name();
         const auto kind = transport->kind();
 
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (transports.Find(name).ok()) {
+                return core::Status::AlreadyExists("transport already registered: " + name.str());
+            }
+            const auto existing_kind = transport_by_kind.find(kind);
+            if (existing_kind != transport_by_kind.end() && existing_kind->second != name) {
+                return core::Status::AlreadyExists(
+                    std::string("transport kind already registered: ") + core::ToString(kind));
+            }
+        }
+
         if (IsOpen() || options.open_registered_transports) {
             auto status = OpenTransportIfNeeded(transport);
             if (!status.ok()) {
                 return status;
             }
-        }
-
-        std::lock_guard<std::mutex> lock(mutex);
-        const auto existing_kind = transport_by_kind.find(kind);
-        if (existing_kind != transport_by_kind.end() && existing_kind->second != name) {
-            return core::Status::AlreadyExists(
-                std::string("transport kind already registered: ") + core::ToString(kind));
         }
 
         auto status = transports.Register(std::move(transport));
@@ -330,17 +412,21 @@ struct RuntimeContext::Impl {
 
     core::Status Close()
     {
+        core::Status result = core::Status::Ok();
         const auto names = ListTransportNames();
         for (const auto& name : names) {
             auto transport = FindTransport(name);
             if (transport.ok()) {
-                transport.value()->Close();
+                auto status = transport.value()->Close();
+                if (result.ok() && !status.ok()) {
+                    result = status;
+                }
             }
         }
 
         std::lock_guard<std::mutex> lock(mutex);
         open = false;
-        return core::Status::Ok();
+        return result;
     }
 
     bool IsOpen() const noexcept
@@ -436,6 +522,7 @@ struct RuntimeContext::Impl {
 
     RuntimeOptions options;
     observability::ObserverPtr observer;
+    std::shared_ptr<ReaderQueueDepths> queue_depths;
     ComponentRegistry components;
     transport::TransportRegistry transports;
     std::map<core::TransportKind, core::TransportName> transport_by_kind;
@@ -704,7 +791,7 @@ core::Result<transport::ReaderPtr> RuntimeContext::CreateReader(
     }
 
     return std::static_pointer_cast<transport::Reader>(
-        std::make_shared<ObservedReader>(reader.value(), impl_->observer));
+        std::make_shared<ObservedReader>(reader.value(), impl_->observer, impl_->queue_depths));
 }
 
 core::Result<transport::WriterPtr> RuntimeContext::CreateWriter(

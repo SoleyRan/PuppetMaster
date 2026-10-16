@@ -143,7 +143,11 @@ public:
 
             data_available_.notify_all();
             if (callback) {
-                callback();
+                try {
+                    callback();
+                } catch (...) {
+                    return core::Status::Internal("in-memory reader callback failed");
+                }
             }
             return core::Status::Ok();
         }
@@ -311,14 +315,15 @@ public:
             }
         }
 
+        core::Status result = core::Status::Ok();
         for (const auto& reader : readers) {
             status = reader->Push(message);
-            if (!status.ok()) {
-                return status;
+            if (result.ok() && !status.ok()) {
+                result = status;
             }
         }
 
-        return core::Status::Ok();
+        return result;
     }
 
     void Close() noexcept
