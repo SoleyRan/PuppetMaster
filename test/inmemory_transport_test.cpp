@@ -169,6 +169,31 @@ void TopicFanOutKeepsReaderMailboxesIndependent()
     assert(ReadString(queued_reader.value()) == "two");
 }
 
+void FullReaderDoesNotPreventDeliveryToOtherReaders()
+{
+    auto transport = MakeOpenTransport();
+    core::MessagePolicy policy;
+    policy.freshness = core::FreshnessPolicy::kQueued;
+    policy.retention = core::RetentionPolicy::kKeepLast;
+    policy.overflow = core::QueueOverflowPolicy::kReject;
+    policy.queue_depth = 1;
+
+    const auto endpoint = MakeEndpoint("/test/rejected_fanout", policy);
+    auto full_reader = transport->CreateReader(endpoint);
+    auto other_reader = transport->CreateReader(endpoint);
+    auto writer = transport->CreateWriter(endpoint);
+    assert(full_reader.ok());
+    assert(other_reader.ok());
+    assert(writer.ok());
+
+    assert(WriteString(writer.value(), "one").ok());
+    assert(ReadString(other_reader.value()) == "one");
+    auto status = WriteString(writer.value(), "two");
+    assert(status.code() == core::StatusCode::kResourceExhausted);
+    assert(ReadString(full_reader.value()) == "one");
+    assert(ReadString(other_reader.value()) == "two");
+}
+
 void BoundedQueueDropsOldestMessage()
 {
     auto transport = MakeOpenTransport();
@@ -226,6 +251,7 @@ int main()
     LatestReaderKeepsOnlyNewestMessage();
     QueuedReaderKeepsPublishOrder();
     TopicFanOutKeepsReaderMailboxesIndependent();
+    FullReaderDoesNotPreventDeliveryToOtherReaders();
     BoundedQueueDropsOldestMessage();
     UnboundedQueueKeepsAllMessages();
     return 0;

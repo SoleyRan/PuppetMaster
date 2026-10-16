@@ -311,14 +311,15 @@ public:
             }
         }
 
+        core::Status result = core::Status::Ok();
         for (const auto& reader : readers) {
             status = reader->Push(message);
-            if (!status.ok()) {
-                return status;
+            if (result.ok() && !status.ok()) {
+                result = status;
             }
         }
 
-        return core::Status::Ok();
+        return result;
     }
 
     void Close() noexcept
