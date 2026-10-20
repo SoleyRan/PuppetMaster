@@ -104,6 +104,10 @@ if(PUPPETMASTER_ENABLE_FASTDDS)
     add_subdirectory(transport/fastdds)
 endif()
 
+if(PUPPETMASTER_ENABLE_SHM)
+    add_subdirectory(transport/shm)
+endif()
+
 add_library(puppet_master_chrome_trace_adapter
     observability/chrome_trace_exporter.cpp
     "${PROJECT_SOURCE_DIR}/include/puppet_master/observability/chrome_trace_exporter.h"

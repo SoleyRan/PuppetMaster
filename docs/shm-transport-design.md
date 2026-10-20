@@ -1,7 +1,7 @@
 # Shared-Memory Transport Design
 
-Status: proposed. This document is the design gate for roadmap phase 4. No code
-lands until it is reviewed.
+Status: accepted. Implementation follows the steps below; see
+[Decisions](#decisions) for choices made during review.
 
 ## Goals
 
@@ -249,7 +249,10 @@ robust mutexes and futexes, so the adapter is not built there.
 - Segment removal: Windows frees the mapping when the last handle closes. On
   Linux the segment persists in `/dev/shm` after all processes exit, so a
   restarted system reuses it. `shm::RemoveSegment(domain, topic)` deletes one
-  explicitly. See open question 1.
+  explicitly. See [Decisions](#decisions).
+- Liveness checks compare pids, so on Linux every process on a topic must
+  share one PID namespace. Containers that share `/dev/shm` but not the PID
+  namespace are not supported in v1.
 
 ## Security
 
@@ -316,12 +319,14 @@ Each step is one PR:
    CI job.
 4. Writer loans (`LoaningWriter`) and `supports_zero_copy = true`.
 
-## Open Questions
+## Decisions
 
-1. Linux segment cleanup. Proposed: leave segments in `/dev/shm` and provide
-   `RemoveSegment()`. Alternative: the last participant to leave unlinks the
-   segment, which frees memory but races with a process that is just joining.
-2. Default slot size. Proposed 64 KiB x 16 slots (about 1 MiB per topic).
-   Large-payload topics must configure their own size either way.
-3. Should JSON configuration expose `TopicOptions`? Proposed: not in v1; set
-   them in code through `shm::Options`.
+Resolved during review (2026-10-20):
+
+1. Linux segment cleanup: segments stay in `/dev/shm` after all processes
+   exit; `RemoveSegment()` deletes one explicitly. Automatic unlink by the last
+   participant was rejected because it races with a process that is joining.
+2. Default slot size: 64 KiB x 16 slots (about 1 MiB per topic). Large-payload
+   topics configure their own size.
+3. JSON configuration does not expose `TopicOptions` in v1; they are set in
+   code through `shm::Options`.

@@ -292,3 +292,19 @@ if(PUPPETMASTER_ENABLE_FASTDDS)
         COMMAND puppet_master_fastdds_transport_test
     )
 endif()
+
+if(TARGET puppet_master_shm_platform)
+    add_executable(puppet_master_shm_platform_test
+        shm_platform_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_platform_test
+        PRIVATE
+            puppet_master_shm_platform
+    )
+
+    add_test(
+        NAME puppet_master.shm_platform
+        COMMAND puppet_master_shm_platform_test
+    )
+endif()
