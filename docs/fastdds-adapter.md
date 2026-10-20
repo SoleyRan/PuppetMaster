@@ -48,17 +48,16 @@ find_package(PuppetMaster CONFIG REQUIRED)
 target_link_libraries(my_component PRIVATE PuppetMaster::FastDdsAdapter)
 ```
 
-## Current Scope
+## Scope
 
-This milestone establishes the clean FastDDS adapter boundary:
+The adapter implements the full transport contract over FastDDS 2.x and 3.x:
 
 - FastDDS-specific options live under `puppet_master/transport/fastdds`.
 - `core::MessagePolicy` is mapped to a FastDDS-specific QoS profile.
 - `FastDdsTransport` owns participant, publisher, and subscriber lifecycle.
 - `BytePayloadType`-based DataReader/DataWriter binding is implemented.
-
-The old files under `src/communication/fastdds` remain migration references.
-They are not compiled into the new adapter target.
+- `RegisterTransport()` registers the adapter with a `RuntimeContext`.
+- Cross-process UDP delivery is covered by an opt-in smoke test in CI.
 
 ## Policy Mapping
 
@@ -105,10 +104,43 @@ DataWriters to it.
 - Endpoints whose descriptor conflicts with an existing topic return
   `InvalidArgument`.
 - After `Close()`, remaining reader/writer handles return `Unavailable`.
-- With default write options, `source_timestamp` is the local receive time.
-  An explicit `WriteOptions::source_timestamp` returns `Unsupported`: a
-  process-local steady-clock time cannot be preserved across participants.
+- Received messages carry a `reception_timestamp` but leave
+  `source_timestamp` unset, so the runtime records no topic latency for
+  FastDDS readers. An explicit `WriteOptions::source_timestamp` returns
+  `Unsupported`: a process-local steady-clock time cannot be preserved across
+  participants.
 - `supports_zero_copy` is `false`. `Options::data_sharing` defaults to false;
   explicitly enabling it returns `Unsupported` because the byte payload type
   is unbounded and cannot use FastDDS data-sharing.
 - Generated FastDDS headers stay out of core and runtime APIs.
+
+## Known Limitations
+
+These are intentional for the byte-oriented transport contract and are not
+planned for this adapter:
+
+- No zero-copy or data-sharing. Loaned samples need a bounded type, while
+  `BytePayloadType` is unbounded. Zero-copy is a goal of the planned
+  shared-memory IPC transport instead.
+- No cross-participant latency. See the timestamp rule above.
+- Only `kDropOldest` overflow, because DDS reader history has no equivalent
+  for drop-newest, reject, or block.
+- No matched-endpoint or incompatible-QoS reporting. DDS discovery events are
+  not part of the transport contract.
+- DDS resource limits, discovery lease, and data representation use FastDDS
+  defaults. Only the settings in `Options` are configurable.
+
+## Migration From The Legacy DDS Node
+
+The previous middleware's `DDSNode`, `DDSReader<T>`, and `DDSWriter` have been
+removed. Their behavior maps to this adapter as follows:
+
+| Legacy | Adapter |
+|---|---|
+| `TransType_UDP` / `TransType_SHM` / `TransType_BOTH` | `Options::transport_mode` = `kUdp` / `kSharedMemory` / `kHybrid` |
+| `UDP_BUFFER_SIZE`, `SHM_SEGMENT_SIZE` | `Options::udp_buffer_size`, `Options::shm_segment_size` |
+| `QOS_PROFILE_*` macros | `core::MessagePolicy` on the topic, mapped by `MapMessagePolicy()` |
+| `TRANSIENT_LOCAL` durability | `Options::durability` |
+| `is_fresh` reader flag | `FreshnessPolicy::kLatest` |
+| Generated `TopicDataType` structs | Byte payloads; `compat::itage` handles fixed-size structs |
+| Writer loan-based zero-copy | Not supported (see Known Limitations) |

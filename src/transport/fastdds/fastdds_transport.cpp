@@ -266,8 +266,8 @@ private:
             message.metadata.sequence = ++state_->sequence;
             message.metadata.reception_timestamp = Now();
             // Steady-clock source timestamps are process local and cannot be
-            // carried across participants, so reception time is reported.
-            message.metadata.source_timestamp = message.metadata.reception_timestamp;
+            // carried across participants. Leave it unset so observers report
+            // no latency instead of a fabricated zero.
             return core::Result<Message>(std::move(message));
         }
 

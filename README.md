@@ -35,8 +35,6 @@ The default build depends only on the C++ standard library:
   logger and the optional `LOG_Info()` style compatibility macros.
 - `include/puppet_master/compat` contains a migration facade for projects that
   still use the old `itage_engine` node/reader/writer style APIs.
-- `src/base`, `src/common`, `src/communication`, `src/trigger`, and
-  `src/utils` hold legacy migration material and are not built.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
 - Demos and tests cover every public module. CI builds on Linux and Windows and
   exercises the optional FastDDS and JSON configuration adapters.
@@ -54,9 +52,9 @@ The default build depends only on the C++ standard library:
 
 ```text
 include/puppet_master/   Public headers for downstream projects.
-src/                     Library implementation and adapter migration area.
+src/                     Library and optional adapter implementations.
 demo/                    Small runnable examples.
-test/                    Smoke tests and future unit tests.
+test/                    Unit, integration, and smoke tests.
 cmake/                   Package configuration templates.
 docs/                    Architecture notes and design decisions.
 ```
@@ -108,11 +106,11 @@ configuration system, `itage_engine` compatibility facade, and observability.
 Next phases:
 
 1. Documentation alignment. Keep README and module docs consistent with the
-   implemented behavior. In progress.
-2. FastDDS adapter completion. Document intentional limitations, verify parity
-   with the legacy `src/communication/fastdds` code, then remove it.
-3. Legacy source cleanup. Migrate or delete `src/base`, `src/common`,
-   `src/trigger`, and `src/utils`.
+   implemented behavior. Done.
+2. FastDDS adapter completion. Document intentional limitations and remove the
+   legacy DDS node. Done.
+3. Legacy source cleanup. Remove the uncompiled `src/base`, `src/common`,
+   `src/trigger`, and `src/utils` migration areas. Done.
 4. Shared-memory IPC transport. A same-host, cross-process backend behind the
    existing transport contract, with zero-copy as a design goal. Starts with a
    design document.

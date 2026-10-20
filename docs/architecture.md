@@ -140,13 +140,6 @@ Tooling includes examples, configuration validation, metrics exporters, trace
 generation, and migration helpers. Tooling should depend on the runtime, not the
 other way around.
 
-## Legacy Source Boundary
-
-Files under `src/base`, `src/common`, `src/communication`, `src/trigger`, and
-`src/utils` are migration material from the previous middleware. They are not
-compiled. The new FastDDS adapter lives under `src/transport/fastdds` and does
-not depend on the legacy `src/communication/fastdds` code.
-
 ## Intended Public CMake Contract
 
 Most downstream projects should link against:
