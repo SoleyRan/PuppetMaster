@@ -36,8 +36,8 @@ on concrete middleware headers.
 
 The public transport abstraction now lives under `include/puppet_master/transport`.
 It exposes byte-oriented messages, endpoint configuration, reader/writer
-interfaces, transport capabilities, and a lightweight registry. Concrete
-backends remain separate implementation milestones.
+interfaces, transport capabilities, and a lightweight registry. The in-memory
+backend is part of the core library; other backends are separate targets.
 
 The optional FastDDS adapter is built as `PuppetMaster::FastDdsAdapter` when
 `PUPPETMASTER_ENABLE_FASTDDS=ON`. DDS-specific QoS and transport settings stay
@@ -94,9 +94,8 @@ default-priority events without deadlines remain FIFO.
 
 This is not a real-time scheduler and does not guarantee deadline satisfaction
 or bounded waiting. Sustained higher-priority work can starve lower-priority
-events. Existing deadline-miss observation compares execution duration with the
-effective relative budget; queue waiting is not included in
-`RecordTaskExecution()` or its deadline-miss metrics.
+events. Deadline-miss observation compares the end-to-end response time (queue
+wait plus execution time) with the effective relative budget.
 
 ### Configuration
 
@@ -104,10 +103,11 @@ Configuration is the assembly layer above core, transport, runtime, component,
 and scheduler contracts. It gives applications one place to declare topics,
 message policies, component endpoints, and trigger metadata.
 
-The current configuration milestone is code-first: applications build a
-`ProjectConfig` directly in C++ and then ask it to produce `EndpointConfig`,
-`ComponentSpec`, and `RuntimeOptions` objects. YAML, JSON, TOML, or command-line
-loaders can be added later without changing the runtime contracts.
+Configuration is code-first: applications build a `ProjectConfig` directly in
+C++ and then ask it to produce `EndpointConfig`, `ComponentSpec`, and
+`RuntimeOptions` objects. The optional `PuppetMaster::JsonConfigAdapter` loads
+the same `ProjectConfig` from JSON. Other file formats or command-line loaders
+can be added the same way without changing the runtime contracts.
 
 ### Compatibility
 
@@ -131,8 +131,8 @@ The core `Observer` exposes event, metrics, and structured log callbacks without
 depending on a monitoring product. A standard-library console sink is available
 by default. GoodLog is integrated through the optional
 `PuppetMaster::GoodLogAdapter` target and replaces the same process-wide sink.
-Prometheus, JSON logging, and Chrome trace support can be added as sibling
-adapters instead of expanding the core dependency surface.
+Prometheus, JSON log, and Chrome trace exporters are sibling adapter targets
+rather than part of the core library.
 
 ### Tooling
 
@@ -140,22 +140,12 @@ Tooling includes examples, configuration validation, metrics exporters, trace
 generation, and migration helpers. Tooling should depend on the runtime, not the
 other way around.
 
-## Current Skeleton Boundary
+## Legacy Source Boundary
 
-The first refactor branch builds only the stable skeleton:
-
-- public headers under `include/puppet_master`
-- a small compiled library target
-- generated version metadata
-- installable CMake package files
-- minimal demo and smoke test
-
-Existing files under `src/communication/fastdds` are treated as migration
-material. They will be cleaned up and connected in a dedicated FastDDS adapter
-branch after the transport interface is finalized.
-
-The core API added after the skeleton milestone remains public and
-transport-neutral under `include/puppet_master/core`.
+Files under `src/base`, `src/common`, `src/communication`, `src/trigger`, and
+`src/utils` are migration material from the previous middleware. They are not
+compiled. The new FastDDS adapter lives under `src/transport/fastdds` and does
+not depend on the legacy `src/communication/fastdds` code.
 
 ## Intended Public CMake Contract
 
@@ -165,11 +155,20 @@ Most downstream projects should link against:
 PuppetMaster::PuppetMaster
 ```
 
-Optional integrations are separate targets:
+Dependency-free exporters are separate targets that are always built:
 
 ```cmake
-PuppetMaster::FastDdsAdapter
-PuppetMaster::GoodLogAdapter
+PuppetMaster::PrometheusAdapter
+PuppetMaster::JsonLogAdapter
+PuppetMaster::ChromeTraceAdapter
+```
+
+Integrations with third-party dependencies are opt-in targets:
+
+```cmake
+PuppetMaster::FastDdsAdapter      # PUPPETMASTER_ENABLE_FASTDDS
+PuppetMaster::JsonConfigAdapter   # PUPPETMASTER_ENABLE_JSON_CONFIG
+PuppetMaster::GoodLogAdapter      # PUPPETMASTER_ENABLE_GOODLOG
 ```
 
 This keeps the core contract stable while allowing applications to opt into

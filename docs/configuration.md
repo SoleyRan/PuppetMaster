@@ -5,9 +5,9 @@ PuppetMaster now has a code-first configuration layer under
 to assemble without scattering topic names, endpoint policies, and trigger
 metadata across every component implementation.
 
-This milestone intentionally does not introduce YAML, JSON, or TOML parsing
-yet. The public model is the stable part. File formats can be added later as
-thin loaders that produce the same `ProjectConfig`.
+The C++ model is the stable part. File formats are thin loaders that produce
+the same `ProjectConfig`; JSON is available through an optional adapter (see
+[JSON Loading](#json-loading)).
 
 ## Model
 
@@ -140,3 +140,46 @@ See `demo/configuration_system_demo.cpp` for a runnable single-process pipeline:
 3. Build a component spec from configuration.
 4. Register the executable component.
 5. Use the scheduler to run the component when data arrives.
+
+When built with `PUPPETMASTER_ENABLE_JSON_CONFIG=ON`, the demo accepts an
+optional `config.json` path and loads the project from it instead.
+
+## JSON Loading
+
+`PuppetMaster::JsonConfigAdapter` is built when
+`PUPPETMASTER_ENABLE_JSON_CONFIG=ON` and requires an installed `nlohmann_json`
+package. It exposes two functions in
+`puppet_master/configuration/json_loader.h`:
+
+```cpp
+auto from_text = config::ParseJsonConfig(json_text);
+auto from_file = config::LoadJsonConfig("project.json");
+```
+
+Both return `core::Result<ProjectConfig>` and run `ProjectConfig::Validate()`
+before returning. Malformed JSON, wrong value types, and unknown fields return
+`InvalidArgument` with the offending path. A file that cannot be opened returns
+`Unavailable`.
+
+The JSON fields mirror the C++ model. Durations use nanosecond integers
+(`period_ns`, `deadline_ns`), and enum values use the same names accepted by the
+string parsers:
+
+```json
+{
+    "scheduler": {"worker_count": 2},
+    "topics": [{
+        "id": "speed",
+        "name": "/vehicle/speed",
+        "transport": "in_memory",
+        "message_type": "demo.Speed",
+        "encoding": "text/plain",
+        "message_policy": {"freshness": "queued", "queue_depth": 8}
+    }],
+    "components": [{
+        "name": "speed_monitor",
+        "readers": ["speed"],
+        "triggers": [{"kind": "data", "data_topics": ["speed"]}]
+    }]
+}
+```

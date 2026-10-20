@@ -4,41 +4,42 @@ PuppetMaster is a C++ real-time middleware runtime for message-driven
 components, transport abstraction, and deterministic task scheduling.
 
 The project is being refined from a production-oriented autonomous driving
-middleware into a cleaner, reusable foundation. The first refactor milestone
-focuses on a buildable project skeleton, a stable public include layout, and a
-CMake package that downstream projects can consume.
+middleware into a cleaner, reusable foundation. The core runtime, scheduler,
+configuration, observability, and in-memory transport are in place; optional
+adapters add FastDDS, JSON configuration, and GoodLog integration.
 
 ## Current Status
 
-This branch intentionally keeps the default build small:
+The default build depends only on the C++ standard library:
 
 - `include/puppet_master/...` contains the public API surface for new code.
 - `include/puppet_master/core` contains transport-neutral core types, message
   policies, and the common error model.
 - `include/puppet_master/transport` contains backend-neutral reader, writer,
   message, and registry abstractions.
-- `include/puppet_master/transport/inmemory` contains the first concrete local
-  pub/sub backend for scheduler and component tests.
+- `include/puppet_master/transport/inmemory` contains the local pub/sub backend
+  for single-process pipelines, scheduler tests, and component tests.
+- `include/puppet_master/transport/fastdds` contains the optional FastDDS
+  backend for cross-process and cross-host communication.
 - `include/puppet_master/runtime` contains the runtime context, component
   registry, and algorithm module interface used to assemble middleware
   participants.
-- `include/puppet_master/scheduler` contains trigger dispatch for manual,
-  periodic, and data-driven component execution.
+- `include/puppet_master/scheduler` contains manual, periodic, data-driven, and
+  task-dependency dispatch with priority and deadline ordering.
 - `include/puppet_master/configuration` contains the code-first project
-  configuration model used to declare topics, components, and triggers in one
-  place.
+  configuration model and the optional JSON loader.
 - `include/puppet_master/observability` contains structured events, runtime
-  metrics, trace hooks, and the optional GoodLog adapter.
+  metrics, trace hooks, Prometheus, JSON log, and Chrome trace exporters, and
+  the optional GoodLog adapter.
 - `include/puppet_master/logging` contains the dependency-free default console
   logger and the optional `LOG_Info()` style compatibility macros.
 - `include/puppet_master/compat` contains a migration facade for projects that
   still use the old `itage_engine` node/reader/writer style APIs.
-- `src/communication/fastdds` is kept as an adapter migration area and is not
-  built by default yet.
+- `src/base`, `src/common`, `src/communication`, `src/trigger`, and
+  `src/utils` hold legacy migration material and are not built.
 - `PuppetMaster::PuppetMaster` is the canonical CMake target.
-- Minimal demos and smoke tests verify the project skeleton, core API, transport
-  abstraction, in-memory pub/sub behavior, runtime assembly, scheduler triggers,
-  configuration assembly, compatibility facade, and runtime observability.
+- Demos and tests cover every public module. CI builds on Linux and Windows and
+  exercises the optional FastDDS and JSON configuration adapters.
 
 ## Goals
 
@@ -75,10 +76,14 @@ cmake -S . -B build -DPUPPETMASTER_BUILD_DEMOS=OFF
 cmake -S . -B build -DPUPPETMASTER_BUILD_TESTS=OFF
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
 cmake -S . -B build -DPUPPETMASTER_ENABLE_GOODLOG=ON
+cmake -S . -B build -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
 ```
 
 `PUPPETMASTER_ENABLE_FASTDDS` builds the optional FastDDS adapter target. The
 default build remains transport-neutral and does not require FastDDS.
+
+`PUPPETMASTER_ENABLE_JSON_CONFIG` builds `PuppetMaster::JsonConfigAdapter`,
+which requires an installed `nlohmann_json` package.
 
 `PUPPETMASTER_ENABLE_GOODLOG` builds `PuppetMaster::GoodLogAdapter`. CMake uses
 an installed GoodLog package when available or fetches a pinned revision from
@@ -95,17 +100,25 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 
 ## Roadmap
 
-1. Project skeleton and public CMake package. Done.
-2. Core types and error model. Done.
-3. Transport abstraction. Done.
-4. In-memory transport for tests and local pipelines. Done.
-5. FastDDS adapter as an optional backend. In progress.
-6. Runtime context and component registry. Done.
-7. Component model and algorithm module interface. Done.
-8. Scheduler triggers. Done.
-9. Code-first configuration system. Done.
-10. itage_engine compatibility facade. Done.
-11. Observability and production demos. Done.
+The foundation milestones are complete: project skeleton and CMake package,
+core types and error model, transport abstraction, in-memory transport, runtime
+context and component registry, component model, scheduler triggers,
+configuration system, `itage_engine` compatibility facade, and observability.
+
+Next phases:
+
+1. Documentation alignment. Keep README and module docs consistent with the
+   implemented behavior. In progress.
+2. FastDDS adapter completion. Document intentional limitations, verify parity
+   with the legacy `src/communication/fastdds` code, then remove it.
+3. Legacy source cleanup. Migrate or delete `src/base`, `src/common`,
+   `src/trigger`, and `src/utils`.
+4. Shared-memory IPC transport. A same-host, cross-process backend behind the
+   existing transport contract, with zero-copy as a design goal. Starts with a
+   design document.
+5. User-facing capabilities. Typed message readers and writers over the byte
+   transport, scheduler starvation protection, and configuration validation and
+   launch tooling.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.

@@ -6,7 +6,7 @@ and any generated message type system.
 
 ## Scope
 
-This milestone adds only abstractions:
+This layer defines only abstractions; concrete backends implement them:
 
 - byte-oriented message views and buffers
 - message descriptors
@@ -62,6 +62,6 @@ the concrete semantics.
 
 ## Registry
 
-`TransportRegistry` is a small registration utility for tests and future
-runtime assembly. It is intentionally not a full runtime service yet; lifecycle,
-thread safety, and configuration ownership belong to the runtime milestone.
+`TransportRegistry` is a small registration utility. It is intentionally not a
+runtime service: lifecycle, thread safety, and configuration ownership belong
+to [`RuntimeContext`](runtime.md).
