@@ -16,8 +16,8 @@ This milestone adds:
 - `RuntimeOptions`
 - `RuntimeContext`
 
-It does not execute tasks automatically yet. Scheduling policy, timers, and
-dependency resolution remain separate milestones.
+The runtime does not execute tasks on its own. Scheduling policy, timers, and
+dependency resolution live in the [scheduler](scheduler.md) layer.
 
 ## ComponentSpec
 

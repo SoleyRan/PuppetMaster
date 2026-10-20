@@ -36,6 +36,8 @@ Task metrics include:
 - execution count
 - failure count
 - last, average, and maximum execution time
+- last, average, and maximum queue wait
+- last, average, and maximum response time (queue wait plus execution)
 - deadline miss count
 
 Latency uses the message source timestamp and the local steady clock. A
@@ -46,9 +48,10 @@ Queue depth is an optional reader capability. The in-memory transport reports
 it directly; external transports may leave it unsupported until they can
 provide a meaningful value.
 
-For periodic triggers, the configured period is currently used as the
-execution deadline. Manual and data triggers collect execution time but do not
-infer a deadline.
+A deadline miss is counted when the response time exceeds the trigger's
+effective deadline. An explicit `TriggerSpec::deadline` applies to every
+trigger kind; without one, periodic triggers use their period and other
+triggers have no deadline.
 
 ## Runtime Hooks
 
@@ -196,15 +199,18 @@ Otherwise it uses the built-in console logger. The default GoodLog directory is:
 /tmp/puppet_master/
 ```
 
-## Exporter Direction
+## Exporters
 
-Future exporters should remain separate adapters:
+Exporters are separate, dependency-free adapter targets. They format data but
+never perform I/O, so applications choose how and when to ship the output:
 
-- Prometheus: convert `MetricsSnapshot` fields to counters, gauges, and
-  histograms.
-- JSON log: serialize `LogRecord` without changing runtime instrumentation.
-- Chrome trace: convert task and topic events into trace events with timestamps
-  and durations.
+- `PuppetMaster::PrometheusAdapter`: `PrometheusExporter::Render()` converts a
+  `MetricsSnapshot` to Prometheus text exposition format.
+- `PuppetMaster::JsonLogAdapter`: `JsonLogExporter::Render()` serializes one
+  `LogRecord` as a single-line JSON object.
+- `PuppetMaster::ChromeTraceAdapter`: `ChromeTraceExporter::Record()` collects
+  task execution and deadline-miss events, and `ToJson()` produces a trace
+  viewable in `chrome://tracing` or Perfetto.
 
 Keeping these exporters outside the core prevents production integrations from
 adding dependencies or blocking behavior to every PuppetMaster application.

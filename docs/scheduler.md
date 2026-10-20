@@ -167,11 +167,12 @@ upstream components before starting the scheduler.
 
 ## Deadline Observation and Limitations
 
-`RecordTaskExecution()` measures only `ExecuteComponent()` duration. Its
-deadline-miss metric compares that duration with the event's effective relative
-budget, not with the absolute due time used for queue ordering. Time waiting in
-the queue is not included: an event can execute after its due time without an
-execution deadline miss.
+`RecordTaskExecution()` receives both the queue wait (enqueue to dispatch) and
+the `ExecuteComponent()` duration. The deadline-miss metric compares the
+end-to-end response time, queue wait plus execution time, with the event's
+effective relative budget. A miss also emits a `task_deadline_missed` warning
+log with `execution_us`, `queue_wait_us`, `response_us`, and `deadline_us`
+fields. Events without an effective deadline never count as misses.
 
 This policy is not a real-time guarantee. Dispatch cannot preempt a running
 component, deadlines do not force timely execution, and sustained
