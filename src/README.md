@@ -17,7 +17,6 @@ middleware implementation:
 
 - `base`
 - `common`
-- `communication`
 - `trigger`
 - `utils` except for the removed legacy logger copy
 

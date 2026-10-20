@@ -142,10 +142,10 @@ other way around.
 
 ## Legacy Source Boundary
 
-Files under `src/base`, `src/common`, `src/communication`, `src/trigger`, and
-`src/utils` are migration material from the previous middleware. They are not
-compiled. The new FastDDS adapter lives under `src/transport/fastdds` and does
-not depend on the legacy `src/communication/fastdds` code.
+Files under `src/base`, `src/common`, `src/trigger`, and `src/utils` are
+migration material from the previous middleware. They are not compiled. The
+FastDDS adapter lives under `src/transport/fastdds`; the legacy DDS node it
+replaced has been removed.
 
 ## Intended Public CMake Contract
 

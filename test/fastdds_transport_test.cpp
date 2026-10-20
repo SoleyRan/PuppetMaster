@@ -180,6 +180,8 @@ void PublishSubscribeRoundTrip()
             const auto& bytes = message.value().payload;
             assert(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == payload);
             assert(message.value().metadata.sequence >= 1);
+            assert(message.value().metadata.reception_timestamp != core::TimePoint {});
+            assert(message.value().metadata.source_timestamp == core::TimePoint {});
             received = true;
         }
     }
