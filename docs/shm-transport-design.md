@@ -98,7 +98,7 @@ layout; a mismatch is reported when the segment is opened.
 
 CMake adds `PuppetMaster::ShmAdapter`, built by default and controlled by
 `PUPPETMASTER_ENABLE_SHM`. It has no third-party dependencies; on Linux it
-links `Threads::Threads` and `rt` where needed. The configuration parser
+links `rt` for `shm_open` on older glibc. The configuration parser
 accepts `"shm"` as an alias for `"ipc"`.
 
 ## Segment Layout
@@ -122,16 +122,19 @@ SegmentHeader (one per topic)
   Participant participants[64]
 
 Participant
-  atomic<u32> state      free / active
-  u32 pid
-  u64 process_start_time  guards against pid reuse
+  atomic<u32> state      2-bit kind (free / claiming / active) + 30-bit generation
+  atomic<u32> pid
+  atomic<u64> process_start_time  guards against pid reuse
 
-Slot (slot_count entries)
+Slot (slot_count entries, 64-byte header then payload)
   atomic<u64> seq        committed sequence; high bit set while writing
-  i64  source_timestamp_ns
-  u64  payload_size
+  atomic<i64> source_timestamp_ns   relaxed; read speculatively under the seqlock
+  atomic<u64> payload_size          relaxed; validated before use
   byte payload[slot_payload_size]
 ```
+
+The generation in `state` changes on every claim, so a process reclaiming a
+dead entry cannot free one that was released and claimed again in between.
 
 ## Publish And Read Protocol
 

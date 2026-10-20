@@ -156,6 +156,13 @@ PuppetMaster::JsonLogAdapter
 PuppetMaster::ChromeTraceAdapter
 ```
 
+The shared-memory transport has no third-party dependencies and is built by
+default on Linux and Windows (`PUPPETMASTER_ENABLE_SHM`):
+
+```cmake
+PuppetMaster::ShmAdapter
+```
+
 Integrations with third-party dependencies are opt-in targets:
 
 ```cmake

@@ -752,6 +752,7 @@ core::Result<core::TransportKind> ParseTransportKind(std::string_view value)
             {"fast_dds", core::TransportKind::kFastDds},
             {"zmq", core::TransportKind::kZmq},
             {"ipc", core::TransportKind::kIpc},
+            {"shm", core::TransportKind::kIpc},
         },
         "transport kind");
 }

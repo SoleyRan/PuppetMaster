@@ -293,18 +293,50 @@ if(PUPPETMASTER_ENABLE_FASTDDS)
     )
 endif()
 
-if(TARGET puppet_master_shm_platform)
+if(TARGET puppet_master_shm_internal)
     add_executable(puppet_master_shm_platform_test
         shm_platform_test.cpp
     )
 
     target_link_libraries(puppet_master_shm_platform_test
         PRIVATE
-            puppet_master_shm_platform
+            puppet_master_shm_internal
     )
 
     add_test(
         NAME puppet_master.shm_platform
         COMMAND puppet_master_shm_platform_test
+    )
+endif()
+
+if(TARGET puppet_master_shm_internal)
+    add_executable(puppet_master_shm_segment_test
+        shm_segment_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_segment_test
+        PRIVATE
+            puppet_master_shm_internal
+    )
+
+    add_test(
+        NAME puppet_master.shm_segment
+        COMMAND puppet_master_shm_segment_test
+    )
+endif()
+
+if(TARGET PuppetMaster::ShmAdapter)
+    add_executable(puppet_master_shm_transport_test
+        shm_transport_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_transport_test
+        PRIVATE
+            PuppetMaster::ShmAdapter
+    )
+
+    add_test(
+        NAME puppet_master.shm_transport
+        COMMAND puppet_master_shm_transport_test
     )
 endif()

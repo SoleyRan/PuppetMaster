@@ -36,6 +36,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/policy_mapping.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/shm/shm_transport.h"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"
 )
 
