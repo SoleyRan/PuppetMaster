@@ -92,6 +92,11 @@ jobs:
           cmake --build consumer-json/build --parallel
           consumer-json/build/json_consumer
 
+      - name: Validate example configuration with the installed tool
+        run: |
+          "$GITHUB_WORKSPACE/json-install/bin/puppet_master_config" validate demo/config/speed_pipeline.json
+          "$GITHUB_WORKSPACE/json-install/bin/puppet_master_config" describe demo/config/speed_pipeline.json
+
   fastdds:
     name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})
     runs-on: ubuntu-latest

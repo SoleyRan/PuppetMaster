@@ -137,6 +137,33 @@ if(TARGET puppet_master_configuration_system_demo)
     )
 endif()
 
+if(TARGET puppet_master_launcher_demo)
+    set(PUPPETMASTER_DEMO_CONFIG "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json")
+
+    add_test(
+        NAME puppet_master.launcher_demo_validate
+        COMMAND puppet_master_launcher_demo --validate "${PUPPETMASTER_DEMO_CONFIG}"
+    )
+
+    add_test(
+        NAME puppet_master.launcher_demo_run
+        COMMAND puppet_master_launcher_demo "${PUPPETMASTER_DEMO_CONFIG}"
+    )
+    set_tests_properties(puppet_master.launcher_demo_run
+        PROPERTIES
+            ENVIRONMENT "PUPPETMASTER_DEMO_MAX_SAMPLES=5"
+            PASS_REGULAR_EXPRESSION "sample 5: "
+            TIMEOUT 30
+    )
+endif()
+
+if(TARGET puppet_master_config)
+    add_test(
+        NAME puppet_master.config_tool_validate
+        COMMAND puppet_master_config validate "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json"
+    )
+endif()
+
 if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_executable(puppet_master_json_config_loader_test
         json_config_loader_test.cpp
@@ -149,6 +176,19 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_test(
         NAME puppet_master.json_config_loader
         COMMAND puppet_master_json_config_loader_test
+    )
+
+    add_executable(puppet_master_json_launcher_test
+        json_launcher_test.cpp
+    )
+
+    target_link_libraries(puppet_master_json_launcher_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.json_launcher
+        COMMAND puppet_master_json_launcher_test
     )
 endif()
 
@@ -370,3 +410,17 @@ if(TARGET puppet_master_shm_internal)
         COMMAND puppet_master_shm_crash_test
     )
 endif()
+
+add_executable(puppet_master_application_test
+    application_test.cpp
+)
+
+target_link_libraries(puppet_master_application_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.application
+    COMMAND puppet_master_application_test
+)

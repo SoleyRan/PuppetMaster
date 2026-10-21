@@ -144,6 +144,10 @@ See `demo/configuration_system_demo.cpp` for a runnable single-process pipeline:
 When built with `PUPPETMASTER_ENABLE_JSON_CONFIG=ON`, the demo accepts an
 optional `config.json` path and loads the project from it instead.
 
+That demo wires the lifecycle by hand to show each step. Applications should
+use `configuration::Application` or `RunJsonApplication`, which do it for
+them; see [Launcher And Configuration Tools](launcher.md).
+
 ## JSON Loading
 
 `PuppetMaster::JsonConfigAdapter` is built when

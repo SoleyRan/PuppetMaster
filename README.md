@@ -55,7 +55,8 @@ The default build depends only on the C++ standard library:
 ```text
 include/puppet_master/   Public headers for downstream projects.
 src/                     Library and optional adapter implementations.
-demo/                    Small runnable examples.
+demo/                    Small runnable examples and an example configuration.
+tools/                   Command-line tools such as puppet_master_config.
 test/                    Unit, integration, and smoke tests.
 cmake/                   Package configuration templates.
 docs/                    Architecture notes and design decisions.
@@ -108,7 +109,7 @@ core types and error model, transport abstraction, in-memory transport, runtime
 context and component registry, component model, scheduler triggers,
 configuration system, `itage_engine` compatibility facade, and observability.
 
-Next phases:
+Follow-up phases, all complete:
 
 1. Documentation alignment. Keep README and module docs consistent with the
    implemented behavior. Done.
@@ -120,10 +121,11 @@ Next phases:
    existing transport contract, with crash recovery and zero-copy writes
    through `Writer::WriteWith`. Done. See
    [Shared-Memory Transport](docs/shm-transport.md).
-5. User-facing capabilities. In progress:
-   - Typed message readers and writers over the byte transport. Done.
-   - Scheduler starvation protection through priority aging. Done.
-   - Configuration validation and launch tooling.
+5. User-facing capabilities. Done:
+   - Typed message readers and writers over the byte transport.
+   - Scheduler starvation protection through priority aging.
+   - Configuration validation, a `puppet_master_config` CLI, and an
+     `Application` launcher that runs a JSON configuration end to end.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -140,6 +142,8 @@ See [Typed Messages](docs/typed-messages.md) for struct and codec-based
 endpoints.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
+See [Launcher And Configuration Tools](docs/launcher.md) for running
+JSON-configured applications and checking configurations in CI.
 See [itage_engine Compatibility Facade](docs/compatibility-facade.md) for the
 transitional node/reader/writer API.
 See [Observability](docs/observability.md) for runtime metrics, trace hooks,
