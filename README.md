@@ -117,10 +117,9 @@ Next phases:
 3. Legacy source cleanup. Remove the uncompiled `src/base`, `src/common`,
    `src/trigger`, and `src/utils` migration areas. Done.
 4. Shared-memory IPC transport. A same-host, cross-process backend behind the
-   existing transport contract, with zero-copy as a design goal. In progress:
-   the copy-based transport with crash recovery is available; writer-side
-   loans follow. See
-   [Shared-Memory Transport Design](docs/shm-transport-design.md).
+   existing transport contract, with crash recovery and zero-copy writes
+   through `Writer::WriteWith`. Done. See
+   [Shared-Memory Transport](docs/shm-transport.md).
 5. User-facing capabilities. Typed message readers and writers over the byte
    transport, scheduler starvation protection, and configuration validation and
    launch tooling.

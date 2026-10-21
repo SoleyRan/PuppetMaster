@@ -38,6 +38,32 @@ struct WriteOptions {
 
 using DataAvailableCallback = std::function<void()>;
 
+// Fills a message in place. Receives a writable buffer and returns how many
+// bytes of it the message uses; returning an error publishes nothing.
+using FillFunction = std::function<core::Result<std::size_t>(MutableByteView buffer)>;
+
+namespace detail {
+
+// Runs `fill` and validates the size it reports. Exceptions become Internal
+// errors so callers can always release resources they hold around the call.
+inline core::Result<std::size_t> InvokeFill(const FillFunction& fill, MutableByteView buffer)
+{
+    using ResultType = core::Result<std::size_t>;
+    try {
+        auto used = fill(buffer);
+        if (used.ok() && used.value() > buffer.size()) {
+            return ResultType::FromStatus(core::Status::OutOfRange(
+                "fill function reported " + std::to_string(used.value()) + " bytes for a "
+                + std::to_string(buffer.size()) + "-byte buffer"));
+        }
+        return used;
+    } catch (...) {
+        return ResultType::FromStatus(core::Status::Internal("fill function threw an exception"));
+    }
+}
+
+}  // namespace detail
+
 class Reader {
 public:
     Reader(const Reader&) = delete;
@@ -71,6 +97,27 @@ public:
     virtual const core::TopicName& topic_name() const noexcept = 0;
     virtual const MessageDescriptor& message_descriptor() const noexcept = 0;
     virtual core::Status Write(ByteView payload, WriteOptions options = {}) = 0;
+
+    // Publishes a message that `fill` writes in place, so producers can
+    // serialize without building their own buffer first. `fill` receives
+    // exactly `capacity` writable bytes and returns how many it used. It must
+    // not write to the same writer.
+    //
+    // Backends that report TransportCapabilities::supports_zero_copy hand
+    // `fill` transport memory directly. The default fills a temporary buffer
+    // and passes it to Write().
+    virtual core::Status WriteWith(std::size_t capacity, const FillFunction& fill, WriteOptions options = {})
+    {
+        if (!fill) {
+            return core::Status::InvalidArgument("fill function must not be empty");
+        }
+        ByteBuffer buffer(capacity);
+        auto used = detail::InvokeFill(fill, MutableByteView(buffer.data(), buffer.size()));
+        if (!used.ok()) {
+            return used.status();
+        }
+        return Write(ByteView(buffer.data(), used.value()), options);
+    }
 
 protected:
     Writer() = default;

@@ -6,6 +6,7 @@
 #include <new>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(__SANITIZE_THREAD__)
 #define PUPPETMASTER_SHM_TSAN 1
@@ -33,19 +34,17 @@ std::size_t AlignUp(std::size_t value)
 
 // The seqlock copies race with a concurrent writer by design; the sequence
 // re-check discards torn results. Under ThreadSanitizer the copies use relaxed
-// atomic byte accesses so the intended race is not reported.
+// atomic byte accesses so the intended race is not reported. Writers only
+// need the shared-side copy under TSan, where PublishWith fills a private
+// buffer first; otherwise the fill function writes the slot directly.
+#ifdef PUPPETMASTER_SHM_TSAN
 void CopyToShared(unsigned char* destination, const unsigned char* source, std::size_t size)
 {
-#ifdef PUPPETMASTER_SHM_TSAN
     for (std::size_t index = 0; index < size; ++index) {
         __atomic_store_n(destination + index, source[index], __ATOMIC_RELAXED);
     }
-#else
-    if (size != 0) {
-        std::memcpy(destination, source, size);
-    }
-#endif
 }
+#endif
 
 void CopyFromShared(unsigned char* destination, const unsigned char* source, std::size_t size)
 {
@@ -250,10 +249,24 @@ unsigned char* Segment::SlotAt(std::uint64_t sequence) const noexcept
 
 core::Result<std::uint64_t> Segment::Publish(ByteView payload, core::TimePoint source_timestamp)
 {
+    return PublishWith(
+        payload.size(),
+        [payload](MutableByteView buffer) {
+            if (!payload.empty()) {
+                std::memcpy(buffer.data(), payload.data(), payload.size());
+            }
+            return core::Result<std::size_t>(payload.size());
+        },
+        source_timestamp);
+}
+
+core::Result<std::uint64_t> Segment::PublishWith(
+    std::size_t capacity, const FillFunction& fill, core::TimePoint source_timestamp)
+{
     using ResultType = core::Result<std::uint64_t>;
-    if (payload.size() > geometry_.slot_payload_size) {
+    if (capacity > geometry_.slot_payload_size) {
         return ResultType::FromStatus(core::Status::OutOfRange(
-            "payload of " + std::to_string(payload.size()) + " bytes exceeds the shm slot size of "
+            "payload of " + std::to_string(capacity) + " bytes exceeds the shm slot size of "
             + std::to_string(geometry_.slot_payload_size)));
     }
 
@@ -267,12 +280,35 @@ core::Result<std::uint64_t> Segment::Publish(ByteView payload, core::TimePoint s
     const std::uint64_t sequence = header_->write_seq.load(std::memory_order_relaxed) + 1;
     unsigned char* slot = SlotAt(sequence);
     auto* slot_header = reinterpret_cast<SlotHeader*>(slot);
+    unsigned char* payload = slot + kSlotPayloadOffset;
 
+    // From here the slot's previous message is gone: readers that still want
+    // it see the writing bit and count a drop, as for any overwrite.
     slot_header->seq.store(sequence | kWritingBit, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    slot_header->payload_size.store(payload.size(), std::memory_order_relaxed);
+
+#ifdef PUPPETMASTER_SHM_TSAN
+    // The fill function writes with plain stores, which ThreadSanitizer would
+    // report against the readers' speculative loads. Fill a private buffer
+    // and publish it with the instrumented copy instead.
+    thread_local std::vector<unsigned char> scratch;
+    scratch.resize(capacity);
+    auto used = transport::detail::InvokeFill(fill, MutableByteView(scratch.data(), capacity));
+#else
+    auto used = transport::detail::InvokeFill(fill, MutableByteView(payload, capacity));
+#endif
+    if (!used.ok()) {
+        // write_seq never advanced, so nothing partial becomes visible; the
+        // next publish reuses this sequence and slot.
+        lock_->Unlock();
+        return ResultType::FromStatus(used.status());
+    }
+#ifdef PUPPETMASTER_SHM_TSAN
+    CopyToShared(payload, scratch.data(), used.value());
+#endif
+
+    slot_header->payload_size.store(used.value(), std::memory_order_relaxed);
     slot_header->source_timestamp_ns.store(source_timestamp.time_since_epoch().count(), std::memory_order_relaxed);
-    CopyToShared(slot + kSlotPayloadOffset, payload.data(), payload.size());
     if (crash_hook_ != nullptr) {
         crash_hook_();  // test-only: dies here with the lock held and the slot half-written
     }

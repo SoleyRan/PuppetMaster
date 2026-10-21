@@ -133,13 +133,18 @@ public:
         if (!status.ok()) {
             return status;
         }
-        const auto timestamp = options.source_timestamp == core::TimePoint {} ? Now() : options.source_timestamp;
-        auto sequence = segment_->Publish(payload, timestamp);
-        if (!sequence.ok()) {
-            return sequence.status();
+        return Committed(segment_->Publish(payload, Timestamp(options)));
+    }
+
+    core::Status PublishWith(std::size_t capacity, const FillFunction& fill, WriteOptions options)
+    {
+        if (closed()) {
+            return core::Status::Unavailable("shm writer is closed");
         }
-        notifier_->NotifyAll(segment_->ActiveParticipants());
-        return core::Status::Ok();
+        if (!fill) {
+            return core::Status::InvalidArgument("fill function must not be empty");
+        }
+        return Committed(segment_->PublishWith(capacity, fill, Timestamp(options)));
     }
 
     void Close() noexcept
@@ -180,6 +185,20 @@ private:
           notifier_(std::move(notifier)),
           poll_interval_(poll_interval)
     {
+    }
+
+    static core::TimePoint Timestamp(const WriteOptions& options)
+    {
+        return options.source_timestamp == core::TimePoint {} ? Now() : options.source_timestamp;
+    }
+
+    core::Status Committed(const core::Result<std::uint64_t>& sequence)
+    {
+        if (!sequence.ok()) {
+            return sequence.status();
+        }
+        notifier_->NotifyAll(segment_->ActiveParticipants());
+        return core::Status::Ok();
     }
 
     // Holds a strong reference only for one iteration. If a reader callback
@@ -347,6 +366,12 @@ public:
         return topic_->Publish(payload, options);
     }
 
+    // Zero-copy: `fill` writes straight into the shared-memory slot.
+    core::Status WriteWith(std::size_t capacity, const FillFunction& fill, WriteOptions options) override
+    {
+        return topic_->PublishWith(capacity, fill, options);
+    }
+
 private:
     EndpointConfig endpoint_;
     std::shared_ptr<TopicState> topic_;
@@ -441,7 +466,7 @@ TransportCapabilities ShmTransport::capabilities() const noexcept
     caps.supports_blocking_read = true;
     caps.supports_reliable_delivery = true;
     caps.supports_keep_all = false;
-    caps.supports_zero_copy = false;
+    caps.supports_zero_copy = true;  // Writer::WriteWith fills the slot in place
     return caps;
 }
 

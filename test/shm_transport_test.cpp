@@ -2,6 +2,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -113,7 +114,7 @@ void OptionsAndCapabilities()
     assert(shm_transport->kind() == core::TransportKind::kIpc);
     const auto caps = shm_transport->capabilities();
     assert(caps.supports_callbacks && caps.supports_blocking_read);
-    assert(!caps.supports_keep_all && !caps.supports_zero_copy);
+    assert(!caps.supports_keep_all && caps.supports_zero_copy);
 }
 
 void EndpointValidation()
@@ -350,7 +351,67 @@ void RuntimeRegistration()
     Write(*writer.value(), "through runtime");
     auto message = ReadWait(*reader.value());
     assert(message.ok() && Text(message.value()) == "through runtime");
+
+    // The runtime's observing wrapper forwards WriteWith, so the fill still
+    // runs in shared memory and the published size reaches the metrics.
+    const std::string text = "zero-copy through runtime";
+    assert(writer.value()->WriteWith(64, [&](transport::MutableByteView buffer) {
+        std::memcpy(buffer.data(), text.data(), text.size());
+        return core::Result<std::size_t>(text.size());
+    }).ok());
+    message = ReadWait(*reader.value());
+    assert(message.ok() && Text(message.value()) == text);
+
+    const auto snapshot = context.value()->observer()->Snapshot();
+    bool found = false;
+    for (const auto& topic : snapshot.topics) {
+        if (topic.topic_name == cleanup.topic) {
+            found = true;
+            assert(topic.messages_published == 2);
+            assert(topic.bytes_published == std::string("through runtime").size() + text.size());
+        }
+    }
+    assert(found);
     assert(context.value()->Close().ok());
+}
+
+void WriteWithFillsInPlace()
+{
+    const TopicCleanup cleanup {UniqueTopic("write-with")};
+    shm::Options options;
+    options.default_topic.slot_payload_size = 32;
+    auto shm_transport = MakeTransport(options);
+    assert(shm_transport->capabilities().supports_zero_copy);
+    auto reader = shm_transport->CreateReader(Endpoint(cleanup.topic, Queued(4)));
+    auto writer = shm_transport->CreateWriter(Endpoint(cleanup.topic, Queued(4)));
+    assert(reader.ok() && writer.ok());
+
+    transport::WriteOptions timed;
+    timed.source_timestamp = core::TimePoint(core::Nanoseconds(99));
+    assert(writer.value()->WriteWith(32, [](transport::MutableByteView buffer) {
+        assert(buffer.size() == 32);
+        for (std::size_t index = 0; index < 5; ++index) {
+            buffer.data()[index] = static_cast<core::Byte>('a' + index);
+        }
+        return core::Result<std::size_t>(5);
+    }, timed).ok());
+    auto message = reader.value()->Read();
+    assert(message.ok() && Text(message.value()) == "abcde");
+    assert(message.value().metadata.source_timestamp == core::TimePoint(core::Nanoseconds(99)));
+
+    assert(writer.value()->WriteWith(33, [](transport::MutableByteView) {
+        return core::Result<std::size_t>(0);
+    }).code() == core::StatusCode::kOutOfRange);
+    assert(writer.value()->WriteWith(8, {}).code() == core::StatusCode::kInvalidArgument);
+    assert(writer.value()->WriteWith(8, [](transport::MutableByteView) {
+        return core::Result<std::size_t>::FromStatus(core::Status::Cancelled("skip"));
+    }).code() == core::StatusCode::kCancelled);
+    assert(reader.value()->Read().status().code() == core::StatusCode::kUnavailable);
+
+    assert(shm_transport->Close().ok());
+    assert(writer.value()->WriteWith(8, [](transport::MutableByteView) {
+        return core::Result<std::size_t>(0);
+    }).code() == core::StatusCode::kUnavailable);
 }
 
 // Cross-process: a child publisher, a parent subscriber, and an
@@ -510,6 +571,7 @@ int main(int argc, char** argv)
     CloseInvalidatesHandles();
     ReleaseFromCallback();
     RuntimeRegistration();
+    WriteWithFillsInPlace();
     CrossProcessDelivery(argv[0]);
     std::cout << "shm transport tests passed\n";
     return 0;

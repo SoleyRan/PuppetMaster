@@ -6,8 +6,9 @@ without a broker or third-party dependency. It implements the standard
 so components switch to it by changing a topic's transport kind. The design and
 its rationale are in [Shared-Memory Transport Design](shm-transport-design.md).
 
-Supported on Linux and Windows. Writer-side zero-copy loans are planned; this
-version copies once into shared memory and once out.
+Supported on Linux and Windows. `Write()` copies the payload into shared memory;
+`WriteWith()` lets the producer write it there directly (see
+[Zero-Copy Writes](#zero-copy-writes)). Readers always receive a private copy.
 
 ## Build
 
@@ -39,6 +40,30 @@ auto status = shm::RegisterTransport(*runtime, name, options);
 
 Topics use `core::TransportKind::kIpc`. In configuration files the transport
 may be written as `"ipc"` or `"shm"`.
+
+## Zero-Copy Writes
+
+`WriteWith` hands the producer the shared-memory slot itself, so a large
+message is serialized once, directly where readers will copy it from:
+
+```cpp
+auto status = writer->WriteWith(max_size, [&](transport::MutableByteView buffer) {
+    const std::size_t used = SerializePointCloud(cloud, buffer.data(), buffer.size());
+    return core::Result<std::size_t>(used);
+});
+```
+
+`max_size` must not exceed the topic's `slot_payload_size`, and `fill` must
+return at most `max_size`. The callback runs while this process holds the
+topic's cross-process writer lock, so:
+
+- keep it short: other writers on the topic wait for it;
+- do not write to the same topic from inside it;
+- return an error, or throw, to cancel: nothing is published and the lock is
+  released.
+
+It works the same through `RuntimeContext::CreateWriter`, and topic metrics
+record the size `fill` returned.
 
 ## Topic Geometry
 

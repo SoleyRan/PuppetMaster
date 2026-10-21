@@ -11,6 +11,7 @@
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
 #include <puppet_master/transport/message.h>
+#include <puppet_master/transport/transport.h>
 
 #include "platform.h"
 
@@ -117,6 +118,13 @@ public:
 
     // Writer protocol. Returns the committed sequence.
     core::Result<std::uint64_t> Publish(ByteView payload, core::TimePoint source_timestamp);
+
+    // Zero-copy variant: `fill` writes the message directly into the slot
+    // while this process holds the cross-process writer lock, so it should be
+    // short and must not publish to the same topic. A failed fill publishes
+    // nothing.
+    core::Result<std::uint64_t> PublishWith(
+        std::size_t capacity, const FillFunction& fill, core::TimePoint source_timestamp);
 
     // Reader protocol. `cursor` is the next sequence the reader wants; `depth`
     // bounds how far back it may start. On success the payload, sequence, and

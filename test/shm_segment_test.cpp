@@ -5,11 +5,22 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "segment.h"
+
+// Under ThreadSanitizer, PublishWith fills a private buffer instead of the
+// slot, so the in-place address check does not apply.
+#if defined(__SANITIZE_THREAD__)
+#define PUPPETMASTER_SHM_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define PUPPETMASTER_SHM_TEST_TSAN 1
+#endif
+#endif
 
 namespace core = puppet_master::core;
 namespace detail = puppet_master::transport::shm::detail;
@@ -186,6 +197,58 @@ void OverwrittenAndInterruptedSlotsAreSkipped()
     assert(cursor == 4);
 }
 
+void PublishWithFillsTheSlotInPlace()
+{
+    auto test = Make("fill", 16, 4);
+    const auto* slots = reinterpret_cast<const unsigned char*>(&test.segment->header()) + detail::HeaderSize();
+    const unsigned char* filled_at = nullptr;
+
+    auto published = test.segment->PublishWith(
+        16,
+        [&](transport::MutableByteView buffer) {
+            assert(buffer.size() == 16);
+            filled_at = buffer.data();
+            std::memcpy(buffer.data(), "in-place", 8);
+            return core::Result<std::size_t>(8);
+        },
+        core::TimePoint(core::Nanoseconds(7)));
+    assert(published.ok() && published.value() == 1);
+#ifndef PUPPETMASTER_SHM_TEST_TSAN
+    // Sequence 1 lives in slot 1; its payload starts one header past the slot.
+    assert(filled_at == slots + detail::SlotStride(16) + 64);
+#else
+    (void)slots;
+#endif
+
+    std::uint64_t cursor = 1;
+    transport::Message message;
+    assert(test.segment->TryRead(cursor, 4, message).has_message);
+    assert(Text(message) == "in-place");
+    assert(message.metadata.source_timestamp == core::TimePoint(core::Nanoseconds(7)));
+
+    // A failed, throwing, or oversized fill publishes nothing and keeps the
+    // previous message readable.
+    auto failed = test.segment->PublishWith(
+        16, [](transport::MutableByteView) { return core::Result<std::size_t>::FromStatus(core::Status::Cancelled("no")); },
+        {});
+    assert(failed.status().code() == core::StatusCode::kCancelled);
+    auto thrown = test.segment->PublishWith(
+        16, [](transport::MutableByteView) -> core::Result<std::size_t> { throw std::runtime_error("boom"); }, {});
+    assert(thrown.status().code() == core::StatusCode::kInternal);
+    auto oversized = test.segment->PublishWith(
+        8, [](transport::MutableByteView) { return core::Result<std::size_t>(9); }, {});
+    assert(oversized.status().code() == core::StatusCode::kOutOfRange);
+    auto too_big = test.segment->PublishWith(
+        17, [](transport::MutableByteView) { return core::Result<std::size_t>(0); }, {});
+    assert(too_big.status().code() == core::StatusCode::kOutOfRange);
+    assert(test.segment->WriteSequence() == 1);
+
+    // The lock was released after each failure, and the sequence is reused.
+    Publish(*test.segment, "next");
+    assert(test.segment->WriteSequence() == 2);
+    assert(test.segment->TryRead(cursor, 4, message).has_message && Text(message) == "next");
+}
+
 void AttachValidatesIdentityAndGeometry()
 {
     auto test = Make("attach", 64, 4);
@@ -298,6 +361,7 @@ int main()
     EmptyAndMaxSizePayloads();
     LatestAndDepthClampCountDrops();
     OverwrittenAndInterruptedSlotsAreSkipped();
+    PublishWithFillsTheSlotInPlace();
     AttachValidatesIdentityAndGeometry();
     ParticipantsClaimReleaseAndReclaim();
     ConcurrentReadersSeeConsistentPayloads();

@@ -19,7 +19,7 @@ Status: accepted. Implementation follows the steps below; see
 ## Non-Goals
 
 - Cross-host communication. That remains FastDDS.
-- Reader-side zero-copy in v1 or step 2 (see [Zero-Copy Plan](#zero-copy-plan)).
+- Reader-side zero-copy (see [Zero-Copy Writes](#zero-copy-writes)).
 - Keep-all retention and writer backpressure (`kBlock`, `kReject`,
   `kDropNewest`) in v1.
 - Service discovery beyond "processes that agree on a domain and topic name".
@@ -265,30 +265,46 @@ write a topic. Readers validate every size and index read from shared memory
 before using it, so a corrupt or hostile segment can cause dropped messages
 but not out-of-bounds access in the reader.
 
-## Zero-Copy Plan
+## Zero-Copy Writes
 
-Step 2 adds writer-side loans as an optional extension, without changing
-`Writer::Write()`:
+`transport::Writer` has a virtual `WriteWith` next to `Write`:
 
 ```cpp
-class LoanedBuffer {   // move-only
-public:
-    MutableByteView data();          // the slot payload, capacity = slot size
-    core::Status Commit(std::size_t size, WriteOptions options = {});
-};                                    // destruction without Commit discards
+using FillFunction = std::function<core::Result<std::size_t>(MutableByteView buffer)>;
 
-class LoaningWriter {  // implemented by writers that support loans
-public:
-    virtual core::Result<LoanedBuffer> Loan() = 0;
-};
+virtual core::Status WriteWith(std::size_t capacity, const FillFunction& fill,
+                               WriteOptions options = {});
 ```
 
-`Loan()` takes the writer lock and marks the slot as writing; `Commit()` runs
-steps 4 and 5 of the writer protocol. The producer serializes directly into
-shared memory, saving one copy. Callers discover support with
-`TransportCapabilities::supports_zero_copy` and a `dynamic_cast` to
-`LoaningWriter`, so other backends are untouched. Step 2 adds a lock timeout
-so a producer that holds a loan too long cannot stall other writers forever.
+The shm writer runs `fill` on the slot payload itself: it takes the writer
+lock, marks the slot as writing, calls `fill`, then commits steps 4 and 5 of
+the writer protocol with the size `fill` returns. The producer serializes
+directly into shared memory, saving one copy. A failed or throwing `fill`
+releases the lock without advancing `write_seq`, so nothing becomes visible.
+Every other backend inherits a default that fills a temporary buffer and calls
+`Write()`, so callers use one API everywhere and check
+`TransportCapabilities::supports_zero_copy` only to know whether it avoids the
+copy.
+
+This replaces the loan objects (`LoaningWriter::Loan()` returning a
+`LoanedBuffer`) proposed in the first draft, for two reasons found during
+implementation:
+
+- `RuntimeContext::CreateWriter` wraps every writer in an observing decorator,
+  so a `dynamic_cast` from the returned writer to `LoaningWriter` would always
+  fail. A virtual on `Writer` is forwarded by the decorator like `Write()`,
+  which also keeps topic metrics correct.
+- A callback bounds how long the lock is held to the duration of `fill`. A
+  loan object can be kept indefinitely, which needed a lock timeout; a scoped
+  call does not.
+
+`fill` runs while the cross-process writer lock is held, so it should be short
+and must not write to the same topic. A producer that crashes inside `fill` is
+handled like any writer crash inside the lock.
+
+Under ThreadSanitizer, `fill` writes to a private buffer that is then copied
+with instrumented atomic stores, so the intended seqlock race is not reported.
+Release builds always fill in place.
 
 Reader-side zero-copy (borrowed read-only views) is out of scope: under ring
 overwrite, a borrowed slot can be rewritten while the reader still uses it,
@@ -322,7 +338,8 @@ Each step is one commit:
    dispatcher; contract and cross-process tests; docs page. Done; participant
    reclamation landed here as well.
 3. Crash test for a writer dying inside the lock; sanitizer CI job. Done.
-4. Writer loans (`LoaningWriter`) and `supports_zero_copy = true`.
+4. Zero-copy writes through `Writer::WriteWith` and
+   `supports_zero_copy = true`. Done.
 
 ## Decisions
 
