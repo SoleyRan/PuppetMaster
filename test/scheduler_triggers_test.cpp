@@ -1529,6 +1529,69 @@ void NegativeDeadlineIsRejected()
     }
 }
 
+// Runs `old_low` (priority 0, queued first) against `new_high` (priority 5,
+// queued `gap` later) while a blocker holds the only worker, then returns the
+// dispatch order and the aged-dispatch count.
+std::pair<std::vector<std::string>, std::size_t> AgingOrder(core::Nanoseconds aging, std::chrono::milliseconds gap)
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    std::vector<std::string> order;
+    std::atomic<bool> release {false};
+    const auto blocker_name = MakeComponentName("aging_blocker");
+    auto blocker = std::make_shared<OrderedComponent>(OrderedSpec(blocker_name.str(), ManualPolicy()), order, &release);
+    assert(context.value()->RegisterComponent(blocker).ok());
+    assert(BringUp(*context.value(), blocker_name).ok());
+    for (const auto& [name, priority] : {std::pair<const char*, int> {"old_low", 0}, {"new_high", 5}}) {
+        auto component = std::make_shared<OrderedComponent>(OrderedSpec(name, ManualPolicy(priority)), order);
+        assert(context.value()->RegisterComponent(component).ok());
+        assert(BringUp(*context.value(), MakeComponentName(name)).ok());
+    }
+
+    scheduler::SchedulerOptions options;
+    options.priority_aging_interval = aging;
+    scheduler::Scheduler sched(*context.value(), options);
+    assert(sched.RegisterAllComponents().ok());
+    assert(sched.Start().ok());
+    assert(sched.Trigger(blocker_name).ok());
+    const auto timeout = core::SteadyClock::now() + std::chrono::milliseconds(500);
+    while (!blocker->entered.load() && core::SteadyClock::now() < timeout) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(blocker->entered.load());
+
+    assert(sched.Trigger(MakeComponentName("old_low")).ok());
+    std::this_thread::sleep_for(gap);
+    assert(sched.Trigger(MakeComponentName("new_high")).ok());
+    release.store(true);
+    assert(sched.WaitIdle(std::chrono::seconds(2)).ok());
+    const auto aged = sched.stats().aged_dispatches;
+    assert(sched.Stop().ok());
+    return {order, aged};
+}
+
+void PriorityAgingPreventsStarvation()
+{
+    // Without aging, the later high-priority event always wins.
+    auto strict = AgingOrder(core::Nanoseconds::zero(), std::chrono::milliseconds(30));
+    assert((strict.first == std::vector<std::string> {"new_high", "old_low"}));
+    assert(strict.second == 0);
+
+    // With a 1 ms interval, 30 ms of waiting lifts old_low well past +5.
+    auto aged = AgingOrder(std::chrono::milliseconds(1), std::chrono::milliseconds(30));
+    assert((aged.first == std::vector<std::string> {"old_low", "new_high"}));
+    assert(aged.second == 1);
+
+    // A long interval leaves strict order in place for short waits.
+    auto slow = AgingOrder(std::chrono::seconds(10), std::chrono::milliseconds(30));
+    assert((slow.first == std::vector<std::string> {"new_high", "old_low"}));
+    assert(slow.second == 0);
+
+    scheduler::SchedulerOptions negative;
+    negative.priority_aging_interval = core::Nanoseconds(-1);
+    assert(negative.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
 void ZeroWorkerCountIsRejected()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -1574,6 +1637,7 @@ int main()
     NonperiodicDeadlineAndCoalescedMetadata();
     DataAndTaskPoliciesReachQueue();
     NegativeDeadlineIsRejected();
+    PriorityAgingPreventsStarvation();
     ZeroWorkerCountIsRejected();
     return 0;
 }

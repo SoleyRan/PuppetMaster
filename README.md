@@ -122,7 +122,7 @@ Next phases:
    [Shared-Memory Transport](docs/shm-transport.md).
 5. User-facing capabilities. In progress:
    - Typed message readers and writers over the byte transport. Done.
-   - Scheduler starvation protection.
+   - Scheduler starvation protection through priority aging. Done.
    - Configuration validation and launch tooling.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.

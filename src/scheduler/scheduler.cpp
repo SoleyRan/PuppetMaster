@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -450,7 +451,8 @@ struct Scheduler::Impl {
             pending_events.size(),
             active_events,
             dispatched_events,
-            coalesced_events
+            coalesced_events,
+            aged_dispatches
         };
     }
 
@@ -527,6 +529,19 @@ private:
         }
         task_dependents = std::move(dependents);
         return core::Status::Ok();
+    }
+
+    // Declared priority plus one level per full aging interval waited. 64-bit
+    // so aging cannot overflow; capped so it stays bounded.
+    std::int64_t EffectivePriority(const ScheduledEvent& event, core::SteadyClock::time_point now) const
+    {
+        std::int64_t priority = event.priority;
+        if (options.priority_aging_interval > core::Nanoseconds::zero() && now > event.queued_at) {
+            constexpr std::int64_t kMaxBoost = std::int64_t {1} << 40;
+            const auto waited = std::chrono::duration_cast<core::Nanoseconds>(now - event.queued_at);
+            priority += std::min<std::int64_t>(waited / options.priority_aging_interval, kMaxBoost);
+        }
+        return priority;
     }
 
     // 持有互斥锁时调用；合并时保留首事件的全部属性。
@@ -722,21 +737,32 @@ private:
                     break;
                 }
 
+                const auto now = core::SteadyClock::now();
                 auto selected = pending_events.end();
+                std::int64_t selected_priority = 0;
+                // Highest declared priority among eligible events, to tell
+                // whether aging changed the outcome.
+                std::int64_t highest_declared = std::numeric_limits<std::int64_t>::min();
                 for (auto candidate = pending_events.begin(); candidate != pending_events.end(); ++candidate) {
                     if (executing_components.find(candidate->component.str()) != executing_components.end()) {
                         continue;
                     }
+                    highest_declared = std::max<std::int64_t>(highest_declared, candidate->priority);
+                    const auto effective = EffectivePriority(*candidate, now);
                     // 仅严格更优时替换，排序键相同时保留先入队事件。
                     if (selected == pending_events.end()
-                        || candidate->priority > selected->priority
-                        || (candidate->priority == selected->priority && candidate->due_time < selected->due_time)) {
+                        || effective > selected_priority
+                        || (effective == selected_priority && candidate->due_time < selected->due_time)) {
                         selected = candidate;
+                        selected_priority = effective;
                     }
                 }
                 if (selected == pending_events.end()) {
                     event_available.wait(lock);
                     continue;
+                }
+                if (selected->priority < highest_declared) {
+                    ++aged_dispatches;
                 }
                 event = *selected;
                 pending_events.erase(selected);
@@ -878,6 +904,7 @@ private:
     std::size_t active_events {0};
     std::size_t dispatched_events {0};
     std::size_t coalesced_events {0};
+    std::size_t aged_dispatches {0};
     core::Status last_status;
     bool running {false};
     bool starting {false};

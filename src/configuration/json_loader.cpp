@@ -126,8 +126,11 @@ ProjectConfig Decode(const Json& root)
     }
     if (root.contains("scheduler")) {
         const auto& options = root.at("scheduler");
-        CheckObject(options, "$.scheduler", {"worker_count"});
+        CheckObject(options, "$.scheduler", {"worker_count", "priority_aging_interval_ns"});
         Read(options, "worker_count", project.scheduler_options.worker_count, "$.scheduler");
+        auto aging = project.scheduler_options.priority_aging_interval.count();
+        Read(options, "priority_aging_interval_ns", aging, "$.scheduler");
+        project.scheduler_options.priority_aging_interval = core::Nanoseconds(aging);
     }
     std::size_t index = 0;
     for (const auto& value : Array(root, "topics", "$")) {
