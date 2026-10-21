@@ -309,17 +309,19 @@ together with `kBlock` support.
 - Crash test: a child process is killed while holding the writer lock
   (forced through a test-only hook); the parent must keep publishing and
   reading.
-- Linux CI adds an AddressSanitizer and ThreadSanitizer job for this adapter.
+- Linux CI runs the full test suite under AddressSanitizer with
+  UndefinedBehaviorSanitizer, and under ThreadSanitizer.
 
 ## Implementation Steps
 
-Each step is one PR:
+Each step is one commit:
 
 1. Platform layer (`SharedRegion`, `WriterLock`, `Notifier`) with unit tests.
+   Done.
 2. Segment layout, seqlock ring, `ShmTransport` with reader, writer, and
-   dispatcher; contract and cross-process tests; docs page.
-3. Crash recovery and participant reclamation with the crash test; sanitizer
-   CI job.
+   dispatcher; contract and cross-process tests; docs page. Done; participant
+   reclamation landed here as well.
+3. Crash test for a writer dying inside the lock; sanitizer CI job. Done.
 4. Writer loans (`LoaningWriter`) and `supports_zero_copy = true`.
 
 ## Decisions

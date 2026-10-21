@@ -273,6 +273,9 @@ core::Result<std::uint64_t> Segment::Publish(ByteView payload, core::TimePoint s
     slot_header->payload_size.store(payload.size(), std::memory_order_relaxed);
     slot_header->source_timestamp_ns.store(source_timestamp.time_since_epoch().count(), std::memory_order_relaxed);
     CopyToShared(slot + kSlotPayloadOffset, payload.data(), payload.size());
+    if (crash_hook_ != nullptr) {
+        crash_hook_();  // test-only: dies here with the lock held and the slot half-written
+    }
     slot_header->seq.store(sequence, std::memory_order_release);
     header_->write_seq.store(sequence, std::memory_order_release);
 

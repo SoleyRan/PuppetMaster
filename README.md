@@ -118,8 +118,8 @@ Next phases:
    `src/trigger`, and `src/utils` migration areas. Done.
 4. Shared-memory IPC transport. A same-host, cross-process backend behind the
    existing transport contract, with zero-copy as a design goal. In progress:
-   the copy-based transport is available; crash-recovery hardening and
-   writer-side loans follow. See
+   the copy-based transport with crash recovery is available; writer-side
+   loans follow. See
    [Shared-Memory Transport Design](docs/shm-transport-design.md).
 5. User-facing capabilities. Typed message readers and writers over the byte
    transport, scheduler starvation protection, and configuration validation and

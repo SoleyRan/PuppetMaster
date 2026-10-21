@@ -340,3 +340,19 @@ if(TARGET PuppetMaster::ShmAdapter)
         COMMAND puppet_master_shm_transport_test
     )
 endif()
+
+if(TARGET puppet_master_shm_internal)
+    add_executable(puppet_master_shm_crash_test
+        shm_crash_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_crash_test
+        PRIVATE
+            puppet_master_shm_internal
+    )
+
+    add_test(
+        NAME puppet_master.shm_crash
+        COMMAND puppet_master_shm_crash_test
+    )
+endif()

@@ -26,6 +26,36 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  sanitizers:
+    name: ubuntu-latest (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: asan-ubsan
+            flags: -fsanitize=address,undefined -fno-sanitize-recover=undefined -g
+          - sanitizer: tsan
+            flags: -fsanitize=thread -g -O1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPUPPETMASTER_BUILD_DEMOS=OFF \
+            "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # setarch -R disables ASLR for ctest and its children: ThreadSanitizer
+      # aborts on the high-entropy mmap layout of current Ubuntu kernels.
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: setarch "$(uname -m)" -R ctest --test-dir build --output-on-failure
+
   json-config:
     name: ubuntu-latest (JSON configuration)
     runs-on: ubuntu-latest

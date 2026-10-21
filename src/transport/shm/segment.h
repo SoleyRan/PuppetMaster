@@ -131,6 +131,11 @@ public:
     void ReleaseParticipant(std::uint32_t index) noexcept;
     std::vector<std::uint32_t> ActiveParticipants() const;
 
+    // Test-only: called inside Publish after the payload copy, before the
+    // commit, with the writer lock held. Crash tests use it to kill a writer
+    // at the worst moment. Not thread-safe to change while publishing.
+    void SetCrashHookForTesting(void (*hook)()) noexcept { crash_hook_ = hook; }
+
 private:
     Segment(std::unique_ptr<SharedRegion> region, std::unique_ptr<WriterLock> lock, std::string name,
             SegmentGeometry geometry) noexcept;
@@ -145,6 +150,7 @@ private:
     SegmentHeader* header_;
     unsigned char* slots_;
     std::size_t stride_;
+    void (*crash_hook_)() {nullptr};
 };
 
 // Applies the freshness clamp: the first sequence a reader at `cursor` should
