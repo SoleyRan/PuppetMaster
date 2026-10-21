@@ -58,6 +58,8 @@ void EnumParsersAcceptHumanReadableValues()
     auto transport = config::ParseTransportKind(" FastDDS ");
     assert(transport.ok());
     assert(transport.value() == core::TransportKind::kFastDds);
+    assert(config::ParseTransportKind("shm").value() == core::TransportKind::kIpc);
+    assert(config::ParseTransportKind("ipc").value() == core::TransportKind::kIpc);
 
     auto trigger = config::ParseTriggerKind("task_dependency");
     assert(trigger.ok());

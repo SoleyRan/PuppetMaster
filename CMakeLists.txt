@@ -27,6 +27,7 @@ option(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE
     "Build the opt-in FastDDS cross-process smoke executable." OFF)
 option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
 option(PUPPETMASTER_ENABLE_JSON_CONFIG "Build the optional JSON configuration adapter." OFF)
+option(PUPPETMASTER_ENABLE_SHM "Build the shared-memory transport (Linux and Windows only)." ON)
 set(
     PUPPETMASTER_GOODLOG_GIT_TAG
     "2eaaa2b67388dcfd41eaf8f3dd57e7f987bc31fa"

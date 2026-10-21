@@ -21,6 +21,8 @@ The default build depends only on the C++ standard library:
   for single-process pipelines, scheduler tests, and component tests.
 - `include/puppet_master/transport/fastdds` contains the optional FastDDS
   backend for cross-process and cross-host communication.
+- `include/puppet_master/transport/shm` contains the shared-memory backend for
+  same-host, cross-process communication on Linux and Windows.
 - `include/puppet_master/runtime` contains the runtime context, component
   registry, and algorithm module interface used to assemble middleware
   participants.
@@ -83,6 +85,9 @@ default build remains transport-neutral and does not require FastDDS.
 `PUPPETMASTER_ENABLE_JSON_CONFIG` builds `PuppetMaster::JsonConfigAdapter`,
 which requires an installed `nlohmann_json` package.
 
+`PUPPETMASTER_ENABLE_SHM` (default `ON`) builds `PuppetMaster::ShmAdapter` on
+Linux and Windows. It needs no third-party packages.
+
 `PUPPETMASTER_ENABLE_GOODLOG` builds `PuppetMaster::GoodLogAdapter`. CMake uses
 an installed GoodLog package when available or fetches a pinned revision from
 <https://github.com/SoleyRan/GoodLog>.
@@ -112,8 +117,9 @@ Next phases:
 3. Legacy source cleanup. Remove the uncompiled `src/base`, `src/common`,
    `src/trigger`, and `src/utils` migration areas. Done.
 4. Shared-memory IPC transport. A same-host, cross-process backend behind the
-   existing transport contract, with zero-copy as a design goal. Starts with a
-   design document.
+   existing transport contract, with crash recovery and zero-copy writes
+   through `Writer::WriteWith`. Done. See
+   [Shared-Memory Transport](docs/shm-transport.md).
 5. User-facing capabilities. Typed message readers and writers over the byte
    transport, scheduler starvation protection, and configuration validation and
    launch tooling.
@@ -128,6 +134,7 @@ See [Component Model](docs/component-model.md) for the algorithm module
 interface.
 See [Scheduler](docs/scheduler.md) for trigger dispatch and component execution.
 See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
+See [Shared-Memory Transport](docs/shm-transport.md) for same-host IPC.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [itage_engine Compatibility Facade](docs/compatibility-facade.md) for the

@@ -92,6 +92,38 @@ void PublishSubscribeInvokesCallback()
     assert(message.value().metadata.reception_timestamp != core::TimePoint {});
 }
 
+// The in-memory writer does not override WriteWith, so this covers the
+// default copy-based implementation in transport::Writer.
+void DefaultWriteWithFillsAndPublishes()
+{
+    auto transport = MakeOpenTransport();
+    const auto endpoint = MakeEndpoint("/test/write-with", core::MessagePolicy {});
+    auto reader = transport->CreateReader(endpoint);
+    auto writer = transport->CreateWriter(endpoint);
+    assert(reader.ok() && writer.ok());
+    assert(!transport->capabilities().supports_zero_copy);
+
+    assert(writer.value()->WriteWith(16, [](transport::MutableByteView buffer) {
+        assert(buffer.size() == 16);
+        buffer.data()[0] = 'o';
+        buffer.data()[1] = 'k';
+        return core::Result<std::size_t>(2);
+    }).ok());
+    assert(ReadString(reader.value()) == "ok");
+
+    assert(writer.value()->WriteWith(4, {}).code() == core::StatusCode::kInvalidArgument);
+    assert(writer.value()->WriteWith(4, [](transport::MutableByteView) {
+        return core::Result<std::size_t>(5);
+    }).code() == core::StatusCode::kOutOfRange);
+    assert(writer.value()->WriteWith(4, [](transport::MutableByteView) -> core::Result<std::size_t> {
+        throw std::runtime_error("fill failed");
+    }).code() == core::StatusCode::kInternal);
+    assert(writer.value()->WriteWith(4, [](transport::MutableByteView) {
+        return core::Result<std::size_t>::FromStatus(core::Status::Cancelled("skip"));
+    }).code() == core::StatusCode::kCancelled);
+    assert(reader.value()->Read().status().code() == core::StatusCode::kUnavailable);
+}
+
 void ThrowingReaderCallbackDoesNotEscapeWrite()
 {
     auto transport = MakeOpenTransport();
@@ -269,6 +301,7 @@ void UnboundedQueueKeepsAllMessages()
 int main()
 {
     PublishSubscribeInvokesCallback();
+    DefaultWriteWithFillsAndPublishes();
     ThrowingReaderCallbackDoesNotEscapeWrite();
     LatestReaderKeepsOnlyNewestMessage();
     QueuedReaderKeepsPublishOrder();

@@ -51,6 +51,11 @@ identifies the payload contract used by a reader or writer.
 - `Reader::SetDataAvailableCallback()` lets data-triggered schedulers subscribe
   to availability notifications when a backend supports callbacks.
 - `Writer::Write()` accepts `ByteView` plus optional timestamps.
+- `Writer::WriteWith(capacity, fill)` publishes a message that `fill` writes
+  into a buffer of `capacity` bytes, returning how many it used. A failed or
+  throwing `fill` publishes nothing. Backends with
+  `TransportCapabilities::supports_zero_copy` hand `fill` transport memory; the
+  default implementation fills a temporary buffer and calls `Write()`.
 
 Backends should report unsupported behavior through `core::Status::Unsupported`
 instead of silently pretending to provide stronger delivery guarantees.

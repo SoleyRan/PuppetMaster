@@ -36,6 +36,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/policy_mapping.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/shm/shm_transport.h"
     "${PUPPETMASTER_GENERATED_INCLUDE_DIR}/puppet_master/version.h"
 )
 
@@ -102,6 +103,10 @@ install(
 
 if(PUPPETMASTER_ENABLE_FASTDDS)
     add_subdirectory(transport/fastdds)
+endif()
+
+if(PUPPETMASTER_ENABLE_SHM)
+    add_subdirectory(transport/shm)
 endif()
 
 add_library(puppet_master_chrome_trace_adapter

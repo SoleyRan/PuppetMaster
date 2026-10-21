@@ -305,6 +305,43 @@ public:
         return core::Status::Ok();
     }
 
+    // Forwarded so zero-copy backends keep their in-place path; the default
+    // implementation would route through Write() and copy.
+    core::Status WriteWith(
+        std::size_t capacity,
+        const transport::FillFunction& fill,
+        transport::WriteOptions options = {}) override
+    {
+        if (!fill) {
+            return writer_->WriteWith(capacity, fill, options);
+        }
+        std::size_t published = 0;
+        auto status = writer_->WriteWith(
+            capacity,
+            [&fill, &published](transport::MutableByteView buffer) {
+                auto used = fill(buffer);
+                if (used.ok()) {
+                    published = used.value();
+                }
+                return used;
+            },
+            options);
+        if (!status.ok()) {
+            LogEndpointFailure(
+                observer_,
+                observability::LogLevel::kError,
+                "topic_write_failed",
+                topic_name(),
+                status);
+            return status;
+        }
+
+        if (observer_) {
+            observer_->RecordTopicPublished(topic_name(), published);
+        }
+        return core::Status::Ok();
+    }
+
 private:
     transport::WriterPtr writer_;
     observability::ObserverPtr observer_;
