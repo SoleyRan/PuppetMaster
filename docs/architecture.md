@@ -94,7 +94,8 @@ default-priority events without deadlines remain FIFO.
 
 This is not a real-time scheduler and does not guarantee deadline satisfaction
 or bounded waiting. Sustained higher-priority work can starve lower-priority
-events. Deadline-miss observation compares the end-to-end response time (queue
+events unless `SchedulerOptions::priority_aging_interval` enables priority
+aging. Deadline-miss observation compares the end-to-end response time (queue
 wait plus execution time) with the effective relative budget.
 
 ### Configuration

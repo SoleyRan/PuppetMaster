@@ -63,6 +63,17 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     )
 endif()
 
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_executable(puppet_master_launcher_demo
+        launcher_demo.cpp
+    )
+
+    target_link_libraries(puppet_master_launcher_demo
+        PRIVATE
+            PuppetMaster::JsonConfigAdapter
+    )
+endif()
+
 add_executable(puppet_master_compatibility_facade_demo
     compatibility_facade_demo.cpp
 )

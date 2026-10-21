@@ -93,6 +93,10 @@ if(PUPPETMASTER_BUILD_DEMOS)
     add_subdirectory(demo)
 endif()
 
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_subdirectory(tools)
+endif()
+
 if(PUPPETMASTER_BUILD_TESTS)
     enable_testing()
     add_subdirectory(test)

@@ -1,0 +1,26 @@
+{
+    "scheduler": {"worker_count": 2, "priority_aging_interval_ns": 50000000},
+    "topics": [{
+        "id": "speed",
+        "name": "/vehicle/speed",
+        "message_type": "demo.VehicleSpeed",
+        "encoding": "application/x-puppetmaster-trivial",
+        "message_policy": {"freshness": "queued", "queue_depth": 8}
+    }],
+    "components": [
+        {
+            "name": "speed_sensor",
+            "type": "speed_sensor",
+            "description": "publishes a speed sample every 20 ms",
+            "writers": ["speed"],
+            "triggers": [{"kind": "periodic", "period_ns": 20000000}]
+        },
+        {
+            "name": "speed_monitor",
+            "type": "speed_monitor",
+            "description": "logs each speed sample",
+            "readers": ["speed"],
+            "triggers": [{"kind": "data", "data_topics": ["speed"], "priority": 1}]
+        }
+    ]
+}

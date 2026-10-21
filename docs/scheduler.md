@@ -175,6 +175,29 @@ log with `execution_us`, `queue_wait_us`, `response_us`, and `deadline_us`
 fields. Events without an effective deadline never count as misses.
 
 This policy is not a real-time guarantee. Dispatch cannot preempt a running
-component, deadlines do not force timely execution, and sustained
+component, deadlines do not force timely execution, and by default sustained
 higher-priority work can starve lower-priority events. The scheduler does not
 promise bounded queue waiting or deadline satisfaction.
+
+## Starvation Protection
+
+`SchedulerOptions::priority_aging_interval` enables priority aging:
+
+```cpp
+scheduler::SchedulerOptions options;
+options.priority_aging_interval = std::chrono::milliseconds(10);
+```
+
+While an event waits in the queue, its effective priority rises by one level
+for every full interval, so an event of priority 0 that has waited 50 ms
+competes as priority 5. Aging only changes which queued event is dispatched
+next; it never preempts a running component, and the declared priority still
+appears in trace and log output. Ties on effective priority fall back to the
+due time and then FIFO order, as without aging.
+
+Zero, the default, keeps strict priority order. Choose an interval that is
+long compared with normal queue waits, so aging only matters for events that
+are actually starved; a very short interval makes the queue close to FIFO.
+`SchedulerStats::aged_dispatches` counts dispatches where aging picked an
+event over one with a higher declared priority. In JSON configuration the
+option is `scheduler.priority_aging_interval_ns`.

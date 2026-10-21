@@ -14,7 +14,9 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/logging/log.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/logging/logger.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/compat/itage_facade.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/application.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/configuration.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
@@ -32,6 +34,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/typed.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/inmemory/inmemory_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/options.h"
@@ -43,6 +46,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
 add_library(puppet_master
     puppet_master.cpp
     compat/itage_facade.cpp
+    configuration/application.cpp
     configuration/configuration.cpp
     logging/logging.cpp
     observability/observability.cpp
@@ -261,7 +265,9 @@ install(
 
 if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_library(puppet_master_json_config_adapter
+        configuration/json_launcher.cpp
         configuration/json_loader.cpp
+        "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
     )
 

@@ -67,7 +67,7 @@ const char* kValidConfig = R"json({
         "register_inmemory_transport": true,
         "open_registered_transports": false
     },
-    "scheduler": {"worker_count": 3},
+    "scheduler": {"worker_count": 3, "priority_aging_interval_ns": 5000000},
     "topics": [{
         "id": "speed",
         "name": "/vehicle/speed",
@@ -103,6 +103,7 @@ void ValidJsonBuildsProject()
     assert(!project.runtime_options.open_registered_transports);
     assert(project.ToSchedulerOptions().ok());
     assert(project.ToSchedulerOptions().value().worker_count == 3);
+    assert(project.ToSchedulerOptions().value().priority_aging_interval == std::chrono::milliseconds(5));
     assert(project.topics.size() == 1);
     assert(project.topics.front().message_policy.freshness == core::FreshnessPolicy::kQueued);
     assert(project.topics.front().message_policy.queue_depth == 8);
