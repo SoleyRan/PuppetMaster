@@ -16,7 +16,7 @@ The default build depends only on the C++ standard library:
 - `include/puppet_master/core` contains transport-neutral core types, message
   policies, and the common error model.
 - `include/puppet_master/transport` contains backend-neutral reader, writer,
-  message, and registry abstractions.
+  message, and registry abstractions, plus typed readers and writers.
 - `include/puppet_master/transport/inmemory` contains the local pub/sub backend
   for single-process pipelines, scheduler tests, and component tests.
 - `include/puppet_master/transport/fastdds` contains the optional FastDDS
@@ -120,9 +120,10 @@ Next phases:
    existing transport contract, with crash recovery and zero-copy writes
    through `Writer::WriteWith`. Done. See
    [Shared-Memory Transport](docs/shm-transport.md).
-5. User-facing capabilities. Typed message readers and writers over the byte
-   transport, scheduler starvation protection, and configuration validation and
-   launch tooling.
+5. User-facing capabilities. In progress:
+   - Typed message readers and writers over the byte transport. Done.
+   - Scheduler starvation protection.
+   - Configuration validation and launch tooling.
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -135,6 +136,8 @@ interface.
 See [Scheduler](docs/scheduler.md) for trigger dispatch and component execution.
 See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
 See [Shared-Memory Transport](docs/shm-transport.md) for same-host IPC.
+See [Typed Messages](docs/typed-messages.md) for struct and codec-based
+endpoints.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [itage_engine Compatibility Facade](docs/compatibility-facade.md) for the

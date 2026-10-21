@@ -46,6 +46,20 @@ add_test(
     COMMAND puppet_master_transport_abstraction_test
 )
 
+add_executable(puppet_master_typed_transport_test
+    typed_transport_test.cpp
+)
+
+target_link_libraries(puppet_master_typed_transport_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.typed_transport
+    COMMAND puppet_master_typed_transport_test
+)
+
 add_executable(puppet_master_inmemory_transport_test
     inmemory_transport_test.cpp
 )
