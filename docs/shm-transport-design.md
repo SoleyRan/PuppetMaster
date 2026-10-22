@@ -113,6 +113,7 @@ SegmentHeader (one per topic)
   u32 header_size
   u64 slot_payload_size
   u32 slot_count
+  u32 message_version    MessageDescriptor::version (0 = unversioned)
   char topic_name[256]   full name, detects hash collisions
   char type_name[256]
   char encoding[256]

@@ -41,7 +41,9 @@ transport interface.
 - `MessageDescriptor`
 
 The topic spec selects the transport kind and `MessagePolicy`. The descriptor
-identifies the payload contract used by a reader or writer.
+identifies the payload contract used by a reader or writer: type name,
+encoding, and an optional version. Every backend rejects an endpoint whose
+descriptor differs from the one already open on that topic.
 
 ## Reader And Writer
 

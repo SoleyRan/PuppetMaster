@@ -71,7 +71,8 @@ Each topic is a fixed ring of `slot_count` slots of `slot_payload_size` bytes.
 The default is 64 KiB x 16 slots, about 1 MiB per topic. Size large-payload
 topics (point clouds, images) explicitly.
 
-Every process on a topic must use the same geometry and message descriptor.
+Every process on a topic must use the same geometry and message descriptor
+(type name, encoding, and version).
 The first process creates the segment; a later process with different values
 gets `FailedPrecondition` (geometry) or `InvalidArgument` (descriptor) from
 `CreateReader` or `CreateWriter`, with the segment name in the message.

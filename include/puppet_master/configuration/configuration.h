@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -27,6 +28,7 @@ struct TopicConfig {
     std::string message_type;
     std::string encoding {"application/octet-stream"};
     core::MessagePolicy message_policy;
+    std::uint32_t message_version {0};  // transport::MessageDescriptor::version
 
     core::Status Validate() const;
     core::Result<transport::EndpointConfig> ToEndpointConfig() const;

@@ -95,9 +95,43 @@ struct puppet_master::transport::Codec<Label> {
 };
 ```
 
-`TypeName` and `Encoding` become the endpoint's `MessageDescriptor`. Wrapping a
-schema library such as Protocol Buffers or FlatBuffers is a codec like this one;
-PuppetMaster does not depend on any of them.
+`TypeName`, `Encoding`, and the optional `static std::uint32_t Version()`
+become the endpoint's `MessageDescriptor`. Wrapping a schema library such as
+Protocol Buffers or FlatBuffers is a codec like this one; PuppetMaster does not
+depend on any of them.
+
+## Versions
+
+When processes are built separately, for example by different teams, a struct
+can change on one side only. If its size changes, `TrivialCodec` reports
+`DataLoss` on every message; if only the field order or meaning changes, it
+decodes garbage silently. Give such types a version and raise it on every
+change that old readers cannot decode:
+
+```cpp
+template <>
+struct puppet_master::transport::MessageTypeName<WheelSpeed> {
+    static constexpr const char* value = "vehicle.WheelSpeed";
+    static constexpr std::uint32_t version = 2;
+};
+```
+
+A custom codec returns it from `Version()` instead. The version is part of
+`MessageDescriptor`, and endpoints on one topic must agree on type name,
+encoding, and version, so a mismatch is refused when the endpoint is created,
+not discovered in the data:
+
+- `TypedReader`/`TypedWriter::Wrap` (and `MakeTypedReader`/`MakeTypedWriter`)
+  reject an endpoint whose configured version differs from the one compiled
+  into the binary.
+- Transports reject a second version on a live topic. On the shared-memory
+  transport this holds across processes: the segment records the creator's
+  version, and the error names both, for example `vehicle.WheelSpeed v2
+  (...), not vehicle.WheelSpeed v3 (...)`.
+
+In configuration, the topic's `message_version` must match. Version `0` means
+unversioned and is the default, so existing types keep working; unversioned
+and versioned endpoints do not match each other.
 
 ## Behavior
 

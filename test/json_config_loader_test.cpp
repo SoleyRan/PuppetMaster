@@ -248,6 +248,7 @@ void JsonTopicDescriptorsAreValidated()
     for (const auto* json : {
              R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Distance","encoding":"text/plain"}]})json",
              R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","encoding":"application/json"}]})json",
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","message_version":1,"encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","message_version":2,"encoding":"text/plain"}]})json",
          }) {
         auto conflict = config::ParseJsonConfig(json);
         assert(!conflict.ok());
@@ -263,6 +264,25 @@ void JsonTopicDescriptorsAreValidated()
     ]})json");
     assert(aliases.ok());
     assert(aliases.value().topics.size() == 3);
+
+    auto versioned = config::ParseJsonConfig(R"json({"topics":[
+        {"id":"odometry","name":"/odometry","message_type":"demo.Odometry","message_version":3,"encoding":"text/plain"}
+    ]})json");
+    assert(versioned.ok());
+    assert(versioned.value().topics.front().message_version == 3);
+    auto endpoint = versioned.value().BuildEndpoint("odometry");
+    assert(endpoint.ok() && endpoint.value().message.version == 3);
+    assert(versioned.value().FindTopic("odometry").value().message_version == 3);
+
+    for (const auto* json : {
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":-1}]})json",
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":"2"}]})json",
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":4294967296}]})json",
+         }) {
+        auto invalid = config::ParseJsonConfig(json);
+        assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+        assert(invalid.status().message().find("message_version") != std::string::npos);
+    }
 }
 
 void InvalidJsonIsRejected()

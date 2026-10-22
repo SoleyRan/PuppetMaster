@@ -158,11 +158,12 @@ ProjectConfig Decode(const Json& root)
     std::size_t index = 0;
     for (const auto& value : Array(root, "topics", "$")) {
         const auto path = "$.topics[" + std::to_string(index++) + "]";
-        CheckObject(value, path, {"id", "name", "transport", "message_type", "encoding", "message_policy"});
+        CheckObject(value, path, {"id", "name", "transport", "message_type", "message_version", "encoding", "message_policy"});
         TopicConfig topic;
         Read(value, "id", topic.id, path);
         Read(value, "name", topic.name, path);
         Read(value, "message_type", topic.message_type, path);
+        Read(value, "message_version", topic.message_version, path);
         Read(value, "encoding", topic.encoding, path);
         ReadEnum(value, "transport", topic.transport, ParseTransportKind, path);
         if (value.contains("message_policy")) {

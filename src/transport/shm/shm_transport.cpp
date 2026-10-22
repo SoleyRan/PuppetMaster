@@ -28,11 +28,6 @@ core::TimePoint Now()
     return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
 }
 
-bool IsSameDescriptor(const MessageDescriptor& lhs, const MessageDescriptor& rhs)
-{
-    return lhs.type_name == rhs.type_name && lhs.encoding == rhs.encoding;
-}
-
 std::uint64_t ReaderDepth(const core::MessagePolicy& policy)
 {
     return policy.freshness == core::FreshnessPolicy::kLatest ? 1 : policy.queue_depth;
@@ -541,9 +536,10 @@ core::Result<std::shared_ptr<TopicState>> GetOrOpenTopic(
     const auto& key = endpoint.topic.name.str();
     const auto found = topics.find(key);
     if (found != topics.end()) {
-        if (!IsSameDescriptor(found->second->descriptor(), endpoint.message)) {
+        if (found->second->descriptor() != endpoint.message) {
             return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm topic already exists with a different message descriptor: " + key));
+                "shm topic " + key + " carries " + found->second->descriptor().ToString() + ", not "
+                + endpoint.message.ToString()));
         }
         return ResultType(found->second);
     }

@@ -56,7 +56,7 @@ struct SegmentHeader {
     std::uint64_t slot_payload_size;
     std::uint64_t slot_stride;
     std::uint32_t slot_count;
-    std::uint32_t reserved0;
+    std::uint32_t message_version;  // MessageDescriptor::version; was reserved (always 0) before it
     char topic_name[kNameCapacity];
     char type_name[kNameCapacity];
     char encoding[kNameCapacity];

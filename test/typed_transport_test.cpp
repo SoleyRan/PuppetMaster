@@ -61,6 +61,44 @@ struct puppet_master::transport::Codec<Label> {
     }
 };
 
+// Two releases of one wire type: same name, different versions.
+struct OdometryV2 {
+    double distance_m;
+};
+
+struct OdometryV3 {
+    double distance_m;
+    double heading_rad;
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<OdometryV2> {
+    static constexpr const char* value = "test.Odometry";
+    static constexpr std::uint32_t version = 2;
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<OdometryV3> {
+    static constexpr const char* value = "test.Odometry";
+    static constexpr std::uint32_t version = 3;
+};
+
+// A custom codec declares its version through Version(), overriding the one
+// from MessageTypeName.
+struct Tag {
+    std::uint8_t id;
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<Tag> {
+    static constexpr const char* value = "test.Tag";
+};
+
+template <>
+struct puppet_master::transport::Codec<Tag> : puppet_master::transport::TrivialCodec<Tag> {
+    static std::uint32_t Version() { return 7; }
+};
+
 namespace {
 
 core::TopicSpec Topic(const std::string& name, core::MessagePolicy policy = {})
@@ -180,6 +218,35 @@ void WrapRejectsMismatchedEndpoints()
     assert(failed.status().code() == core::StatusCode::kNotFound);
 }
 
+void VersionsSeparateReleases()
+{
+    assert(transport::DescriptorFor<VehicleSpeed>().version == 0);
+    assert(transport::DescriptorFor<OdometryV2>().version == 2);
+    assert(transport::DescriptorFor<OdometryV3>().version == 3);
+    assert(transport::DescriptorFor<Tag>().version == 7);
+    assert(transport::DescriptorFor<Label>().version == 0);  // codec without Version()
+    assert(transport::DescriptorFor<OdometryV2>().ToString()
+           == "test.Odometry v2 (application/x-puppetmaster-trivial)");
+    assert(transport::DescriptorFor<VehicleSpeed>().ToString()
+           == "test.VehicleSpeed (application/x-puppetmaster-trivial)");
+
+    // A binary built for v3 refuses an endpoint configured for v2.
+    auto shared = MakeTransport();
+    const auto v2_endpoint = transport::EndpointFor<OdometryV2>(Topic("/odometry"));
+    auto v2_writer = transport::MakeTypedWriter<OdometryV2>(shared->CreateWriter(v2_endpoint));
+    assert(v2_writer.ok());
+    auto v3_reader = transport::MakeTypedReader<OdometryV3>(shared->CreateReader(v2_endpoint));
+    assert(v3_reader.status().code() == core::StatusCode::kInvalidArgument);
+    assert(v3_reader.status().message().find("test.Odometry v2") != std::string::npos);
+    assert(v3_reader.status().message().find("test.Odometry v3") != std::string::npos);
+
+    // The transport also refuses a second version on a live topic.
+    const auto v3_endpoint = transport::EndpointFor<OdometryV3>(Topic("/odometry"));
+    auto conflicting = shared->CreateReader(v3_endpoint);
+    assert(conflicting.status().code() == core::StatusCode::kInvalidArgument);
+    assert(conflicting.status().message().find("test.Odometry v2") != std::string::npos);
+}
+
 void CallbacksAndRuntimeIntegration()
 {
     auto context = runtime::RuntimeContext::Create();
@@ -219,6 +286,7 @@ int main()
     CustomCodecRoundTripAndErrors();
     TrivialDecodeRejectsWrongSize();
     WrapRejectsMismatchedEndpoints();
+    VersionsSeparateReleases();
     CallbacksAndRuntimeIntegration();
     return 0;
 }

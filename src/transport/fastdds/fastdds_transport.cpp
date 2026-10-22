@@ -58,11 +58,6 @@ core::TimePoint Now()
     return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
 }
 
-bool IsSameDescriptor(const MessageDescriptor& lhs, const MessageDescriptor& rhs)
-{
-    return lhs.type_name == rhs.type_name && lhs.encoding == rhs.encoding;
-}
-
 void ApplyEndpointQos(const QosProfile& profile,
                       dds::ReliabilityQosPolicy& reliability,
                       dds::HistoryQosPolicy& history,
@@ -360,9 +355,10 @@ struct FastDdsTransport::Impl {
 
         auto found = topics.find(topic_name);
         if (found != topics.end()) {
-            if (!IsSameDescriptor(found->second.message, endpoint.message)) {
+            if (found->second.message != endpoint.message) {
                 return core::Result<dds::Topic*>::FromStatus(core::Status::InvalidArgument(
-                    "topic already exists with a different message descriptor"));
+                    "topic " + topic_name + " carries " + found->second.message.ToString() + ", not "
+                    + endpoint.message.ToString()));
             }
             return core::Result<dds::Topic*>(found->second.topic);
         }

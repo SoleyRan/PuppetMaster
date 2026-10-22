@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <puppet_master/runtime/context.h>
 #include <puppet_master/transport/shm/shm_transport.h>
@@ -232,6 +233,33 @@ void DescriptorConflicts()
     assert(third->CreateReader(Endpoint(cleanup.topic)).status().code() == core::StatusCode::kFailedPrecondition);
 }
 
+void VersionConflicts()
+{
+    const TopicCleanup cleanup {UniqueTopic("version")};
+    auto v2 = Endpoint(cleanup.topic);
+    v2.message.version = 2;
+    auto v3 = v2;
+    v3.message.version = 3;
+
+    auto first = MakeTransport();
+    assert(first->CreateWriter(v2).ok());
+    assert(first->CreateReader(v2).ok());
+    auto same_process = first->CreateReader(v3);
+    assert(same_process.status().code() == core::StatusCode::kInvalidArgument);
+    assert(same_process.status().message().find("test.Bytes v2") != std::string::npos);
+
+    // Across transports the segment header carries the version, and the error
+    // names both sides.
+    auto second = MakeTransport();
+    auto newer = second->CreateReader(v3);
+    assert(newer.status().code() == core::StatusCode::kInvalidArgument);
+    assert(newer.status().message().find("test.Bytes v2") != std::string::npos);
+    assert(newer.status().message().find("test.Bytes v3") != std::string::npos);
+    auto unversioned = second->CreateReader(Endpoint(cleanup.topic));
+    assert(unversioned.status().code() == core::StatusCode::kInvalidArgument);
+    assert(second->CreateReader(v2).ok());
+}
+
 void BlockingReadAndCallbacks()
 {
     const TopicCleanup cleanup {UniqueTopic("blocking")};
@@ -420,9 +448,13 @@ void WriteWithFillsInPlace()
 #ifdef _WIN32
 using ChildHandle = HANDLE;
 
-ChildHandle StartChild(const std::string& executable, const std::string& topic)
+ChildHandle StartChild(const std::string& executable, const std::vector<std::string>& arguments)
 {
-    std::string command = "\"" + executable + "\" --publisher " + topic;
+    // Test arguments are plain tokens, so quoting the executable is enough.
+    std::string command = "\"" + executable + "\"";
+    for (const auto& argument : arguments) {
+        command += " " + argument;
+    }
     STARTUPINFOA startup {};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process {};
@@ -448,12 +480,18 @@ int WaitChild(ChildHandle child)
 #else
 using ChildHandle = pid_t;
 
-ChildHandle StartChild(const std::string& executable, const std::string& topic)
+ChildHandle StartChild(const std::string& executable, const std::vector<std::string>& arguments)
 {
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(executable.c_str()));
+    for (const auto& argument : arguments) {
+        argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
     const pid_t pid = fork();
     assert(pid >= 0);
     if (pid == 0) {
-        execl(executable.c_str(), executable.c_str(), "--publisher", topic.c_str(), nullptr);
+        execv(executable.c_str(), argv.data());
         std::_Exit(127);
     }
     return pid;
@@ -518,6 +556,36 @@ int RunPublisher(const std::string& topic)
     return 0;
 }
 
+// Child: open `topic` as a reader declaring message `version`. Exits 0 when it
+// connects, 10 when the segment rejects the version, other codes otherwise.
+int RunVersionProbe(const std::string& topic, const std::string& version)
+{
+    auto endpoint = Endpoint(topic);
+    endpoint.message.version = static_cast<std::uint32_t>(std::stoul(version));
+    auto shm_transport = MakeTransport();
+    auto reader = shm_transport->CreateReader(endpoint);
+    if (reader.ok()) {
+        return 0;
+    }
+    return reader.status().code() == core::StatusCode::kInvalidArgument ? 10 : 11;
+}
+
+// A process built against another version of a message must not connect to a
+// segment created by this one.
+void CrossProcessVersionMismatch(const std::string& executable)
+{
+    const TopicCleanup cleanup {UniqueTopic("cross-version")};
+    auto endpoint = Endpoint(cleanup.topic);
+    endpoint.message.version = 2;
+    auto shm_transport = MakeTransport();
+    auto writer = shm_transport->CreateWriter(endpoint);  // keeps the segment alive on Windows
+    assert(writer.ok());
+
+    assert(WaitChild(StartChild(executable, {"--version-probe", cleanup.topic, "3"})) == 10);
+    assert(WaitChild(StartChild(executable, {"--version-probe", cleanup.topic, "0"})) == 10);
+    assert(WaitChild(StartChild(executable, {"--version-probe", cleanup.topic, "2"})) == 0);
+}
+
 void CrossProcessDelivery(const std::string& executable)
 {
     const auto base = UniqueTopic("cross");
@@ -528,7 +596,7 @@ void CrossProcessDelivery(const std::string& executable)
     auto ack = shm_transport->CreateWriter(Endpoint(ack_topic.topic));
     assert(reader.ok() && ack.ok());
 
-    auto child = StartChild(executable, base);
+    auto child = StartChild(executable, {"--publisher", base});
     int next = 0;
     bool started = false;
     while (next < kCrossProcessMessages) {
@@ -557,6 +625,9 @@ void CrossProcessDelivery(const std::string& executable)
 
 int main(int argc, char** argv)
 {
+    if (argc == 4 && std::string(argv[1]) == "--version-probe") {
+        return RunVersionProbe(argv[2], argv[3]);
+    }
     if (argc == 3 && std::string(argv[1]) == "--publisher") {
         return RunPublisher(argv[2]);
     }
@@ -567,12 +638,14 @@ int main(int argc, char** argv)
     RoundTripPreservesMetadata();
     FanoutAndFreshness();
     DescriptorConflicts();
+    VersionConflicts();
     BlockingReadAndCallbacks();
     CloseInvalidatesHandles();
     ReleaseFromCallback();
     RuntimeRegistration();
     WriteWithFillsInPlace();
     CrossProcessDelivery(argv[0]);
+    CrossProcessVersionMismatch(argv[0]);
     std::cout << "shm transport tests passed\n";
     return 0;
 }

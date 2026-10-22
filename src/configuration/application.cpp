@@ -82,7 +82,11 @@ std::string DescribeProject(const ProjectConfig& project)
     for (const auto& topic : project.topics) {
         const auto& policy = topic.message_policy;
         text << "  " << topic.id << " -> " << topic.name << " [" << core::ToString(topic.transport) << ", "
-             << topic.message_type << ", " << core::ToString(policy.freshness);
+             << topic.message_type;
+        if (topic.message_version != 0) {
+            text << " v" << topic.message_version;
+        }
+        text << ", " << core::ToString(policy.freshness);
         if (policy.freshness == core::FreshnessPolicy::kQueued) {
             text << " depth " << policy.queue_depth;
         }

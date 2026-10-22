@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -30,6 +31,11 @@ namespace puppet_master::transport {
 // value`. The name lands in MessageDescriptor::type_name, so endpoints for
 // different message types cannot share a topic by accident. The primary
 // template is empty so a missing specialization is detected, not an error.
+//
+// An optional `static constexpr std::uint32_t version` becomes
+// MessageDescriptor::version. Raise it whenever the struct changes in a way
+// that old readers would misread, so processes built from different releases
+// refuse to connect.
 template <typename T>
 struct MessageTypeName {};
 
@@ -40,6 +46,22 @@ struct HasMessageTypeName : std::false_type {};
 
 template <typename T>
 struct HasMessageTypeName<T, std::void_t<decltype(MessageTypeName<T>::value)>> : std::true_type {};
+
+template <typename T, typename = void>
+struct MessageTypeVersion {
+    static constexpr std::uint32_t value = 0;
+};
+
+template <typename T>
+struct MessageTypeVersion<T, std::void_t<decltype(MessageTypeName<T>::version)>> {
+    static constexpr std::uint32_t value = MessageTypeName<T>::version;
+};
+
+template <typename C, typename = void>
+struct HasCodecVersion : std::false_type {};
+
+template <typename C>
+struct HasCodecVersion<C, std::void_t<decltype(C::Version())>> : std::true_type {};
 
 }  // namespace detail
 
@@ -55,6 +77,7 @@ struct TrivialCodec {
 
     static std::string TypeName() { return MessageTypeName<T>::value; }
     static std::string Encoding() { return "application/x-puppetmaster-trivial"; }
+    static std::uint32_t Version() { return detail::MessageTypeVersion<T>::value; }
 
     static std::size_t MaxSize(const T&) { return sizeof(T); }
 
@@ -86,6 +109,7 @@ struct TrivialCodec {
 //
 //     static std::string TypeName();
 //     static std::string Encoding();
+//     static std::uint32_t Version();          // optional; 0 when absent
 //     static std::size_t MaxSize(const T&);   // upper bound on Encode's output
 //     static core::Result<std::size_t> Encode(const T&, MutableByteView);
 //     static core::Result<T> Decode(ByteView);
@@ -99,7 +123,11 @@ struct Codec : TrivialCodec<T> {};
 template <typename T>
 MessageDescriptor DescriptorFor()
 {
-    return MessageDescriptor {Codec<T>::TypeName(), Codec<T>::Encoding()};
+    std::uint32_t version = 0;
+    if constexpr (detail::HasCodecVersion<Codec<T>>::value) {
+        version = Codec<T>::Version();
+    }
+    return MessageDescriptor {Codec<T>::TypeName(), Codec<T>::Encoding(), version};
 }
 
 // Builds an endpoint for T on `topic`.
@@ -114,10 +142,9 @@ template <typename T>
 core::Status ValidateTypedDescriptor(const MessageDescriptor& descriptor)
 {
     const auto expected = DescriptorFor<T>();
-    if (descriptor.type_name != expected.type_name || descriptor.encoding != expected.encoding) {
+    if (descriptor != expected) {
         return core::Status::InvalidArgument(
-            "endpoint carries " + descriptor.type_name + " (" + descriptor.encoding + "), not "
-            + expected.type_name + " (" + expected.encoding + ")");
+            "endpoint carries " + descriptor.ToString() + ", but this binary was built for " + expected.ToString());
     }
     return core::Status::Ok();
 }

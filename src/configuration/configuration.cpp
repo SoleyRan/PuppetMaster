@@ -150,8 +150,7 @@ bool SameEndpoints(
         if (lhs[i].topic.name != rhs[i].topic.name
             || lhs[i].topic.transport != rhs[i].topic.transport
             || !SamePolicy(lhs[i].topic.message_policy, rhs[i].topic.message_policy)
-            || lhs[i].message.type_name != rhs[i].message.type_name
-            || lhs[i].message.encoding != rhs[i].message.encoding) {
+            || lhs[i].message != rhs[i].message) {
             return false;
         }
     }
@@ -221,7 +220,7 @@ core::Result<transport::EndpointConfig> TopicConfig::ToEndpointConfig() const
 
     transport::EndpointConfig endpoint {
         core::TopicSpec {topic_name.value(), transport, message_policy},
-        transport::MessageDescriptor {message_type, encoding}
+        transport::MessageDescriptor {message_type, encoding, message_version}
     };
 
     status = endpoint.Validate();
@@ -474,7 +473,8 @@ core::Status ProjectConfig::Validate() const
         const auto inserted = declared_topics.emplace(key, &topic);
         if (!inserted.second) {
             const auto& first = *inserted.first->second;
-            if (first.message_type != topic.message_type || first.encoding != topic.encoding) {
+            if (first.message_type != topic.message_type || first.encoding != topic.encoding
+                || first.message_version != topic.message_version) {
                 return core::Status::InvalidArgument(
                     "topic ids " + first.id + " and " + topic.id + " declare conflicting message descriptors for "
                     + std::string(core::ToString(topic.transport)) + " topic " + topic.name);

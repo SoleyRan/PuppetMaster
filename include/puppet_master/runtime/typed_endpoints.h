@@ -27,21 +27,19 @@ core::Result<transport::EndpointConfig> FindEndpointForType(
     const auto expected = transport::DescriptorFor<T>();
     const auto found = std::find_if(endpoints.begin(), endpoints.end(),
         [&expected](const transport::EndpointConfig& endpoint) {
-            return endpoint.message.type_name == expected.type_name
-                && endpoint.message.encoding == expected.encoding;
+            return endpoint.message == expected;
         });
     if (found == endpoints.end()) {
         return core::Result<transport::EndpointConfig>::FromStatus(core::Status::NotFound(
-            std::string("component has no ") + endpoint_kind + " for " + expected.type_name));
+            std::string("component has no ") + endpoint_kind + " for " + expected.ToString()));
     }
     const auto again = std::find_if(std::next(found), endpoints.end(),
         [&expected](const transport::EndpointConfig& endpoint) {
-            return endpoint.message.type_name == expected.type_name
-                && endpoint.message.encoding == expected.encoding;
+            return endpoint.message == expected;
         });
     if (again != endpoints.end()) {
         return core::Result<transport::EndpointConfig>::FromStatus(core::Status::InvalidArgument(
-            std::string("component has several ") + endpoint_kind + "s for " + expected.type_name + " ("
+            std::string("component has several ") + endpoint_kind + "s for " + expected.ToString() + " ("
             + found->topic.name.str() + ", " + again->topic.name.str() + "); create them by topic instead"));
     }
     return core::Result<transport::EndpointConfig>(*found);
