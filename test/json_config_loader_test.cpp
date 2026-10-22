@@ -248,6 +248,7 @@ void JsonTopicDescriptorsAreValidated()
     for (const auto* json : {
              R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Distance","encoding":"text/plain"}]})json",
              R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","encoding":"application/json"}]})json",
+             R"json({"topics":[{"id":"first","name":"/shared","message_type":"demo.Speed","message_version":1,"encoding":"text/plain"},{"id":"second","name":"/shared","message_type":"demo.Speed","message_version":2,"encoding":"text/plain"}]})json",
          }) {
         auto conflict = config::ParseJsonConfig(json);
         assert(!conflict.ok());
@@ -263,6 +264,25 @@ void JsonTopicDescriptorsAreValidated()
     ]})json");
     assert(aliases.ok());
     assert(aliases.value().topics.size() == 3);
+
+    auto versioned = config::ParseJsonConfig(R"json({"topics":[
+        {"id":"odometry","name":"/odometry","message_type":"demo.Odometry","message_version":3,"encoding":"text/plain"}
+    ]})json");
+    assert(versioned.ok());
+    assert(versioned.value().topics.front().message_version == 3);
+    auto endpoint = versioned.value().BuildEndpoint("odometry");
+    assert(endpoint.ok() && endpoint.value().message.version == 3);
+    assert(versioned.value().FindTopic("odometry").value().message_version == 3);
+
+    for (const auto* json : {
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":-1}]})json",
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":"2"}]})json",
+             R"json({"topics":[{"id":"a","name":"/a","message_type":"t","message_version":4294967296}]})json",
+         }) {
+        auto invalid = config::ParseJsonConfig(json);
+        assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+        assert(invalid.status().message().find("message_version") != std::string::npos);
+    }
 }
 
 void InvalidJsonIsRejected()
@@ -343,6 +363,33 @@ void InvalidJsonIsRejected()
     assert(distinct_triggers.ok());
 }
 
+void JsonComponentParametersAreLoaded()
+{
+    auto parsed = config::ParseJsonConfig(R"json({"components":[{"name":"monitor","parameters":{
+        "label": "front", "limit": 30, "gain": 0.5, "enabled": true}}]})json");
+    assert(parsed.ok());
+    const auto& parameters = parsed.value().components.front().parameters;
+    assert(parameters.size() == 4);
+    assert(runtime::GetParameter(parameters, "label", "").value() == "front");
+    assert(runtime::GetParameter(parameters, "limit", 0).value() == 30);
+    assert(runtime::GetParameter(parameters, "gain", 0.0).value() == 0.5);
+    assert(runtime::GetParameter(parameters, "enabled", false).value());
+
+    auto spec = parsed.value().BuildComponentSpec("monitor");
+    assert(spec.ok() && spec.value().parameters == parameters);
+
+    for (const auto* json : {
+             R"json({"components":[{"name":"a","parameters":[1]}]})json",
+             R"json({"components":[{"name":"a","parameters":{"nested":{"x":1}}}]})json",
+             R"json({"components":[{"name":"a","parameters":{"list":[1,2]}}]})json",
+             R"json({"components":[{"name":"a","parameters":{"none":null}}]})json",
+         }) {
+        auto invalid = config::ParseJsonConfig(json);
+        assert(invalid.status().code() == core::StatusCode::kInvalidArgument);
+        assert(invalid.status().message().find("parameters") != std::string::npos);
+    }
+}
+
 void JsonFileIsLoaded()
 {
     const auto path = std::filesystem::temp_directory_path() / "puppet_master_json_config_test.json";
@@ -369,6 +416,7 @@ int main()
     OmittedSchedulingFieldsUseDefaults();
     JsonTopicDescriptorsAreValidated();
     InvalidJsonIsRejected();
+    JsonComponentParametersAreLoaded();
     JsonFileIsLoaded();
     return 0;
 }

@@ -86,6 +86,20 @@ std::string RemoveHint(const std::string& name)
     return " (segment " + name + "; remove it with shm::RemoveSegment if it is stale)";
 }
 
+// Reads a NUL-terminated header field without trusting its terminator.
+std::string LoadName(const char (&field)[kNameCapacity])
+{
+    const void* end = std::memchr(field, '\0', kNameCapacity);
+    const auto length = end == nullptr ? kNameCapacity : static_cast<std::size_t>(static_cast<const char*>(end) - field);
+    return std::string(field, length);
+}
+
+// The descriptor recorded by the segment creator, for error messages.
+MessageDescriptor StoredDescriptor(const SegmentHeader& header)
+{
+    return MessageDescriptor {LoadName(header.type_name), LoadName(header.encoding), header.message_version};
+}
+
 std::uint32_t Kind(std::uint32_t state)
 {
     return state & kParticipantKindMask;
@@ -166,6 +180,7 @@ core::Result<std::shared_ptr<Segment>> Segment::Open(
         StoreName(header->topic_name, identity.topic);
         StoreName(header->type_name, identity.descriptor.type_name);
         StoreName(header->encoding, identity.descriptor.encoding);
+        header->message_version = identity.descriptor.version;
         auto status = WriterLock::InitializeStorage(header->lock_storage);
         if (!status.ok()) {
             // Unlink so the next opener does not wait for a magic that never comes.
@@ -205,9 +220,11 @@ core::Result<std::shared_ptr<Segment>> Segment::Open(
                 + std::to_string(geometry.slot_count) + RemoveHint(name)));
         }
         if (!NameEquals(header->type_name, identity.descriptor.type_name)
-            || !NameEquals(header->encoding, identity.descriptor.encoding)) {
+            || !NameEquals(header->encoding, identity.descriptor.encoding)
+            || header->message_version != identity.descriptor.version) {
             return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm topic already exists with a different message descriptor: " + identity.topic));
+                "shm topic " + identity.topic + " carries " + StoredDescriptor(*header).ToString() + ", not "
+                + identity.descriptor.ToString() + RemoveHint(name)));
         }
         if (region.value()->size() < size) {
             return ResultType::FromStatus(core::Status::FailedPrecondition(

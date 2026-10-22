@@ -41,6 +41,34 @@ auto status = shm::RegisterTransport(*runtime, name, options);
 Topics use `core::TransportKind::kIpc`. In configuration files the transport
 may be written as `"ipc"` or `"shm"`.
 
+## Configuration
+
+In a configured application, the domain and ring sizes come from each ipc
+topic's `transport_parameters`, normally set by a deployment file (see
+[Deployment Files](configuration.md#deployment-files)):
+
+| Key | Meaning |
+|---|---|
+| `slot_payload_size` | max bytes per message on this topic |
+| `slot_count` | ring capacity of this topic |
+| `domain_id` | `Options::domain_id`; every topic that sets it must agree |
+
+`OptionsFromProject` turns them into `Options`, starting from a base you
+pass. Register it through the project hook so it sees the loaded project:
+
+```cpp
+options.register_project_transports = [](runtime::RuntimeContext& context, const config::ProjectConfig& project) {
+    auto shm_options = shm::OptionsFromProject(project);
+    if (!shm_options.ok()) {
+        return shm_options.status();  // unknown key or invalid value, naming the topic
+    }
+    return shm::RegisterTransport(context, core::TransportName::Unsafe("shm"), std::move(shm_options).value());
+};
+```
+
+Because every process reads the same deployment file, they agree on the
+geometry of each topic.
+
 ## Zero-Copy Writes
 
 `WriteWith` hands the producer the shared-memory slot itself, so a large
@@ -71,7 +99,8 @@ Each topic is a fixed ring of `slot_count` slots of `slot_payload_size` bytes.
 The default is 64 KiB x 16 slots, about 1 MiB per topic. Size large-payload
 topics (point clouds, images) explicitly.
 
-Every process on a topic must use the same geometry and message descriptor.
+Every process on a topic must use the same geometry and message descriptor
+(type name, encoding, and version).
 The first process creates the segment; a later process with different values
 gets `FailedPrecondition` (geometry) or `InvalidArgument` (descriptor) from
 `CreateReader` or `CreateWriter`, with the segment name in the message.

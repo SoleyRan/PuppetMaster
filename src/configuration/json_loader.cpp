@@ -2,13 +2,19 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <limits>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -106,10 +112,253 @@ const Json& Array(const Json& object, const char* key, const std::string& path)
     return *found;
 }
 
-ProjectConfig Decode(const Json& root)
+// An object of scalar settings, stored as text; see runtime/parameters.h.
+runtime::ParameterMap ReadParameters(const Json& object, const std::string& path, const char* key = "parameters")
 {
-    CheckObject(root, "$", {"runtime", "scheduler", "topics", "components"});
-    ProjectConfig project;
+    runtime::ParameterMap parameters;
+    const auto found = object.find(key);
+    if (found == object.end()) {
+        return parameters;
+    }
+    const auto field = path + "." + key;
+    if (!found->is_object()) {
+        throw std::invalid_argument(field + " must be an object");
+    }
+    for (auto it = found->begin(); it != found->end(); ++it) {
+        if (it->is_string()) {
+            parameters.emplace(it.key(), it->get<std::string>());
+        } else if (it->is_number() || it->is_boolean()) {
+            parameters.emplace(it.key(), it->dump());
+        } else {
+            throw std::invalid_argument(field + "." + it.key() + " must be a string, number, or boolean");
+        }
+    }
+    return parameters;
+}
+
+// Fields of a message_policy object; `policy` keeps the values of fields that
+// are absent.
+void ReadPolicy(const Json& value, core::MessagePolicy& policy, const std::string& path)
+{
+    CheckObject(value, path, {"delivery", "retention", "freshness", "overflow", "queue_depth"});
+    ReadEnum(value, "delivery", policy.delivery, ParseDeliveryGuarantee, path);
+    ReadEnum(value, "retention", policy.retention, ParseRetentionPolicy, path);
+    ReadEnum(value, "freshness", policy.freshness, ParseFreshnessPolicy, path);
+    ReadEnum(value, "overflow", policy.overflow, ParseQueueOverflowPolicy, path);
+    Read(value, "queue_depth", policy.queue_depth, path);
+}
+
+TopicConfig DecodeTopic(const Json& value, const std::string& path)
+{
+    CheckObject(value, path, {"id", "name", "transport", "message_type", "message_version", "encoding",
+                              "message_policy"});
+    TopicConfig topic;
+    Read(value, "id", topic.id, path);
+    Read(value, "name", topic.name, path);
+    Read(value, "message_type", topic.message_type, path);
+    Read(value, "message_version", topic.message_version, path);
+    Read(value, "encoding", topic.encoding, path);
+    ReadEnum(value, "transport", topic.transport, ParseTransportKind, path);
+    if (value.contains("message_policy")) {
+        ReadPolicy(value.at("message_policy"), topic.message_policy, path + ".message_policy");
+    }
+    return topic;
+}
+
+// A reader is a topic id, or an object naming the topic with policy fields
+// that apply to this reader only, starting from the topic's own policy.
+void DecodeReaders(const Json& component, const std::string& path, const ProjectConfig& project,
+                   ComponentConfig& output)
+{
+    std::size_t index = 0;
+    for (const auto& entry : Array(component, "readers", path)) {
+        const auto entry_path = path + ".readers[" + std::to_string(index++) + "]";
+        if (entry.is_string()) {
+            output.readers.push_back(entry.get<std::string>());
+            continue;
+        }
+        if (!entry.is_object()) {
+            throw std::invalid_argument(entry_path + " must be a topic id or an object");
+        }
+        CheckObject(entry, entry_path, {"topic", "delivery", "retention", "freshness", "overflow", "queue_depth"});
+        std::string topic_id;
+        Read(entry, "topic", topic_id, entry_path);
+        if (topic_id.empty()) {
+            throw std::invalid_argument(entry_path + ".topic is required");
+        }
+        auto topic = project.FindTopic(topic_id);
+        if (!topic.ok()) {
+            throw std::invalid_argument(entry_path + ": " + topic.status().message());
+        }
+        auto policy = topic.value().message_policy;
+        Json fields = entry;
+        fields.erase("topic");
+        ReadPolicy(fields, policy, entry_path);
+        output.readers.push_back(topic_id);
+        if (!output.reader_policies.emplace(topic_id, policy).second) {
+            throw std::invalid_argument(entry_path + ": topic " + topic_id + " is read twice");
+        }
+    }
+}
+
+ComponentConfig DecodeComponent(const Json& value, const std::string& path, const ProjectConfig& project)
+{
+    CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type", "parameters"});
+    ComponentConfig component;
+    Read(value, "name", component.name, path);
+    Read(value, "type", component.type, path);
+    Read(value, "description", component.description, path);
+    DecodeReaders(value, path, project, component);
+    Read(value, "writers", component.writers, path);
+    component.parameters = ReadParameters(value, path);
+    std::size_t trigger_index = 0;
+    for (const auto& entry : Array(value, "triggers", path)) {
+        const auto trigger_path = path + ".triggers[" + std::to_string(trigger_index++) + "]";
+        CheckObject(entry, trigger_path, {"kind", "period_ns", "dependency_policy", "data_topics",
+                                          "task_dependencies", "priority", "deadline_ns"});
+        TriggerConfig trigger;
+        ReadEnum(entry, "kind", trigger.kind, ParseTriggerKind, trigger_path);
+        auto period = trigger.period.count();
+        Read(entry, "period_ns", period, trigger_path);
+        trigger.period = core::Nanoseconds(period);
+        Read(entry, "priority", trigger.priority, trigger_path);
+        auto deadline = trigger.deadline.count();
+        Read(entry, "deadline_ns", deadline, trigger_path);
+        trigger.deadline = core::Nanoseconds(deadline);
+        ReadEnum(entry, "dependency_policy", trigger.dependency_policy, ParseDependencyPolicy, trigger_path);
+        Read(entry, "data_topics", trigger.data_topics, trigger_path);
+        Read(entry, "task_dependencies", trigger.task_dependencies, trigger_path);
+        component.triggers.push_back(std::move(trigger));
+    }
+    return component;
+}
+
+// Errors carry the file they came from.
+[[noreturn]] void Fail(const std::string& file, const std::string& message)
+{
+    throw std::invalid_argument(file.empty() ? message : file + ": " + message);
+}
+
+// A configuration file that cannot be opened or read; Unavailable to callers.
+struct UnreadableFile : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+Json ReadJsonFile(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        throw UnreadableFile("cannot open configuration file: " + path.string());
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    if (input.bad()) {
+        throw UnreadableFile("cannot read configuration file: " + path.string());
+    }
+    try {
+        return Json::parse(buffer.str());
+    } catch (const Json::exception& error) {
+        Fail(path.string(), error.what());
+    }
+}
+
+// Resolves and decodes imports depth-first, so topics land in declaration
+// order. Tracks the files on the current chain to reject cycles.
+class ImportResolver {
+public:
+    explicit ImportResolver(const JsonLoadOptions& options) : options_(options) {}
+
+    // Appends the topics of every file `root` (read from `file`) imports.
+    void ImportInto(const Json& root, const std::filesystem::path& file, ProjectConfig& project,
+                    std::map<std::string, std::string>& origins)
+    {
+        std::vector<std::string> imports;
+        Read(root, "imports", imports, "$");
+        for (const auto& name : imports) {
+            const auto resolved = Resolve(name, file);
+            const auto key = std::filesystem::weakly_canonical(resolved).string();
+            if (std::find(chain_.begin(), chain_.end(), key) != chain_.end()) {
+                Fail(file.string(), "import cycle through " + resolved.string());
+            }
+            if (!loaded_.insert(key).second) {
+                continue;  // reached through another import already
+            }
+            const auto imported = ReadJsonFile(resolved);
+            try {
+                CheckObject(imported, "$", {"imports", "topics"});
+            } catch (const std::invalid_argument& error) {
+                Fail(resolved.string(), std::string(error.what()) + " (an imported file may only declare topics)");
+            }
+            chain_.push_back(key);
+            ImportInto(imported, resolved, project, origins);
+            AppendTopics(imported, resolved.string(), project, origins);
+            chain_.pop_back();
+        }
+    }
+
+    void Enter(const std::filesystem::path& file)
+    {
+        const auto key = std::filesystem::weakly_canonical(file).string();
+        chain_.push_back(key);
+        loaded_.insert(key);
+    }
+
+    static void AppendTopics(const Json& root, const std::string& file, ProjectConfig& project,
+                             std::map<std::string, std::string>& origins)
+    {
+        std::size_t index = 0;
+        for (const auto& value : Array(root, "topics", "$")) {
+            const auto path = "$.topics[" + std::to_string(index++) + "]";
+            TopicConfig topic;
+            try {
+                topic = DecodeTopic(value, path);
+            } catch (const std::invalid_argument& error) {
+                Fail(file, error.what());
+            }
+            const auto inserted = origins.emplace(topic.id, file);
+            if (!inserted.second) {
+                const auto& first = inserted.first->second;
+                Fail(file, "topic id " + topic.id + " is already declared"
+                               + (first.empty() || first == file ? std::string() : " in " + first));
+            }
+            project.topics.push_back(std::move(topic));
+        }
+    }
+
+private:
+    std::filesystem::path Resolve(const std::string& name, const std::filesystem::path& from) const
+    {
+        const std::filesystem::path relative(name);
+        if (relative.is_absolute()) {
+            if (std::filesystem::exists(relative)) {
+                return relative;
+            }
+            Fail(from.string(), "import not found: " + name);
+        }
+        std::vector<std::filesystem::path> candidates {from.parent_path() / relative};
+        for (const auto& directory : options_.search_paths) {
+            candidates.push_back(std::filesystem::path(directory) / relative);
+        }
+        for (const auto& candidate : candidates) {
+            if (std::filesystem::is_regular_file(candidate)) {
+                return candidate;
+            }
+        }
+        std::string searched;
+        for (const auto& candidate : candidates) {
+            searched += (searched.empty() ? "" : ", ") + candidate.parent_path().string();
+        }
+        Fail(from.string(), "import not found: " + name + " (searched " + searched
+                                + "; add directories with PUPPETMASTER_CONFIG_PATH or --config-path)");
+    }
+
+    const JsonLoadOptions& options_;
+    std::vector<std::string> chain_;
+    std::set<std::string> loaded_;
+};
+
+void DecodeProjectSettings(const Json& root, ProjectConfig& project)
+{
     if (root.contains("runtime")) {
         const auto& options = root.at("runtime");
         CheckObject(options, "$.runtime", {"default_transport_name", "register_inmemory_transport",
@@ -132,72 +381,120 @@ ProjectConfig Decode(const Json& root)
         Read(options, "priority_aging_interval_ns", aging, "$.scheduler");
         project.scheduler_options.priority_aging_interval = core::Nanoseconds(aging);
     }
-    std::size_t index = 0;
-    for (const auto& value : Array(root, "topics", "$")) {
-        const auto path = "$.topics[" + std::to_string(index++) + "]";
-        CheckObject(value, path, {"id", "name", "transport", "message_type", "encoding", "message_policy"});
-        TopicConfig topic;
-        Read(value, "id", topic.id, path);
-        Read(value, "name", topic.name, path);
-        Read(value, "message_type", topic.message_type, path);
-        Read(value, "encoding", topic.encoding, path);
-        ReadEnum(value, "transport", topic.transport, ParseTransportKind, path);
-        if (value.contains("message_policy")) {
-            const auto& policy = value.at("message_policy");
-            const auto policy_path = path + ".message_policy";
-            CheckObject(policy, policy_path, {"delivery", "retention", "freshness", "overflow", "queue_depth"});
-            ReadEnum(policy, "delivery", topic.message_policy.delivery, ParseDeliveryGuarantee, policy_path);
-            ReadEnum(policy, "retention", topic.message_policy.retention, ParseRetentionPolicy, policy_path);
-            ReadEnum(policy, "freshness", topic.message_policy.freshness, ParseFreshnessPolicy, policy_path);
-            ReadEnum(policy, "overflow", topic.message_policy.overflow, ParseQueueOverflowPolicy, policy_path);
-            Read(policy, "queue_depth", topic.message_policy.queue_depth, policy_path);
+}
+
+// Decodes one project document. `resolver` is null for text without a file,
+// which cannot have imports.
+ProjectConfig Decode(const Json& root, const std::filesystem::path& file, ImportResolver* resolver)
+{
+    CheckObject(root, "$", {"imports", "runtime", "scheduler", "topics", "components"});
+    ProjectConfig project;
+    DecodeProjectSettings(root, project);
+    std::map<std::string, std::string> origins;
+    if (root.contains("imports")) {
+        if (resolver == nullptr) {
+            throw std::invalid_argument("$.imports needs a configuration file to resolve against; use LoadJsonConfig");
         }
-        project.topics.push_back(std::move(topic));
+        resolver->ImportInto(root, file, project, origins);
     }
-    index = 0;
+    ImportResolver::AppendTopics(root, file.string(), project, origins);
+    std::size_t index = 0;
     for (const auto& value : Array(root, "components", "$")) {
-        const auto path = "$.components[" + std::to_string(index++) + "]";
-        CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type"});
-        ComponentConfig component;
-        Read(value, "name", component.name, path);
-        Read(value, "type", component.type, path);
-        Read(value, "description", component.description, path);
-        Read(value, "readers", component.readers, path);
-        Read(value, "writers", component.writers, path);
-        std::size_t trigger_index = 0;
-        for (const auto& entry : Array(value, "triggers", path)) {
-            const auto trigger_path = path + ".triggers[" + std::to_string(trigger_index++) + "]";
-            CheckObject(entry, trigger_path, {"kind", "period_ns", "dependency_policy", "data_topics", "task_dependencies", "priority", "deadline_ns"});
-            TriggerConfig trigger;
-            ReadEnum(entry, "kind", trigger.kind, ParseTriggerKind, trigger_path);
-            auto period = trigger.period.count();
-            Read(entry, "period_ns", period, trigger_path);
-            trigger.period = core::Nanoseconds(period);
-            Read(entry, "priority", trigger.priority, trigger_path);
-            auto deadline = trigger.deadline.count();
-            Read(entry, "deadline_ns", deadline, trigger_path);
-            trigger.deadline = core::Nanoseconds(deadline);
-            ReadEnum(entry, "dependency_policy", trigger.dependency_policy, ParseDependencyPolicy, trigger_path);
-            Read(entry, "data_topics", trigger.data_topics, trigger_path);
-            Read(entry, "task_dependencies", trigger.task_dependencies, trigger_path);
-            component.triggers.push_back(std::move(trigger));
+        project.components.push_back(DecodeComponent(value, "$.components[" + std::to_string(index++) + "]", project));
+    }
+    return project;
+}
+
+// A deployment file decides where topics run: their transport and transport
+// parameters. It cannot change what a topic is, so a deployment that names a
+// different type or version is an error, not an override.
+void ApplyDeployment(const std::filesystem::path& file, ProjectConfig& project)
+{
+    const auto root = ReadJsonFile(file);
+    try {
+        CheckObject(root, "$", {"topics", "defaults"});
+        if (root.contains("defaults")) {
+            const auto& defaults = root.at("defaults");
+            CheckObject(defaults, "$.defaults", {"transport", "transport_parameters"});
+            for (auto& topic : project.topics) {
+                ReadEnum(defaults, "transport", topic.transport, ParseTransportKind, "$.defaults");
+                for (const auto& [key, value] : ReadParameters(defaults, "$.defaults", "transport_parameters")) {
+                    topic.transport_parameters[key] = value;
+                }
+            }
         }
-        project.components.push_back(std::move(component));
+        std::size_t index = 0;
+        for (const auto& value : Array(root, "topics", "$")) {
+            const auto path = "$.topics[" + std::to_string(index++) + "]";
+            CheckObject(value, path, {"name", "transport", "transport_parameters"});
+            std::string name;
+            Read(value, "name", name, path);
+            if (name.empty()) {
+                throw std::invalid_argument(path + ".name is required");
+            }
+            // Matched by wire name, which is what the interface package
+            // publishes; topic ids are local to each project file. Topics this
+            // project does not use are ignored, so one deployment serves every
+            // process.
+            for (auto& topic : project.topics) {
+                if (topic.name != name) {
+                    continue;
+                }
+                ReadEnum(value, "transport", topic.transport, ParseTransportKind, path);
+                for (const auto& [key, parameter] : ReadParameters(value, path, "transport_parameters")) {
+                    topic.transport_parameters[key] = parameter;
+                }
+            }
+        }
+    } catch (const std::invalid_argument& error) {
+        Fail(file.string(), error.what());
+    }
+}
+
+core::Result<ProjectConfig> Validated(ProjectConfig project, const std::string& file)
+{
+    auto status = project.Validate();
+    if (!status.ok()) {
+        return core::Result<ProjectConfig>::FromStatus(
+            file.empty() ? std::move(status) : core::Status::Error(status.code(), file + ": " + status.message()));
     }
     return project;
 }
 
 }  // namespace
 
+std::vector<std::string> SearchPathsFromEnvironment()
+{
+#ifdef _WIN32
+    constexpr char kSeparator = ';';
+    char* value = nullptr;
+    std::size_t length = 0;
+    std::string text;
+    if (_dupenv_s(&value, &length, "PUPPETMASTER_CONFIG_PATH") == 0 && value != nullptr) {
+        text = value;
+        std::free(value);
+    }
+#else
+    constexpr char kSeparator = ':';
+    const char* value = std::getenv("PUPPETMASTER_CONFIG_PATH");
+    const std::string text = value == nullptr ? std::string() : std::string(value);
+#endif
+    std::vector<std::string> paths;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const auto end = std::min(text.find(kSeparator, start), text.size());
+        if (end > start) {
+            paths.push_back(text.substr(start, end - start));
+        }
+        start = end + 1;
+    }
+    return paths;
+}
+
 core::Result<ProjectConfig> ParseJsonConfig(std::string_view json)
 {
     try {
-        auto project = Decode(Json::parse(json.begin(), json.end()));
-        auto status = project.Validate();
-        if (!status.ok()) {
-            return core::Result<ProjectConfig>::FromStatus(std::move(status));
-        }
-        return project;
+        return Validated(Decode(Json::parse(json.begin(), json.end()), {}, nullptr), {});
     } catch (const Json::exception& error) {
         return core::Result<ProjectConfig>::FromStatus(core::Status::InvalidArgument(error.what()));
     } catch (const std::invalid_argument& error) {
@@ -207,16 +504,42 @@ core::Result<ProjectConfig> ParseJsonConfig(std::string_view json)
 
 core::Result<ProjectConfig> LoadJsonConfig(const std::string& path)
 {
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        return core::Result<ProjectConfig>::FromStatus(core::Status::Unavailable("cannot open configuration file: " + path));
+    JsonLoadOptions options;
+    options.search_paths = SearchPathsFromEnvironment();
+    return LoadJsonConfig(path, options);
+}
+
+core::Result<ProjectConfig> LoadJsonConfig(const std::string& path, const JsonLoadOptions& options)
+{
+    try {
+        const std::filesystem::path file(path);
+        const auto root = ReadJsonFile(file);
+        ImportResolver resolver(options);
+        resolver.Enter(file);
+        ProjectConfig project;
+        try {
+            project = Decode(root, file, &resolver);
+        } catch (const std::invalid_argument& error) {
+            // Errors from imported files already name their file.
+            const std::string message = error.what();
+            if (message.rfind("$", 0) == 0) {
+                Fail(path, message);
+            }
+            throw;
+        }
+        if (!options.deployment_path.empty()) {
+            ApplyDeployment(options.deployment_path, project);
+        }
+        return Validated(std::move(project), path);
+    } catch (const UnreadableFile& error) {
+        return core::Result<ProjectConfig>::FromStatus(core::Status::Unavailable(error.what()));
+    } catch (const std::invalid_argument& error) {
+        return core::Result<ProjectConfig>::FromStatus(core::Status::InvalidArgument(error.what()));
+    } catch (const Json::exception& error) {
+        return core::Result<ProjectConfig>::FromStatus(core::Status::InvalidArgument(error.what()));
+    } catch (const std::filesystem::filesystem_error& error) {
+        return core::Result<ProjectConfig>::FromStatus(core::Status::Unavailable(error.what()));
     }
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    if (input.bad()) {
-        return core::Result<ProjectConfig>::FromStatus(core::Status::DataLoss("cannot read configuration file: " + path));
-    }
-    return ParseJsonConfig(buffer.str());
 }
 
 }  // namespace puppet_master::configuration

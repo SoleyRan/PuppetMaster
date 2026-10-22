@@ -1,0 +1,10 @@
+{
+    "topics": [
+        {"id": "wheel", "name": "/vehicle/wheel_speed",
+         "message_type": "vehicle.WheelSpeed", "message_version": @WHEEL_SPEED_VERSION@,
+         "encoding": "application/x-puppetmaster-trivial"},
+        {"id": "imu", "name": "/vehicle/imu",
+         "message_type": "vehicle.ImuSample", "message_version": @IMU_SAMPLE_VERSION@,
+         "encoding": "application/x-puppetmaster-trivial"}
+    ]
+}

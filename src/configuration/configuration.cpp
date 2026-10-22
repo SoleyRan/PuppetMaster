@@ -150,8 +150,7 @@ bool SameEndpoints(
         if (lhs[i].topic.name != rhs[i].topic.name
             || lhs[i].topic.transport != rhs[i].topic.transport
             || !SamePolicy(lhs[i].topic.message_policy, rhs[i].topic.message_policy)
-            || lhs[i].message.type_name != rhs[i].message.type_name
-            || lhs[i].message.encoding != rhs[i].message.encoding) {
+            || lhs[i].message != rhs[i].message) {
             return false;
         }
     }
@@ -221,7 +220,7 @@ core::Result<transport::EndpointConfig> TopicConfig::ToEndpointConfig() const
 
     transport::EndpointConfig endpoint {
         core::TopicSpec {topic_name.value(), transport, message_policy},
-        transport::MessageDescriptor {message_type, encoding}
+        transport::MessageDescriptor {message_type, encoding, message_version}
     };
 
     status = endpoint.Validate();
@@ -355,14 +354,30 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         return core::Result<runtime::ComponentSpec>::FromStatus(component_name.status());
     }
 
-    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}};
+    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}, parameters};
 
     for (const auto& topic_id : readers) {
         auto endpoint = project.BuildEndpoint(topic_id);
         if (!endpoint.ok()) {
             return core::Result<runtime::ComponentSpec>::FromStatus(endpoint.status());
         }
+        const auto policy = reader_policies.find(topic_id);
+        if (policy != reader_policies.end()) {
+            endpoint.value().topic.message_policy = policy->second;
+        }
         spec.readers.push_back(endpoint.value());
+    }
+
+    for (const auto& [topic_id, policy] : reader_policies) {
+        if (std::find(readers.begin(), readers.end(), topic_id) == readers.end()) {
+            return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                "component " + name + " sets a reader policy for " + topic_id + ", which it does not read"));
+        }
+        auto status = policy.Validate();
+        if (!status.ok()) {
+            return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::Error(
+                status.code(), "component " + name + " reader policy for " + topic_id + ": " + status.message()));
+        }
     }
 
     for (const auto& topic_id : writers) {
@@ -474,7 +489,8 @@ core::Status ProjectConfig::Validate() const
         const auto inserted = declared_topics.emplace(key, &topic);
         if (!inserted.second) {
             const auto& first = *inserted.first->second;
-            if (first.message_type != topic.message_type || first.encoding != topic.encoding) {
+            if (first.message_type != topic.message_type || first.encoding != topic.encoding
+                || first.message_version != topic.message_version) {
                 return core::Status::InvalidArgument(
                     "topic ids " + first.id + " and " + topic.id + " declare conflicting message descriptors for "
                     + std::string(core::ToString(topic.transport)) + " topic " + topic.name);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -106,9 +107,17 @@ private:
     std::size_t size_ {0};
 };
 
+// Identifies what a topic carries. Endpoints on one topic must agree on all
+// three fields; every transport rejects a mismatch when the endpoint is
+// created, including across processes.
 struct MessageDescriptor {
     std::string type_name;
     std::string encoding {"application/octet-stream"};
+    // Wire format version of type_name. Raise it on every change that old
+    // readers cannot decode, such as reordered fields or changed units, so
+    // separately built processes refuse each other instead of misreading.
+    // 0 means unversioned.
+    std::uint32_t version {0};
 
     core::Status Validate() const
     {
@@ -120,6 +129,23 @@ struct MessageDescriptor {
         }
         return core::Status::Ok();
     }
+
+    // "type_name v<version> (encoding)", with the version left out when 0.
+    std::string ToString() const
+    {
+        std::string text = type_name;
+        if (version != 0) {
+            text += " v" + std::to_string(version);
+        }
+        return text + " (" + encoding + ")";
+    }
+
+    friend bool operator==(const MessageDescriptor& lhs, const MessageDescriptor& rhs)
+    {
+        return lhs.type_name == rhs.type_name && lhs.encoding == rhs.encoding && lhs.version == rhs.version;
+    }
+
+    friend bool operator!=(const MessageDescriptor& lhs, const MessageDescriptor& rhs) { return !(lhs == rhs); }
 };
 
 struct MessageMetadata {

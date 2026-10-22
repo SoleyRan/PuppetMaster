@@ -20,11 +20,6 @@ core::TimePoint Now()
     return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
 }
 
-bool IsSameDescriptor(const MessageDescriptor& lhs, const MessageDescriptor& rhs)
-{
-    return lhs.type_name == rhs.type_name && lhs.encoding == rhs.encoding;
-}
-
 core::Status ValidateInMemoryEndpoint(const EndpointConfig& endpoint)
 {
     auto status = endpoint.Validate();
@@ -265,7 +260,7 @@ public:
 
     bool MatchesDescriptor(const MessageDescriptor& descriptor) const
     {
-        return IsSameDescriptor(descriptor_, descriptor);
+        return descriptor_ == descriptor;
     }
 
     core::Status AddReader(const std::shared_ptr<InMemoryReader::Mailbox>& mailbox)
@@ -427,7 +422,8 @@ struct InMemoryTransport::State {
             if (!found->second->MatchesDescriptor(endpoint.message)) {
                 return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(
                     core::Status::InvalidArgument(
-                        "in-memory topic already exists with a different message descriptor"));
+                        "in-memory topic " + endpoint.topic.name.str() + " carries "
+                        + found->second->descriptor().ToString() + ", not " + endpoint.message.ToString()));
             }
             return found->second;
         }

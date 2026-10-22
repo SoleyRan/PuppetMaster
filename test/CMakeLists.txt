@@ -60,6 +60,20 @@ add_test(
     COMMAND puppet_master_typed_transport_test
 )
 
+add_executable(puppet_master_component_parameters_test
+    component_parameters_test.cpp
+)
+
+target_link_libraries(puppet_master_component_parameters_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.component_parameters
+    COMMAND puppet_master_component_parameters_test
+)
+
 add_executable(puppet_master_inmemory_transport_test
     inmemory_transport_test.cpp
 )
@@ -161,6 +175,23 @@ if(TARGET puppet_master_config)
     add_test(
         NAME puppet_master.config_tool_validate
         COMMAND puppet_master_config validate "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json"
+    )
+endif()
+
+if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)
+    add_executable(puppet_master_json_imports_test
+        json_imports_test.cpp
+    )
+
+    target_link_libraries(puppet_master_json_imports_test
+        PRIVATE
+            PuppetMaster::JsonConfigAdapter
+            PuppetMaster::ShmAdapter
+    )
+
+    add_test(
+        NAME puppet_master.json_imports
+        COMMAND puppet_master_json_imports_test
     )
 endif()
 

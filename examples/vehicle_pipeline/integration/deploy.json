@@ -1,0 +1,8 @@
+{
+    "defaults": {"transport": "shm", "transport_parameters": {"domain_id": 0}},
+    "topics": [
+        {"name": "/vehicle/wheel_speed", "transport_parameters": {"slot_payload_size": 256, "slot_count": 32}},
+        {"name": "/vehicle/imu", "transport_parameters": {"slot_payload_size": 256, "slot_count": 32}},
+        {"name": "/vehicle/state", "transport_parameters": {"slot_payload_size": 256, "slot_count": 32}}
+    ]
+}

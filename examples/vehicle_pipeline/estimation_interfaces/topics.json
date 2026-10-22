@@ -1,0 +1,8 @@
+{
+    "imports": ["sensor_interfaces/topics.json"],
+    "topics": [
+        {"id": "state", "name": "/vehicle/state",
+         "message_type": "vehicle.VehicleState", "message_version": 1,
+         "encoding": "application/x-puppetmaster-trivial"}
+    ]
+}

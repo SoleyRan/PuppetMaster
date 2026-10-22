@@ -1,0 +1,14 @@
+{
+    "imports": ["estimation_interfaces/topics.json"],
+    "scheduler": {"worker_count": 1},
+    "components": [
+        {
+            "name": "state_monitor",
+            "type": "state_monitor",
+            "description": "checks vehicle states and counts lost messages",
+            "readers": [{"topic": "state", "freshness": "queued", "queue_depth": 16}],
+            "parameters": {"max_speed": 40.0},
+            "triggers": [{"kind": "data", "data_topics": ["state"]}]
+        }
+    ]
+}

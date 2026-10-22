@@ -12,7 +12,9 @@
 #include <utility>
 #include <vector>
 
+#include <puppet_master/configuration/configuration.h>
 #include <puppet_master/runtime/context.h>
+#include <puppet_master/runtime/parameters.h>
 
 #include "platform.h"
 #include "segment.h"
@@ -26,11 +28,6 @@ constexpr auto kSegmentInitTimeout = std::chrono::seconds(1);
 core::TimePoint Now()
 {
     return std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now());
-}
-
-bool IsSameDescriptor(const MessageDescriptor& lhs, const MessageDescriptor& rhs)
-{
-    return lhs.type_name == rhs.type_name && lhs.encoding == rhs.encoding;
 }
 
 std::uint64_t ReaderDepth(const core::MessagePolicy& policy)
@@ -427,6 +424,66 @@ core::Status RegisterTransport(runtime::RuntimeContext& runtime, core::Transport
     return runtime.RegisterTransport(std::make_shared<ShmTransport>(std::move(name), std::move(options)));
 }
 
+core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& project, Options base)
+{
+    using ResultType = core::Result<Options>;
+    bool domain_set = false;
+    for (const auto& topic : project.topics) {
+        if (topic.transport != core::TransportKind::kIpc || topic.transport_parameters.empty()) {
+            continue;
+        }
+        const auto invalid = [&topic](const core::Status& status) {
+            return ResultType::FromStatus(core::Status::InvalidArgument(
+                "shm settings of topic " + topic.name + ": " + status.message()));
+        };
+        for (const auto& entry : topic.transport_parameters) {
+            if (entry.first != "slot_payload_size" && entry.first != "slot_count" && entry.first != "domain_id") {
+                return invalid(core::Status::InvalidArgument("unknown parameter " + entry.first
+                                                             + "; expected slot_payload_size, slot_count, or domain_id"));
+            }
+        }
+        const auto& parameters = topic.transport_parameters;
+        auto domain = runtime::GetParameter<core::DomainId>(parameters, "domain_id", base.domain_id);
+        if (!domain.ok()) {
+            return invalid(domain.status());
+        }
+        if (parameters.count("domain_id") != 0) {
+            // base.domain_id holds the first topic's value once domain_set.
+            if (domain_set && domain.value() != base.domain_id) {
+                return invalid(core::Status::InvalidArgument(
+                    "domain_id " + std::to_string(domain.value()) + " differs from " + std::to_string(base.domain_id)
+                    + " set on another topic; one transport has one domain"));
+            }
+            base.domain_id = domain.value();
+            domain_set = true;
+        }
+        if (parameters.count("slot_payload_size") == 0 && parameters.count("slot_count") == 0) {
+            continue;
+        }
+        TopicOptions geometry = base.ForTopic(topic.name);
+        auto payload = runtime::GetParameter<std::size_t>(parameters, "slot_payload_size", geometry.slot_payload_size);
+        auto slots = runtime::GetParameter<std::size_t>(parameters, "slot_count", geometry.slot_count);
+        if (!payload.ok()) {
+            return invalid(payload.status());
+        }
+        if (!slots.ok()) {
+            return invalid(slots.status());
+        }
+        geometry.slot_payload_size = payload.value();
+        geometry.slot_count = slots.value();
+        auto status = geometry.Validate();
+        if (!status.ok()) {
+            return invalid(status);
+        }
+        base.topics[topic.name] = geometry;
+    }
+    auto status = base.Validate();
+    if (!status.ok()) {
+        return ResultType::FromStatus(std::move(status));
+    }
+    return ResultType(std::move(base));
+}
+
 core::Status RemoveSegment(core::DomainId domain_id, const std::string& topic)
 {
     return detail::SharedRegion::Remove(detail::ObjectName(domain_id, topic));
@@ -541,9 +598,10 @@ core::Result<std::shared_ptr<TopicState>> GetOrOpenTopic(
     const auto& key = endpoint.topic.name.str();
     const auto found = topics.find(key);
     if (found != topics.end()) {
-        if (!IsSameDescriptor(found->second->descriptor(), endpoint.message)) {
+        if (found->second->descriptor() != endpoint.message) {
             return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm topic already exists with a different message descriptor: " + key));
+                "shm topic " + key + " carries " + found->second->descriptor().ToString() + ", not "
+                + endpoint.message.ToString()));
         }
         return ResultType(found->second);
     }

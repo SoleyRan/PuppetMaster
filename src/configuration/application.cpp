@@ -4,10 +4,13 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
+#include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace puppet_master::configuration {
 
@@ -82,11 +85,19 @@ std::string DescribeProject(const ProjectConfig& project)
     for (const auto& topic : project.topics) {
         const auto& policy = topic.message_policy;
         text << "  " << topic.id << " -> " << topic.name << " [" << core::ToString(topic.transport) << ", "
-             << topic.message_type << ", " << core::ToString(policy.freshness);
+             << topic.message_type;
+        if (topic.message_version != 0) {
+            text << " v" << topic.message_version;
+        }
+        text << ", " << core::ToString(policy.freshness);
         if (policy.freshness == core::FreshnessPolicy::kQueued) {
             text << " depth " << policy.queue_depth;
         }
-        text << ", " << core::ToString(policy.delivery) << "]\n";
+        text << ", " << core::ToString(policy.delivery);
+        for (const auto& [key, value] : topic.transport_parameters) {
+            text << ", " << key << "=" << value;
+        }
+        text << "]\n";
     }
 
     text << "components (" << project.components.size() << "):\n";
@@ -97,10 +108,28 @@ std::string DescribeProject(const ProjectConfig& project)
         }
         text << '\n';
         if (!component.readers.empty()) {
-            text << "    reads: " << Join(component.readers) << '\n';
+            std::vector<std::string> readers;
+            for (const auto& id : component.readers) {
+                const auto policy = component.reader_policies.find(id);
+                if (policy == component.reader_policies.end()) {
+                    readers.push_back(id);
+                } else if (policy->second.freshness == core::FreshnessPolicy::kQueued) {
+                    readers.push_back(id + " (queued depth " + std::to_string(policy->second.queue_depth) + ")");
+                } else {
+                    readers.push_back(id + " (" + core::ToString(policy->second.freshness) + ")");
+                }
+            }
+            text << "    reads: " << Join(readers) << '\n';
         }
         if (!component.writers.empty()) {
             text << "    writes: " << Join(component.writers) << '\n';
+        }
+        if (!component.parameters.empty()) {
+            std::vector<std::string> parameters;
+            for (const auto& [key, value] : component.parameters) {
+                parameters.push_back(key + "=" + value);
+            }
+            text << "    parameters: " << Join(parameters) << '\n';
         }
         for (const auto& trigger : component.triggers) {
             text << "    trigger: " << core::ToString(trigger.kind);
@@ -128,6 +157,85 @@ std::string DescribeProject(const ProjectConfig& project)
         }
     }
     return text.str();
+}
+
+SystemReport ValidateSystem(const std::vector<NamedProject>& projects)
+{
+    // Every declaration and use of each wire topic across the system.
+    struct Use {
+        std::string label;
+        const TopicConfig* topic;
+    };
+    struct TopicUses {
+        std::vector<Use> declarations;
+        std::set<std::string> readers;  // labels
+        std::set<std::string> writers;
+    };
+    std::map<std::string, TopicUses> uses;
+
+    for (const auto& entry : projects) {
+        const auto& project = *entry.project;
+        for (const auto& topic : project.topics) {
+            uses[topic.name].declarations.push_back(Use {entry.label, &topic});
+        }
+        for (const auto& component : project.components) {
+            for (const auto& id : component.readers) {
+                auto topic = project.FindTopic(id);
+                if (topic.ok()) {
+                    uses[topic.value().name].readers.insert(entry.label);
+                }
+            }
+            for (const auto& id : component.writers) {
+                auto topic = project.FindTopic(id);
+                if (topic.ok()) {
+                    uses[topic.value().name].writers.insert(entry.label);
+                }
+            }
+        }
+    }
+
+    const auto describe = [](const TopicConfig& topic) {
+        return transport::MessageDescriptor {topic.message_type, topic.encoding, topic.message_version}.ToString()
+            + " over " + core::ToString(topic.transport);
+    };
+
+    SystemReport report;
+    for (const auto& [name, topic] : uses) {
+        // Unused declarations, such as topics a process imports but does not
+        // touch, take no part in the checks.
+        if (topic.readers.empty() && topic.writers.empty()) {
+            continue;
+        }
+        const Use* first = nullptr;
+        for (const auto& use : topic.declarations) {
+            if (topic.readers.count(use.label) == 0 && topic.writers.count(use.label) == 0) {
+                continue;
+            }
+            if (first == nullptr) {
+                first = &use;
+                continue;
+            }
+            const auto& a = *first->topic;
+            const auto& b = *use.topic;
+            if (a.message_type != b.message_type || a.encoding != b.encoding || a.message_version != b.message_version
+                || a.transport != b.transport) {
+                report.errors.push_back("topic " + name + " is " + describe(a) + " in " + first->label + " but "
+                                        + describe(b) + " in " + use.label);
+            }
+        }
+        if (topic.writers.empty()) {
+            report.errors.push_back("topic " + name + " is read by " + Join({topic.readers.begin(), topic.readers.end()})
+                                    + " but written by no process");
+        } else if (topic.writers.size() > 1) {
+            report.errors.push_back("topic " + name + " is written by several processes: "
+                                    + Join({topic.writers.begin(), topic.writers.end()}));
+        }
+        if (topic.readers.empty()) {
+            report.warnings.push_back("topic " + name + " is written by "
+                                      + Join({topic.writers.begin(), topic.writers.end()}) + " but read by no process");
+        }
+    }
+    return report;
 }
 
 struct Application::Impl {
@@ -224,12 +332,16 @@ core::Result<std::unique_ptr<Application>> Application::Create(
     }
     impl->runtime = std::move(runtime).value();
 
+    auto status = core::Status::Ok();
     if (options.register_transports) {
-        auto status = options.register_transports(*impl->runtime);
-        if (!status.ok()) {
-            return ResultType::FromStatus(
-                core::Status::Error(status.code(), "registering transports failed: " + status.message()));
-        }
+        status = options.register_transports(*impl->runtime);
+    }
+    if (status.ok() && options.register_project_transports) {
+        status = options.register_project_transports(*impl->runtime, project);
+    }
+    if (!status.ok()) {
+        return ResultType::FromStatus(
+            core::Status::Error(status.code(), "registering transports failed: " + status.message()));
     }
 
     auto created = CreateScheduler(project, *impl->runtime, factories);
