@@ -1,76 +1,88 @@
 # Vehicle Pipeline Example
 
-A downstream project that uses an installed PuppetMaster through
-`find_package`, the way a real application would. It runs a small vehicle
-state pipeline either in one process or split across three processes over
-shared memory.
+A vehicle state pipeline built the way separate teams would ship it: two
+interface packages, three node packages, and a system integration. Each
+package is its own CMake project, installed into a shared prefix and found
+only through it.
 
 ```
-sensors.json                 estimator.json               monitor.json
-wheel_speed_sensor ─┐
-                    ├─ shm ─► state_estimator ─ shm ─► state_monitor
-imu_sensor ─────────┘
+sensor_node ──wheel, imu──► estimator_node ──state──► monitor_node
 ```
 
-- `wheel_speed_sensor`, `imu_sensor`: periodic triggers at 100 Hz, publish
-  simulated `WheelSpeed` and `ImuSample`.
-- `state_estimator`: data trigger on any of its inputs; fuses the newest
-  values into a `VehicleState`.
-- `state_monitor`: data trigger; checks each state, counts sequence gaps, and
-  prints a summary at shutdown. With `max_states` set it stops the process.
+| Package | Owner | Contents |
+|---|---|---|
+| `sensor_interfaces` | sensor team | `WheelSpeed`, `ImuSample`; `share/sensor_interfaces/topics.json` |
+| `estimation_interfaces` | estimation team | `VehicleState`; its `topics.json` imports the sensor topics |
+| `sensor_node` | sensor team | wheel speed and IMU publishers |
+| `estimator_node` | estimation team | fuses both inputs into `VehicleState` |
+| `monitor_node` | monitoring team | checks states, counts sequence gaps |
+| `integration/` | system integrator | `deploy.json`, system check, run scripts |
 
-One binary, `vehicle_node`, serves every node; the configuration file decides
-which components run and over which transport. Component settings such as
-`cruise_speed` and `wheel_gain` come from each component's `"parameters"`.
+Configuration is split into three layers, each owned by the team that
+decides it:
 
-## Build
+- **Interface** (`topics.json` in an interface package): topic names, message
+  types, encodings, and versions. Owned by the team that writes the topic.
+- **Node** (`config/*.json` in a node package): components, parameters,
+  triggers, and each reader's queue policy. It imports the interface files
+  it needs and names no transport.
+- **Deployment** (`integration/deploy.json`): which transport each topic
+  uses and its shared-memory ring size. It can change where a topic runs,
+  but not what it carries.
+
+## Message Versions
+
+`sensor_interfaces` takes `WHEEL_SPEED_VERSION` from its `CMakeLists.txt`
+and generates both `messages.h` and `topics.json` from it, so the struct and
+its declaration cannot drift. Raise it whenever the struct changes in a way
+old readers would misread.
+
+A process built against another version is refused rather than misreading:
+
+- `puppet_master_config validate --system` reports the topic with both
+  versions and the files that declare them;
+- if the processes run anyway, the shared-memory segment rejects the second
+  version when the endpoint is created.
+
+`integration/check_version_skew.sh` builds a v3 sensor release next to the
+v2 estimator and checks both cases.
+
+## Build And Run
 
 PuppetMaster must be installed with the JSON adapter (the shared-memory
-adapter is on by default):
+adapter is on by default). On Linux:
 
 ```bash
 cmake -S /path/to/PuppetMaster -B pm-build -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
 cmake --build pm-build --parallel
 cmake --install pm-build --prefix "$HOME/pm-install"
 
-cmake -S examples/vehicle_pipeline -B example-build -DCMAKE_PREFIX_PATH="$HOME/pm-install"
-cmake --build example-build
+# Each package in its own build tree, installed into one prefix.
+integration/build_all.sh "$HOME/pm-install" "$HOME/vehicle"
+
+# System check, then three processes over shared memory for 3 seconds.
+integration/run_pipeline.sh "$HOME/vehicle" "$HOME/pm-install/bin/puppet_master_config" 3
 ```
 
-## Run
-
-In one process, over the in-memory transport; stops after 100 states:
+To run a node by hand, point the import search path at the shared `share`
+directory and pass the deployment:
 
 ```bash
-example-build/vehicle_node config/single_process.json
+export PUPPETMASTER_CONFIG_PATH="$HOME/vehicle/share"
+"$HOME/vehicle/bin/monitor_node" --deployment integration/deploy.json \
+    "$HOME/vehicle/share/monitor_node/monitor.json"
 ```
 
-As three processes over shared memory, each in its own terminal and stopped
-with Ctrl+C:
-
-```bash
-example-build/vehicle_node config/monitor.json
-example-build/vehicle_node config/estimator.json
-example-build/vehicle_node config/sensors.json
-```
-
-`run_pipeline.sh` does the same on Linux: it validates the three files,
-starts the processes, stops them after a few seconds (producers first), and
-fails unless the monitor received states with no sequence gaps and none out
-of range.
-
-```bash
-./run_pipeline.sh example-build/vehicle_node 3
-```
-
-Every binary also accepts `--validate` and `--describe`.
+`--config-path DIR` adds search directories on the command line, and every
+node binary also accepts `--validate` and `--describe`.
 
 ## Known Limits
 
-- Each process's file repeats the declarations of the topics it shares with
-  other processes; nothing checks that they agree until the shared-memory
-  segment rejects a mismatched descriptor or geometry at runtime.
+- The system check sees only the files it is given. Keep the list of nodes in
+  one place, such as `run_pipeline.sh`, so CI and deployment check the same
+  set.
 - Shared-memory segments persist in `/dev/shm` after the processes exit; see
   [Segment Lifetime](../../docs/shm-transport.md#segment-lifetime).
-- `TrivialCodec` copies structs byte for byte, so every process must be built
-  with the same compiler ABI.
+- `TrivialCodec` copies structs byte for byte, so every process must use the
+  same compiler ABI. Versions catch layout changes the owner declares, not
+  ABI differences between compilers; use a portable codec across them.

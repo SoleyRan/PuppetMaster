@@ -32,10 +32,36 @@ ValidationReport ValidateProject(const ProjectConfig& project, const ComponentFa
 // Human-readable summary of topics, components, and triggers.
 std::string DescribeProject(const ProjectConfig& project);
 
+// One process's configuration in a system check, with a label such as its
+// file name for messages.
+struct NamedProject {
+    std::string label;
+    const ProjectConfig* project;
+};
+
+struct SystemReport {
+    std::vector<std::string> errors;
+    std::vector<std::string> warnings;
+
+    bool ok() const noexcept { return errors.empty(); }
+};
+
+// Checks the processes of one system together, which no single process can:
+//   errors    a topic declared with different types, versions, encodings, or
+//             transports in different processes; a topic that is read but
+//             written by no process; a topic written by more than one process
+//   warnings  a topic that is written but read by no process
+// Topics are matched by wire name. Run it where every process's
+// configuration is available, for example in integration CI.
+SystemReport ValidateSystem(const std::vector<NamedProject>& projects);
+
 struct ApplicationOptions {
     // Additional transports to register before the runtime opens, for
     // example FastDDS or shared memory. Called once with the new runtime.
     std::function<core::Status(runtime::RuntimeContext&)> register_transports;
+    // Same, with the project, so a transport can take settings from it, such
+    // as TopicConfig::transport_parameters. Runs after register_transports.
+    std::function<core::Status(runtime::RuntimeContext&, const ProjectConfig&)> register_project_transports;
 };
 
 // Owns the runtime and scheduler for one project and drives the component

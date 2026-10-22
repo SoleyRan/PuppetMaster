@@ -361,7 +361,23 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         if (!endpoint.ok()) {
             return core::Result<runtime::ComponentSpec>::FromStatus(endpoint.status());
         }
+        const auto policy = reader_policies.find(topic_id);
+        if (policy != reader_policies.end()) {
+            endpoint.value().topic.message_policy = policy->second;
+        }
         spec.readers.push_back(endpoint.value());
+    }
+
+    for (const auto& [topic_id, policy] : reader_policies) {
+        if (std::find(readers.begin(), readers.end(), topic_id) == readers.end()) {
+            return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                "component " + name + " sets a reader policy for " + topic_id + ", which it does not read"));
+        }
+        auto status = policy.Validate();
+        if (!status.ok()) {
+            return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::Error(
+                status.code(), "component " + name + " reader policy for " + topic_id + ": " + status.message()));
+        }
     }
 
     for (const auto& topic_id : writers) {

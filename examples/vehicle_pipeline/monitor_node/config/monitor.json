@@ -1,16 +1,12 @@
 {
+    "imports": ["estimation_interfaces/topics.json"],
     "scheduler": {"worker_count": 1},
-    "topics": [
-        {"id": "state", "name": "/vehicle/state", "transport": "shm",
-         "message_type": "vehicle.VehicleState", "encoding": "application/x-puppetmaster-trivial",
-         "message_policy": {"freshness": "queued", "queue_depth": 16}}
-    ],
     "components": [
         {
             "name": "state_monitor",
             "type": "state_monitor",
             "description": "checks vehicle states and counts lost messages",
-            "readers": ["state"],
+            "readers": [{"topic": "state", "freshness": "queued", "queue_depth": 16}],
             "parameters": {"max_speed": 40.0},
             "triggers": [{"kind": "data", "data_topics": ["state"]}]
         }

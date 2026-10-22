@@ -1,11 +1,6 @@
 {
+    "imports": ["sensor_interfaces/topics.json"],
     "scheduler": {"worker_count": 2},
-    "topics": [
-        {"id": "wheel", "name": "/vehicle/wheel_speed", "transport": "shm",
-         "message_type": "vehicle.WheelSpeed", "encoding": "application/x-puppetmaster-trivial"},
-        {"id": "imu", "name": "/vehicle/imu", "transport": "shm",
-         "message_type": "vehicle.ImuSample", "encoding": "application/x-puppetmaster-trivial"}
-    ],
     "components": [
         {
             "name": "wheel_speed_sensor",

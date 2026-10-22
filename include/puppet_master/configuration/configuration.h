@@ -29,6 +29,10 @@ struct TopicConfig {
     std::string encoding {"application/octet-stream"};
     core::MessagePolicy message_policy;
     std::uint32_t message_version {0};  // transport::MessageDescriptor::version
+    // Backend-specific settings for this topic, such as the shared-memory ring
+    // size. Usually set by a deployment file; each transport adapter reads and
+    // checks its own keys.
+    runtime::ParameterMap transport_parameters;
 
     core::Status Validate() const;
     core::Result<transport::EndpointConfig> ToEndpointConfig() const;
@@ -55,6 +59,9 @@ struct ComponentConfig {
     std::vector<TriggerConfig> triggers;
     std::string type;
     runtime::ParameterMap parameters;
+    // Reader-side policy by topic id, replacing the topic's message_policy for
+    // this component's reader only. Keys must be listed in `readers`.
+    std::map<std::string, core::MessagePolicy> reader_policies;
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<runtime::ComponentSpec> ToComponentSpec(const ProjectConfig& project) const;

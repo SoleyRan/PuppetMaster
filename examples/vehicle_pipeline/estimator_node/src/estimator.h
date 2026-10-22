@@ -9,13 +9,17 @@
 #include <puppet_master/runtime/typed_endpoints.h>
 #include <puppet_master/transport/typed.h>
 
-#include "messages.h"
+#include <estimation_interfaces/messages.h>
+#include <sensor_interfaces/messages.h>
 
-namespace vehicle {
+namespace estimator_node {
 
 namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
 namespace transport = puppet_master::transport;
+using estimation_interfaces::VehicleState;
+using sensor_interfaces::ImuSample;
+using sensor_interfaces::WheelSpeed;
 
 // Fuses wheel speed and IMU into a vehicle state. Runs whenever either input
 // arrives and publishes once per run with the newest value of each.
@@ -88,4 +92,4 @@ private:
     double speed_ {0.0};
 };
 
-}  // namespace vehicle
+}  // namespace estimator_node

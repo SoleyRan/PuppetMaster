@@ -83,6 +83,22 @@ options.register_transports = [](runtime::RuntimeContext& context) {
 return configuration::RunJsonApplication(argc, argv, factories, options);
 ```
 
+`register_project_transports` is the same hook with the loaded project, for
+transports that take settings from it, such as shared-memory ring sizes from
+a deployment file; see [Configuration](shm-transport.md#configuration).
+
+### Imports And Deployments
+
+`RunJsonApplication` loads with `LoadJsonConfig`, so `"imports"` resolve
+through `PUPPETMASTER_CONFIG_PATH`, and it takes two more options:
+
+| Option | Effect |
+|---|---|
+| `--config-path DIR` | also look for imports in DIR; repeatable, searched after the environment |
+| `--deployment FILE` | apply a deployment file: per-topic transport and transport settings |
+
+See [Multi-File Configuration](configuration.md#multi-file-configuration).
+
 ## Configuration Tool
 
 `puppet_master_config` checks configuration files without building the
@@ -91,6 +107,7 @@ adapter.
 
 ```bash
 puppet_master_config validate config/*.json
+puppet_master_config validate --system --deployment deploy.json nodes/*.json
 puppet_master_config describe config/vehicle.json
 ```
 
@@ -99,10 +116,17 @@ exits with 1 if any file fails. It checks everything except component types,
 because factories live in the application binary; use `app --validate` for
 those.
 
+`validate --system` also checks the files together as one system, for
+example every node of a release in integration CI. See
+[System Validation](configuration.md#system-validation). Both commands take
+`--config-path` and `--deployment` like a launcher.
+
 ## Library Helpers
 
-Both are in the core library and need no JSON:
+These are in the core library and need no JSON:
 
+- `ValidateSystem(projects)` returns a `SystemReport` with the problems
+  between processes; see [System Validation](configuration.md#system-validation).
 - `ValidateProject(project, &factories)` returns a `ValidationReport` with
   every problem found. Pass no registry to skip component-type checks.
 - `DescribeProject(project)` returns the summary that `--describe` prints.

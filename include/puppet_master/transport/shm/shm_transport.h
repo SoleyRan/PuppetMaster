@@ -15,6 +15,10 @@ namespace puppet_master::runtime {
 class RuntimeContext;
 }
 
+namespace puppet_master::configuration {
+struct ProjectConfig;
+}
+
 namespace puppet_master::transport::shm {
 
 // Ring geometry of one topic. Every process on a topic must use the same
@@ -42,6 +46,14 @@ PUPPET_MASTER_API core::Status RegisterTransport(
     runtime::RuntimeContext& runtime,
     core::TransportName name,
     Options options = {});
+
+// Starts from `base` and applies the shm keys of every ipc topic's
+// transport_parameters, as set by a deployment file:
+//   slot_payload_size, slot_count   ring geometry of that topic
+//   domain_id                       must be the same on every topic that sets it
+// Unknown keys and invalid values are InvalidArgument naming the topic.
+PUPPET_MASTER_API core::Result<Options> OptionsFromProject(
+    const configuration::ProjectConfig& project, Options base = {});
 
 // Deletes a topic's segment so the next opener starts a fresh one, for example
 // after changing its TopicOptions. Processes that still have it mapped keep

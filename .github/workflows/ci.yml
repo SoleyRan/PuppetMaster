@@ -97,15 +97,17 @@ jobs:
           "$GITHUB_WORKSPACE/json-install/bin/puppet_master_config" validate demo/config/speed_pipeline.json
           "$GITHUB_WORKSPACE/json-install/bin/puppet_master_config" describe demo/config/speed_pipeline.json
 
+      # Interface and node packages built separately against the install, as
+      # separate teams would, then the multi-process run and a version skew.
       - name: Build and run the vehicle pipeline example
         run: |
           set -e
-          cmake -S examples/vehicle_pipeline -B example-build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/json-install"
-          cmake --build example-build --parallel
-          "$GITHUB_WORKSPACE/json-install/bin/puppet_master_config" validate examples/vehicle_pipeline/config/*.json
-          timeout 60s example-build/vehicle_node examples/vehicle_pipeline/config/single_process.json
-          timeout 60s examples/vehicle_pipeline/run_pipeline.sh example-build/vehicle_node 3
+          integration=examples/vehicle_pipeline/integration
+          config_tool="$GITHUB_WORKSPACE/json-install/bin/puppet_master_config"
+          "$integration/build_all.sh" "$GITHUB_WORKSPACE/json-install" "$GITHUB_WORKSPACE/vehicle"
+          timeout 60s "$integration/run_pipeline.sh" "$GITHUB_WORKSPACE/vehicle" "$config_tool" 3
+          timeout 300s "$integration/check_version_skew.sh" "$GITHUB_WORKSPACE/json-install" \
+            "$GITHUB_WORKSPACE/skew" "$config_tool"
 
   fastdds:
     name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})

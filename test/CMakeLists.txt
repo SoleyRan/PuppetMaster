@@ -178,6 +178,23 @@ if(TARGET puppet_master_config)
     )
 endif()
 
+if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)
+    add_executable(puppet_master_json_imports_test
+        json_imports_test.cpp
+    )
+
+    target_link_libraries(puppet_master_json_imports_test
+        PRIVATE
+            PuppetMaster::JsonConfigAdapter
+            PuppetMaster::ShmAdapter
+    )
+
+    add_test(
+        NAME puppet_master.json_imports
+        COMMAND puppet_master_json_imports_test
+    )
+endif()
+
 if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_executable(puppet_master_json_config_loader_test
         json_config_loader_test.cpp

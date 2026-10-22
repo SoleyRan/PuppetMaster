@@ -104,10 +104,13 @@ target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 ```
 
 [`examples/vehicle_pipeline`](examples/vehicle_pipeline/README.md) is a
-complete downstream project: one binary whose JSON configuration decides
-which components run, split across three processes over shared memory or run
-in one process for debugging. CI builds it against the installed package and
-runs the multi-process pipeline.
+complete downstream system, packaged the way separate teams would release it:
+interface packages with versioned message types and shared topic files, node
+packages that import them, and an integration with a deployment file and a
+system-wide check. CI builds each package separately against the install,
+runs the three processes over shared memory, and checks that a mismatched
+message version is refused. See
+[Multi-File Configuration](docs/configuration.md#multi-file-configuration).
 
 ## Roadmap
 

@@ -211,3 +211,122 @@ and booleans; numbers and booleans are stored as their JSON text, so `30`,
     }]
 }
 ```
+
+## Multi-File Configuration
+
+When processes are built and released by different teams, no single file can
+describe the system. Configuration then splits into three layers, each kept
+by the team that decides it:
+
+| Layer | Contents | Kept by |
+|---|---|---|
+| Interface | topic names, message types, encodings, versions | the team that writes the topic, in its interface package |
+| Node | components, parameters, triggers, reader policies | each team, in its node package |
+| Deployment | each topic's transport and transport settings | the system integrator |
+
+`examples/vehicle_pipeline` is a complete system built this way.
+
+### Imports
+
+An interface file declares only topics, and is installed with its package,
+for example to `<prefix>/share/sensor_interfaces/topics.json`:
+
+```json
+{
+    "topics": [
+        {"id": "wheel", "name": "/vehicle/wheel_speed", "message_type": "vehicle.WheelSpeed",
+         "message_version": 2, "encoding": "application/x-puppetmaster-trivial"}
+    ]
+}
+```
+
+A node file imports it instead of repeating the declaration:
+
+```json
+{
+    "imports": ["sensor_interfaces/topics.json"],
+    "components": [{"name": "wheel_speed_sensor", "type": "wheel_speed_sensor", "writers": ["wheel"], ...}]
+}
+```
+
+`LoadJsonConfig` resolves each import against the importing file's
+directory first, then against each search path in order. Search paths come
+from `JsonLoadOptions::search_paths`, the `PUPPETMASTER_CONFIG_PATH`
+environment variable (`:`-separated, `;` on Windows), or `--config-path DIR`
+on launchers and `puppet_master_config`. Point them at the `share`
+directories of installed packages.
+
+- Imported files may import others; the topics land in declaration order. A
+  file reached twice is read once, and a cycle is an error.
+- Imported files may contain only `imports` and `topics`.
+- A topic id declared twice, in any file, is an error that names the file of
+  the first declaration.
+- Errors inside an imported file name that file.
+- `ParseJsonConfig` has no file to resolve against, so `imports` is an error
+  there.
+
+### Reader Policies
+
+Queue depth and freshness are a reader's choice, not part of a topic's
+identity, so they belong to the node. A reader may be an object naming the
+topic, with policy fields that start from the topic's own policy:
+
+```json
+"readers": [
+    {"topic": "wheel", "freshness": "queued", "queue_depth": 8},
+    "imu"
+]
+```
+
+The plain `"imu"` keeps the topic's policy. The override applies to this
+component's reader only. In C++ it is `ComponentConfig::reader_policies`,
+keyed by topic id, and every key must also be in `readers`.
+
+### Deployment Files
+
+A deployment file decides where topics run. It is applied after the project
+loads, with `JsonLoadOptions::deployment_path` or `--deployment FILE`:
+
+```json
+{
+    "defaults": {"transport": "shm", "transport_parameters": {"domain_id": 0}},
+    "topics": [
+        {"name": "/vehicle/wheel_speed", "transport_parameters": {"slot_payload_size": 256, "slot_count": 32}}
+    ]
+}
+```
+
+- Topics are matched by wire name, which is what interface packages publish.
+  Topics a process does not declare are skipped, so one deployment serves
+  every process.
+- Only `transport` and `transport_parameters` can be set. A deployment that
+  tries to change a topic's type, encoding, or version is rejected: those
+  belong to the interface.
+- `transport_parameters` lands in `TopicConfig::transport_parameters` as
+  text. Each transport adapter reads its own keys; the shared-memory adapter
+  reads them with `shm::OptionsFromProject` (see
+  [Shared-Memory Transport](shm-transport.md#configuration)).
+
+### System Validation
+
+Each process loads only its own file, so a problem between processes, such as
+a topic nobody writes, is invisible to it. `ValidateSystem` checks several
+loaded projects together; `puppet_master_config validate --system` runs it on
+files:
+
+```bash
+PUPPETMASTER_CONFIG_PATH=/opt/vehicle/share \
+puppet_master_config validate --system --deployment deploy.json \
+    /opt/vehicle/share/sensor_node/sensors.json \
+    /opt/vehicle/share/estimator_node/estimator.json \
+    /opt/vehicle/share/monitor_node/monitor.json
+```
+
+It reports as errors a topic declared with different types, encodings,
+versions, or transports in different processes; a topic that is read but
+written by no process; and a topic written by more than one process. A topic
+written but read by no process is a warning. Topics that a process declares
+but does not use are ignored.
+
+Run it where every process's configuration is available: in system
+integration CI, and before starting the processes on a target.

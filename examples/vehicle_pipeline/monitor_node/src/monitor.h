@@ -11,13 +11,14 @@
 #include <puppet_master/runtime/typed_endpoints.h>
 #include <puppet_master/transport/typed.h>
 
-#include "messages.h"
+#include <estimation_interfaces/messages.h>
 
-namespace vehicle {
+namespace monitor_node {
 
 namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
 namespace transport = puppet_master::transport;
+using estimation_interfaces::VehicleState;
 
 // Consumes vehicle states, checks them, and reports lost messages. With
 // `max_states` set, stops the process after that many states.
@@ -89,4 +90,4 @@ private:
     std::uint64_t last_sequence_ {0};
 };
 
-}  // namespace vehicle
+}  // namespace monitor_node

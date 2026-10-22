@@ -131,13 +131,35 @@ int main()
     assert(Launch({bad_type}).code == 1);
     assert(g_started == 0);
 
+    // Imports come from --config-path; a deployment applies with --deployment.
+    const auto share = std::filesystem::temp_directory_path()
+        / ("pm_launcher_share_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(share / "speed_interfaces");
+    std::ofstream(share / "speed_interfaces" / "topics.json")
+        << R"json({"topics": [{"id": "speed", "name": "/vehicle/speed", "message_type": "demo.Speed"}]})json";
+    const auto importing = WriteConfig("importing.json", R"json({
+        "imports": ["speed_interfaces/topics.json"],
+        "components": [{"name": "stopper", "type": "self_stopping", "readers": ["speed"],
+                        "triggers": [{"kind": "manual"}]}]})json");
+    const auto deployment = WriteConfig("deployment.json", R"json({"topics": [
+        {"name": "/vehicle/speed", "transport_parameters": {"note": "from deployment"}}]})json");
+    auto not_found = Launch({"--validate", importing});
+    assert(not_found.code == 1 && not_found.err.find("import not found") != std::string::npos);
+    assert(not_found.err.find("importing.json") != std::string::npos);
+    assert(Launch({"--validate", "--config-path", share.string(), importing}).code == 0);
+    auto deployed = Launch({"--describe", "--config-path", share.string(), "--deployment", deployment, importing});
+    assert(deployed.code == 0 && deployed.out.find("note=from deployment") != std::string::npos);
+    assert(Launch({"--validate", importing, "--config-path"}).code == 2);
+    assert(Launch({"--deployment", deployment, "--deployment", deployment, importing}).code == 2);
+
     // A full run starts, stops on the signal, and shuts components down.
     auto ran = Launch({good});
     assert(ran.code == 0);
     assert(g_started == 1 && g_shut_down == 1);
 
-    for (const auto& path : {good, bad_type, malformed}) {
+    for (const auto& path : {good, bad_type, malformed, importing, deployment}) {
         std::filesystem::remove(path);
     }
+    std::filesystem::remove_all(share);
     return 0;
 }

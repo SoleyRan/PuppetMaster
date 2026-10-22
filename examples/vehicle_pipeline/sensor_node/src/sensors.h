@@ -11,13 +11,15 @@
 #include <puppet_master/runtime/typed_endpoints.h>
 #include <puppet_master/transport/typed.h>
 
-#include "messages.h"
+#include <sensor_interfaces/messages.h>
 
-namespace vehicle {
+namespace sensor_node {
 
 namespace core = puppet_master::core;
 namespace runtime = puppet_master::runtime;
 namespace transport = puppet_master::transport;
+using sensor_interfaces::ImuSample;
+using sensor_interfaces::WheelSpeed;
 
 // Simulated drive: speed follows a slow sine around `cruise_speed`.
 inline double SimulatedSpeed(double cruise_speed, std::uint64_t sample)
@@ -98,4 +100,4 @@ private:
     std::uint64_t sample_ {0};
 };
 
-}  // namespace vehicle
+}  // namespace sensor_node
