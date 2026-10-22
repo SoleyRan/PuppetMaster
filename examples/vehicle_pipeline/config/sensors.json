@@ -1,0 +1,27 @@
+{
+    "scheduler": {"worker_count": 2},
+    "topics": [
+        {"id": "wheel", "name": "/vehicle/wheel_speed", "transport": "shm",
+         "message_type": "vehicle.WheelSpeed", "encoding": "application/x-puppetmaster-trivial"},
+        {"id": "imu", "name": "/vehicle/imu", "transport": "shm",
+         "message_type": "vehicle.ImuSample", "encoding": "application/x-puppetmaster-trivial"}
+    ],
+    "components": [
+        {
+            "name": "wheel_speed_sensor",
+            "type": "wheel_speed_sensor",
+            "description": "publishes wheel speed at 100 Hz",
+            "writers": ["wheel"],
+            "parameters": {"cruise_speed": 15.0},
+            "triggers": [{"kind": "periodic", "period_ns": 10000000}]
+        },
+        {
+            "name": "imu_sensor",
+            "type": "imu_sensor",
+            "description": "publishes IMU samples at 100 Hz",
+            "writers": ["imu"],
+            "parameters": {"cruise_speed": 15.0},
+            "triggers": [{"kind": "periodic", "period_ns": 10000000}]
+        }
+    ]
+}

@@ -106,6 +106,29 @@ const Json& Array(const Json& object, const char* key, const std::string& path)
     return *found;
 }
 
+runtime::ParameterMap ReadParameters(const Json& object, const std::string& path)
+{
+    runtime::ParameterMap parameters;
+    const auto found = object.find("parameters");
+    if (found == object.end()) {
+        return parameters;
+    }
+    const auto field = path + ".parameters";
+    if (!found->is_object()) {
+        throw std::invalid_argument(field + " must be an object");
+    }
+    for (auto it = found->begin(); it != found->end(); ++it) {
+        if (it->is_string()) {
+            parameters.emplace(it.key(), it->get<std::string>());
+        } else if (it->is_number() || it->is_boolean()) {
+            parameters.emplace(it.key(), it->dump());
+        } else {
+            throw std::invalid_argument(field + "." + it.key() + " must be a string, number, or boolean");
+        }
+    }
+    return parameters;
+}
+
 ProjectConfig Decode(const Json& root)
 {
     CheckObject(root, "$", {"runtime", "scheduler", "topics", "components"});
@@ -157,13 +180,14 @@ ProjectConfig Decode(const Json& root)
     index = 0;
     for (const auto& value : Array(root, "components", "$")) {
         const auto path = "$.components[" + std::to_string(index++) + "]";
-        CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type"});
+        CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type", "parameters"});
         ComponentConfig component;
         Read(value, "name", component.name, path);
         Read(value, "type", component.type, path);
         Read(value, "description", component.description, path);
         Read(value, "readers", component.readers, path);
         Read(value, "writers", component.writers, path);
+        component.parameters = ReadParameters(value, path);
         std::size_t trigger_index = 0;
         for (const auto& entry : Array(value, "triggers", path)) {
             const auto trigger_path = path + ".triggers[" + std::to_string(trigger_index++) + "]";

@@ -355,7 +355,7 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         return core::Result<runtime::ComponentSpec>::FromStatus(component_name.status());
     }
 
-    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}};
+    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}, parameters};
 
     for (const auto& topic_id : readers) {
         auto endpoint = project.BuildEndpoint(topic_id);

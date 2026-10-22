@@ -287,12 +287,14 @@ void DescribeListsTopicsComponentsAndTriggers()
     on_speed.data_topics = {"speed"};
     on_speed.priority = 3;
     config::ComponentConfig monitor {"monitor", "", {"speed"}, {}, {on_speed}, "speed_monitor"};
+    monitor.parameters = {{"limit", "30"}, {"label", "front"}};
     assert(project.AddComponent(monitor).ok());
 
     const auto text = config::DescribeProject(project);
     for (const char* expected : {"2 worker(s)", "priority aging every 10ms", "speed -> /vehicle/speed",
                                  "ipc", "queued depth 8", "monitor (speed_monitor)", "reads: speed",
-                                 "trigger: data on any of speed", "priority 3"}) {
+                                 "trigger: data on any of speed", "priority 3",
+                                 "parameters: label=front, limit=30"}) {
         assert(text.find(expected) != std::string::npos);
     }
 }

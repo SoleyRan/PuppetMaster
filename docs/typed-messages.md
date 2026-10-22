@@ -57,6 +57,24 @@ type cannot silently decode another.
 `TypedReader` also forwards `SetDataAvailableCallback` and
 `PendingMessageCount`, and `raw()` returns the underlying byte endpoint.
 
+### From A Component Spec
+
+Inside a component, `puppet_master/runtime/typed_endpoints.h` picks the
+endpoint by message type from the component's declared readers or writers, so
+the code does not depend on their order in the configuration:
+
+```cpp
+core::Status Configure(runtime::ComponentContext& context) override
+{
+    auto wheel = runtime::MakeTypedReader<WheelSpeed>(context, spec_);
+    auto state = runtime::MakeTypedWriter<VehicleState>(context, spec_);
+    ...
+}
+```
+
+It returns `NotFound` when the spec declares no reader (or writer) for T, and
+`InvalidArgument` when it declares several; create those by topic instead.
+
 ## Custom Codecs
 
 Specialize `transport::Codec<T>` for variable-size or portable formats:

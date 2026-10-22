@@ -52,6 +52,7 @@ struct ComponentConfig {
     std::vector<std::string> writers;
     std::vector<TriggerConfig> triggers;
     std::string type;
+    runtime::ParameterMap parameters;
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<runtime::ComponentSpec> ToComponentSpec(const ProjectConfig& project) const;

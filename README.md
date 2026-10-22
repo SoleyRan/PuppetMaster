@@ -56,6 +56,7 @@ The default build depends only on the C++ standard library:
 include/puppet_master/   Public headers for downstream projects.
 src/                     Library and optional adapter implementations.
 demo/                    Small runnable examples and an example configuration.
+examples/                Standalone downstream projects built against an install.
 tools/                   Command-line tools such as puppet_master_config.
 test/                    Unit, integration, and smoke tests.
 cmake/                   Package configuration templates.
@@ -101,6 +102,12 @@ After installation, another CMake project can consume PuppetMaster with:
 find_package(PuppetMaster CONFIG REQUIRED)
 target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 ```
+
+[`examples/vehicle_pipeline`](examples/vehicle_pipeline/README.md) is a
+complete downstream project: one binary whose JSON configuration decides
+which components run, split across three processes over shared memory or run
+in one process for debugging. CI builds it against the installed package and
+runs the multi-process pipeline.
 
 ## Roadmap
 

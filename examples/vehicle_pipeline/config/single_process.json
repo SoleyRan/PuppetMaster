@@ -1,0 +1,26 @@
+{
+    "scheduler": {"worker_count": 2},
+    "topics": [
+        {"id": "wheel", "name": "/vehicle/wheel_speed", "transport": "in_memory",
+         "message_type": "vehicle.WheelSpeed", "encoding": "application/x-puppetmaster-trivial",
+         "message_policy": {"freshness": "queued", "queue_depth": 8}},
+        {"id": "imu", "name": "/vehicle/imu", "transport": "in_memory",
+         "message_type": "vehicle.ImuSample", "encoding": "application/x-puppetmaster-trivial",
+         "message_policy": {"freshness": "queued", "queue_depth": 8}},
+        {"id": "state", "name": "/vehicle/state", "transport": "in_memory",
+         "message_type": "vehicle.VehicleState", "encoding": "application/x-puppetmaster-trivial",
+         "message_policy": {"freshness": "queued", "queue_depth": 16}}
+    ],
+    "components": [
+        {"name": "wheel_speed_sensor", "type": "wheel_speed_sensor", "writers": ["wheel"],
+         "triggers": [{"kind": "periodic", "period_ns": 10000000}]},
+        {"name": "imu_sensor", "type": "imu_sensor", "writers": ["imu"],
+         "triggers": [{"kind": "periodic", "period_ns": 10000000}]},
+        {"name": "state_estimator", "type": "state_estimator", "readers": ["wheel", "imu"], "writers": ["state"],
+         "parameters": {"wheel_gain": 0.8},
+         "triggers": [{"kind": "data", "dependency_policy": "any", "data_topics": ["wheel", "imu"]}]},
+        {"name": "state_monitor", "type": "state_monitor", "readers": ["state"],
+         "parameters": {"max_states": 100},
+         "triggers": [{"kind": "data", "data_topics": ["state"]}]}
+    ]
+}

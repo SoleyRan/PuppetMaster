@@ -1,0 +1,25 @@
+{
+    "scheduler": {"worker_count": 1},
+    "topics": [
+        {"id": "wheel", "name": "/vehicle/wheel_speed", "transport": "shm",
+         "message_type": "vehicle.WheelSpeed", "encoding": "application/x-puppetmaster-trivial",
+         "message_policy": {"freshness": "queued", "queue_depth": 8}},
+        {"id": "imu", "name": "/vehicle/imu", "transport": "shm",
+         "message_type": "vehicle.ImuSample", "encoding": "application/x-puppetmaster-trivial",
+         "message_policy": {"freshness": "queued", "queue_depth": 8}},
+        {"id": "state", "name": "/vehicle/state", "transport": "shm",
+         "message_type": "vehicle.VehicleState", "encoding": "application/x-puppetmaster-trivial"}
+    ],
+    "components": [
+        {
+            "name": "state_estimator",
+            "type": "state_estimator",
+            "description": "fuses wheel speed and IMU into a vehicle state",
+            "readers": ["wheel", "imu"],
+            "writers": ["state"],
+            "parameters": {"wheel_gain": 0.8},
+            "triggers": [{"kind": "data", "dependency_policy": "any", "data_topics": ["wheel", "imu"],
+                          "deadline_ns": 5000000}]
+        }
+    ]
+}

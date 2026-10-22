@@ -117,6 +117,27 @@ private:
 };
 ```
 
+## Component Parameters
+
+`ComponentConfig::parameters` holds a component's own settings, such as gains
+or limits, as a `runtime::ParameterMap` of key to text. They are copied into
+`ComponentSpec::parameters`, and the component reads them with
+`puppet_master/runtime/parameters.h`:
+
+```cpp
+auto gain = runtime::GetParameter(spec_.parameters, "wheel_gain", 0.8);  // fallback when unset
+auto port = runtime::GetRequiredParameter<std::uint16_t>(spec_.parameters, "port");
+if (!gain.ok()) {
+    return gain.status();  // InvalidArgument naming the key
+}
+```
+
+`GetParameter<T>` converts to `std::string`, `bool` (`true`/`false`),
+integers (range-checked), and floating point, and returns the fallback when
+the key is missing. `GetRequiredParameter<T>` returns `NotFound` instead. The
+configuration layer does not interpret parameters; each component checks its
+own in `Configure`.
+
 ## String Parsers
 
 The configuration layer also includes small enum parsers for future file
@@ -167,7 +188,9 @@ before returning. Malformed JSON, wrong value types, and unknown fields return
 
 The JSON fields mirror the C++ model. Durations use nanosecond integers
 (`period_ns`, `deadline_ns`), and enum values use the same names accepted by the
-string parsers:
+string parsers. A component's `"parameters"` is an object of strings, numbers,
+and booleans; numbers and booleans are stored as their JSON text, so `30`,
+`0.5`, and `true` read back through `GetParameter` as written:
 
 ```json
 {
@@ -183,6 +206,7 @@ string parsers:
     "components": [{
         "name": "speed_monitor",
         "readers": ["speed"],
+        "parameters": {"max_speed": 40.0},
         "triggers": [{"kind": "data", "data_topics": ["speed"]}]
     }]
 }

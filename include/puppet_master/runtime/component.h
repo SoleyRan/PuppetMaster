@@ -9,6 +9,7 @@
 #include <puppet_master/core/result.h>
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
+#include <puppet_master/runtime/parameters.h>
 #include <puppet_master/transport/transport.h>
 
 namespace puppet_master::runtime {
@@ -56,6 +57,8 @@ struct ComponentSpec {
     std::vector<transport::EndpointConfig> readers;
     std::vector<transport::EndpointConfig> writers;
     std::vector<core::TriggerSpec> triggers;
+    // Component-specific settings from configuration; see runtime/parameters.h.
+    ParameterMap parameters;
 
     core::Status Validate() const
     {

@@ -60,6 +60,20 @@ add_test(
     COMMAND puppet_master_typed_transport_test
 )
 
+add_executable(puppet_master_component_parameters_test
+    component_parameters_test.cpp
+)
+
+target_link_libraries(puppet_master_component_parameters_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.component_parameters
+    COMMAND puppet_master_component_parameters_test
+)
+
 add_executable(puppet_master_inmemory_transport_test
     inmemory_transport_test.cpp
 )

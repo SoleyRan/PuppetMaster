@@ -102,6 +102,13 @@ std::string DescribeProject(const ProjectConfig& project)
         if (!component.writers.empty()) {
             text << "    writes: " << Join(component.writers) << '\n';
         }
+        if (!component.parameters.empty()) {
+            std::vector<std::string> parameters;
+            for (const auto& [key, value] : component.parameters) {
+                parameters.push_back(key + "=" + value);
+            }
+            text << "    parameters: " << Join(parameters) << '\n';
+        }
         for (const auto& trigger : component.triggers) {
             text << "    trigger: " << core::ToString(trigger.kind);
             switch (trigger.kind) {
