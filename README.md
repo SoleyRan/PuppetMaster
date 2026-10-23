@@ -59,6 +59,7 @@ demo/                    Small runnable examples and an example configuration.
 examples/                Standalone downstream projects built against an install.
 tools/                   Command-line tools such as puppet_master_config.
 test/                    Unit, integration, and smoke tests.
+bench/                   Transport benchmarks (PUPPETMASTER_BUILD_BENCHMARKS).
 cmake/                   Package configuration templates.
 docs/                    Architecture notes and design decisions.
 ```
@@ -79,6 +80,7 @@ cmake -S . -B build -DPUPPETMASTER_BUILD_TESTS=OFF
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
 cmake -S . -B build -DPUPPETMASTER_ENABLE_GOODLOG=ON
 cmake -S . -B build -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
+cmake -S . -B build -DPUPPETMASTER_BUILD_BENCHMARKS=ON
 ```
 
 `PUPPETMASTER_ENABLE_FASTDDS` builds the optional FastDDS adapter target. The
@@ -90,18 +92,46 @@ which requires an installed `nlohmann_json` package.
 `PUPPETMASTER_ENABLE_SHM` (default `ON`) builds `PuppetMaster::ShmAdapter` on
 Linux and Windows. It needs no third-party packages.
 
+`PUPPETMASTER_BUILD_BENCHMARKS` (default `OFF`) builds the transport
+benchmark; see [Benchmarks](docs/benchmarks.md).
+
 `PUPPETMASTER_ENABLE_GOODLOG` builds `PuppetMaster::GoodLogAdapter`. CMake uses
 an installed GoodLog package when available or fetches a pinned revision from
 <https://github.com/SoleyRan/GoodLog>.
+
+## Install
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
+cmake --build build --parallel
+ctest --test-dir build
+cmake --install build --prefix /opt/puppetmaster
+```
+
+This installs headers under `include/`, the libraries, the CMake package under
+`lib/cmake/PuppetMaster`, and, with the JSON adapter, `bin/puppet_master_config`.
+Add `-DBUILD_SHARED_LIBS=ON` for shared libraries.
+
+Before 1.0 each minor release may break the API and the ABI, so the shared
+libraries' soname includes the minor version (`libpuppet_master.so.0.2`) and
+the package accepts only the same minor version. Rebuild dependents when
+upgrading; see [CHANGELOG](CHANGELOG.md).
 
 ## Downstream Usage
 
 After installation, another CMake project can consume PuppetMaster with:
 
 ```cmake
-find_package(PuppetMaster CONFIG REQUIRED)
+find_package(PuppetMaster 0.2 CONFIG REQUIRED)
 target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 ```
+
+Add `/opt/puppetmaster` to `CMAKE_PREFIX_PATH`. Adapters are separate
+targets, available when they were built: `PuppetMaster::ShmAdapter`,
+`PuppetMaster::JsonConfigAdapter`, `PuppetMaster::FastDdsAdapter`,
+`PuppetMaster::GoodLogAdapter`, and the exporter adapters. The package sets
+`PUPPETMASTER_WITH_SHM`, `PUPPETMASTER_WITH_JSON_CONFIG`,
+`PUPPETMASTER_WITH_FASTDDS`, and `PUPPETMASTER_WITH_GOODLOG` to tell which.
 
 [`examples/vehicle_pipeline`](examples/vehicle_pipeline/README.md) is a
 complete downstream system, packaged the way separate teams would release it:
@@ -136,6 +166,12 @@ Follow-up phases, all complete:
    - Scheduler starvation protection through priority aging.
    - Configuration validation, a `puppet_master_config` CLI, and an
      `Application` launcher that runs a JSON configuration end to end.
+6. Downstream validation. Done: component parameters, message versions,
+   multi-file configuration with imports and deployments, system checks, and
+   the vehicle pipeline example.
+7. Services and release 0.2. Done: request/reply services on every
+   transport, system manifests, a portable codec, shared-memory segment
+   tools, benchmarks, and Windows JSON CI. See [CHANGELOG](CHANGELOG.md).
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -150,6 +186,8 @@ See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
 See [Shared-Memory Transport](docs/shm-transport.md) for same-host IPC.
 See [Typed Messages](docs/typed-messages.md) for struct and codec-based
 endpoints.
+See [Services](docs/services.md) for request/reply calls with timeouts and
+server liveness.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [Launcher And Configuration Tools](docs/launcher.md) for running

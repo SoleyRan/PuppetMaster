@@ -6,7 +6,7 @@ project(EstimatorNode VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
-find_package(PuppetMaster 0.1 CONFIG REQUIRED)
+find_package(PuppetMaster 0.2 CONFIG REQUIRED)
 find_package(EstimationInterfaces 1 CONFIG REQUIRED)
 
 add_executable(estimator_node src/main.cpp)

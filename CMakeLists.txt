@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(PuppetMaster
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "A C++ real-time middleware runtime for message-driven components and deterministic task scheduling."
     HOMEPAGE_URL "https://github.com/SoleyRan/PuppetMaster"
     LANGUAGES CXX
@@ -20,6 +20,18 @@ else()
     set(PUPPETMASTER_IS_TOP_LEVEL OFF)
 endif()
 
+# Before 1.0, every minor release may break the ABI and the API (0.2 added a
+# virtual function to transport::Writer, for example), so the shared library
+# soname and the CMake package compatibility both include the minor version.
+# From 1.0 on, only a major release breaks them.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+    set(PUPPETMASTER_SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+    set(PUPPETMASTER_PACKAGE_COMPATIBILITY SameMinorVersion)
+else()
+    set(PUPPETMASTER_SOVERSION "${PROJECT_VERSION_MAJOR}")
+    set(PUPPETMASTER_PACKAGE_COMPATIBILITY SameMajorVersion)
+endif()
+
 option(PUPPETMASTER_BUILD_DEMOS "Build PuppetMaster example programs." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_BUILD_TESTS "Build PuppetMaster tests." ${PUPPETMASTER_IS_TOP_LEVEL})
 option(PUPPETMASTER_ENABLE_FASTDDS "Build the optional FastDDS transport adapter." OFF)
@@ -28,6 +40,7 @@ option(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE
 option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
 option(PUPPETMASTER_ENABLE_JSON_CONFIG "Build the optional JSON configuration adapter." OFF)
 option(PUPPETMASTER_ENABLE_SHM "Build the shared-memory transport (Linux and Windows only)." ON)
+option(PUPPETMASTER_BUILD_BENCHMARKS "Build transport benchmarks." OFF)
 set(
     PUPPETMASTER_GOODLOG_GIT_TAG
     "2eaaa2b67388dcfd41eaf8f3dd57e7f987bc31fa"
@@ -102,6 +115,10 @@ if(PUPPETMASTER_BUILD_TESTS)
     add_subdirectory(test)
 endif()
 
+if(PUPPETMASTER_BUILD_BENCHMARKS)
+    add_subdirectory(bench)
+endif()
+
 set(PUPPETMASTER_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/PuppetMaster")
 
 configure_package_config_file(
@@ -113,7 +130,7 @@ configure_package_config_file(
 write_basic_package_version_file(
     "${PROJECT_BINARY_DIR}/PuppetMasterConfigVersion.cmake"
     VERSION "${PROJECT_VERSION}"
-    COMPATIBILITY SameMajorVersion
+    COMPATIBILITY ${PUPPETMASTER_PACKAGE_COMPATIBILITY}
 )
 
 install(

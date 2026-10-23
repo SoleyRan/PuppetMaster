@@ -9,6 +9,12 @@ target_link_libraries(puppet_master_config
         PuppetMaster::JsonConfigAdapter
 )
 
+# `shm list|clean` needs the shared-memory adapter.
+if(TARGET PuppetMaster::ShmAdapter)
+    target_link_libraries(puppet_master_config PRIVATE PuppetMaster::ShmAdapter)
+    target_compile_definitions(puppet_master_config PRIVATE PUPPETMASTER_CONFIG_WITH_SHM)
+endif()
+
 if(MSVC)
     target_compile_options(puppet_master_config PRIVATE /W4 /permissive-)
 else()

@@ -18,6 +18,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/configuration.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/system_manifest.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/status.h"
@@ -33,9 +34,13 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/typed_endpoints.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/scheduler/scheduler.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/component_services.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/service.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/typed_service.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/portable_codec.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/typed.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/inmemory/inmemory_transport.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/fastdds/fastdds_transport.h"
@@ -55,6 +60,7 @@ add_library(puppet_master
     runtime/component.cpp
     runtime/context.cpp
     scheduler/scheduler.cpp
+    service/service.cpp
     transport/inmemory/inmemory_transport.cpp
     ${PUPPETMASTER_PUBLIC_HEADERS}
 )
@@ -96,7 +102,7 @@ set_target_properties(puppet_master
         OUTPUT_NAME puppet_master
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -154,7 +160,7 @@ set_target_properties(puppet_master_chrome_trace_adapter
         OUTPUT_NAME puppet_master_chrome_trace_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -204,7 +210,7 @@ set_target_properties(puppet_master_prometheus_adapter
         OUTPUT_NAME puppet_master_prometheus_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -254,7 +260,7 @@ set_target_properties(puppet_master_json_log_adapter
         OUTPUT_NAME puppet_master_json_log_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -269,8 +275,10 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_library(puppet_master_json_config_adapter
         configuration/json_launcher.cpp
         configuration/json_loader.cpp
+        configuration/system_manifest.cpp
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
+        "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/system_manifest.h"
     )
 
     add_library(PuppetMaster::JsonConfigAdapter ALIAS puppet_master_json_config_adapter)
@@ -309,7 +317,7 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
             OUTPUT_NAME puppet_master_json_config_adapter
             POSITION_INDEPENDENT_CODE ON
             VERSION "${PROJECT_VERSION}"
-            SOVERSION "${PROJECT_VERSION_MAJOR}"
+            SOVERSION "${PUPPETMASTER_SOVERSION}"
     )
 
     install(
@@ -355,7 +363,7 @@ if(PUPPETMASTER_ENABLE_GOODLOG)
             OUTPUT_NAME puppet_master_goodlog_adapter
             POSITION_INDEPENDENT_CODE ON
             VERSION "${PROJECT_VERSION}"
-            SOVERSION "${PROJECT_VERSION_MAJOR}"
+            SOVERSION "${PUPPETMASTER_SOVERSION}"
     )
 
     install(

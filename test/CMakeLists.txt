@@ -60,6 +60,20 @@ add_test(
     COMMAND puppet_master_typed_transport_test
 )
 
+add_executable(puppet_master_portable_codec_test
+    portable_codec_test.cpp
+)
+
+target_link_libraries(puppet_master_portable_codec_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.portable_codec
+    COMMAND puppet_master_portable_codec_test
+)
+
 add_executable(puppet_master_component_parameters_test
     component_parameters_test.cpp
 )
@@ -73,6 +87,21 @@ add_test(
     NAME puppet_master.component_parameters
     COMMAND puppet_master_component_parameters_test
 )
+
+add_executable(puppet_master_service_test
+    service_test.cpp
+)
+
+target_link_libraries(puppet_master_service_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.service
+    COMMAND puppet_master_service_test
+)
+set_tests_properties(puppet_master.service PROPERTIES TIMEOUT 60)
 
 add_executable(puppet_master_inmemory_transport_test
     inmemory_transport_test.cpp
@@ -151,6 +180,18 @@ if(TARGET puppet_master_configuration_system_demo)
     )
 endif()
 
+if(TARGET puppet_master_service_demo)
+    add_test(
+        NAME puppet_master.service_demo
+        COMMAND puppet_master_service_demo
+    )
+    set_tests_properties(puppet_master.service_demo
+        PROPERTIES
+            PASS_REGULAR_EXPRESSION "service demo finished"
+            TIMEOUT 30
+    )
+endif()
+
 if(TARGET puppet_master_launcher_demo)
     set(PUPPETMASTER_DEMO_CONFIG "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json")
 
@@ -175,6 +216,35 @@ if(TARGET puppet_master_config)
     add_test(
         NAME puppet_master.config_tool_validate
         COMMAND puppet_master_config validate "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json"
+    )
+
+    # The example manifest resolves node configs through ${VEHICLE_PREFIX},
+    # which points at packages built separately. Without that install, the
+    # tool must name the missing node config instead of passing.
+    add_test(
+        NAME puppet_master.config_tool_system_missing_node
+        COMMAND puppet_master_config system validate
+            "${PROJECT_SOURCE_DIR}/examples/vehicle_pipeline/integration/system.json"
+    )
+    set_tests_properties(puppet_master.config_tool_system_missing_node
+        PROPERTIES
+            ENVIRONMENT "VEHICLE_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/no-vehicle-install"
+            PASS_REGULAR_EXPRESSION "config monitor_node/monitor.json of node monitor not found"
+    )
+endif()
+
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_executable(puppet_master_system_manifest_test
+        system_manifest_test.cpp
+    )
+
+    target_link_libraries(puppet_master_system_manifest_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.system_manifest
+        COMMAND puppet_master_system_manifest_test
     )
 endif()
 
@@ -376,6 +446,22 @@ if(PUPPETMASTER_ENABLE_FASTDDS)
         NAME puppet_master.fastdds_transport
         COMMAND puppet_master_fastdds_transport_test
     )
+    set_tests_properties(puppet_master.fastdds_transport PROPERTIES TIMEOUT 60)
+
+    add_executable(puppet_master_fastdds_service_test
+        fastdds_service_test.cpp
+    )
+
+    target_link_libraries(puppet_master_fastdds_service_test
+        PRIVATE
+            PuppetMaster::FastDdsAdapter
+    )
+
+    add_test(
+        NAME puppet_master.fastdds_service
+        COMMAND puppet_master_fastdds_service_test
+    )
+    set_tests_properties(puppet_master.fastdds_service PROPERTIES TIMEOUT 120)
 endif()
 
 if(TARGET puppet_master_shm_internal)
@@ -424,6 +510,38 @@ if(TARGET PuppetMaster::ShmAdapter)
         NAME puppet_master.shm_transport
         COMMAND puppet_master_shm_transport_test
     )
+
+    add_executable(puppet_master_shm_segments_test
+        shm_segments_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_segments_test
+        PRIVATE
+            PuppetMaster::ShmAdapter
+    )
+
+    # Lists and removes everything in its own shm domain, so it must not run
+    # alongside another instance of itself.
+    add_test(
+        NAME puppet_master.shm_segments
+        COMMAND puppet_master_shm_segments_test
+    )
+    set_tests_properties(puppet_master.shm_segments PROPERTIES RUN_SERIAL TRUE)
+
+    add_executable(puppet_master_shm_service_test
+        shm_service_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_service_test
+        PRIVATE
+            PuppetMaster::ShmAdapter
+    )
+
+    add_test(
+        NAME puppet_master.shm_service
+        COMMAND puppet_master_shm_service_test
+    )
+    set_tests_properties(puppet_master.shm_service PROPERTIES TIMEOUT 60)
 endif()
 
 if(TARGET puppet_master_shm_internal)

@@ -27,7 +27,70 @@ struct puppet_master::transport::MessageTypeName<VehicleSpeed> {
 The bytes are a raw copy of the struct, so writer and reader must agree on
 layout: same struct definition, compiler ABI, and endianness. That holds for
 processes built together on one host, which is the in-memory and shared-memory
-case. Use a custom codec for anything else.
+case. Across compilers, architectures, or hosts, use the
+[portable codec](#portable-codec) or a custom codec.
+
+## Portable Codec
+
+`puppet_master/transport/portable_codec.h` encodes a struct field by field in a
+fixed little-endian format, independent of padding, compiler, and host byte
+order. It also supports variable-size fields. A type lists its fields once, in
+wire order:
+
+```cpp
+#include <puppet_master/transport/portable_codec.h>
+
+struct Pose {
+    double x;
+    double y;
+    std::string frame;
+    std::vector<float> covariance;
+};
+
+template <>
+struct puppet_master::transport::PortableFields<Pose> {
+    template <typename Message, typename Visitor>
+    static void Visit(Message& pose, Visitor&& field)
+    {
+        field(pose.x);
+        field(pose.y);
+        field(pose.frame);
+        field(pose.covariance);
+    }
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<Pose> {
+    static constexpr const char* value = "demo.Pose";
+    static constexpr std::uint32_t version = 1;
+};
+
+template <>
+struct puppet_master::transport::Codec<Pose> : transport::PortableCodec<Pose> {};
+```
+
+`Visit` is used for encoding (`const Pose&`) and decoding (`Pose&`), so the
+field list cannot differ between the two.
+
+| Field type | Wire format |
+|---|---|
+| `bool` | 1 byte, 0 or 1; anything else fails to decode |
+| integers, `float`, `double` | their width, little-endian; floats as IEEE 754 bits |
+| enums | their underlying type |
+| `std::string` | `u32` byte count, then the bytes (any content, including NUL) |
+| `std::vector<T>` | `u32` element count, then the elements |
+| `std::array<T, N>` | the N elements, no count |
+| a type with `PortableFields` | its fields in order |
+
+`std::vector<bool>` is rejected at compile time; use
+`std::vector<std::uint8_t>`. The encoding is `application/x-puppetmaster-portable`.
+
+Decoding returns `DataLoss`, naming the type, when the message ends inside a
+field, a count exceeds the remaining bytes (checked before allocating), a
+`bool` byte is not 0 or 1, or bytes are left over. A reader built with a
+different field list therefore fails instead of misreading, but the format has
+no field tags: adding, removing, or reordering fields changes it, so raise the
+type's version with any such change, as for structs.
 
 ## Endpoints, Readers, And Writers
 

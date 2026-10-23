@@ -149,6 +149,39 @@ shm::RemoveSegment(domain_id, "/lidar/points");
 or remove `/dev/shm/pm.<domain>.<hash>` by hand. On Windows, a segment is freed
 when the last process closes it.
 
+### Listing And Cleaning Up
+
+`puppet_master_config shm` inspects this host's segments without attaching to
+them, so it changes nothing for running processes:
+
+```bash
+puppet_master_config shm list [--domain N]
+puppet_master_config shm clean [--domain N] [--dry-run]
+```
+
+`list` prints each segment's object name, state, topic, message descriptor,
+geometry, messages written, and the pids of running processes attached to it.
+The states are:
+
+| State | Meaning | Removed by `clean` |
+|---|---|---|
+| `in_use` | a running process is attached | never |
+| `unused` | valid, but every attached process has exited | yes |
+| `uninitialized` | its creator crashed before publishing the header | yes |
+| `incompatible` | truncated, or another layout version | yes |
+
+A process that exits without closing its transport, for example after a
+crash, leaves its participant entry behind; `list` counts it as exited, and
+the segment is `unused` once no running process remains. Only names of the
+form `pm.<domain>.<16 hex digits>` are considered, so other programs' files in
+`/dev/shm` are never touched.
+
+Run `clean` while the system is stopped: a process that attaches between the
+check and the removal keeps working on the removed segment, but no longer
+shares it with processes started later. The same operations are available
+in C++ as `shm::ListSegments` and `shm::RemoveUnusedSegments`. On Windows they
+return `Unsupported`, since there is nothing left over to clean.
+
 ## Limits
 
 - Same host only. Use the FastDDS adapter across hosts.

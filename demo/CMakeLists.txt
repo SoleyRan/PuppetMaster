@@ -102,3 +102,12 @@ if(PUPPETMASTER_ENABLE_GOODLOG)
             PUPPETMASTER_DEMO_WITH_GOODLOG
     )
 endif()
+
+add_executable(puppet_master_service_demo
+    service_demo.cpp
+)
+
+target_link_libraries(puppet_master_service_demo
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)

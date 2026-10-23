@@ -86,6 +86,28 @@ std::size_t HeaderSize();
 // Total bytes for the geometry, or 0 if it overflows size_t.
 std::size_t SegmentSize(const SegmentGeometry& geometry);
 
+// What a segment's header says, read without attaching to it, for tools that
+// list and clean up segments.
+struct SegmentInspection {
+    enum class State : std::uint8_t {
+        kValid = 0,
+        kUninitialized,  // created but its header was never published
+        kIncompatible,   // too small, or another layout version
+    };
+
+    State state {State::kValid};
+    std::string problem;  // why it is not valid
+    std::size_t size {0};
+    std::string topic;
+    MessageDescriptor descriptor;
+    SegmentGeometry geometry;
+    std::uint64_t write_sequence {0};
+    std::vector<ProcessIdentity> participants;  // active entries, alive or not
+};
+
+// Maps `name` read-only and reads its header. NotFound if it does not exist.
+core::Result<SegmentInspection> InspectSegment(const std::string& name);
+
 // Result of one reader pass over the ring.
 struct ReadOutcome {
     bool has_message {false};

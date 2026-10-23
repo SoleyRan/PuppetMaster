@@ -58,6 +58,11 @@ descriptor differs from the one already open on that topic.
   throwing `fill` publishes nothing. Backends with
   `TransportCapabilities::supports_zero_copy` hand `fill` transport memory; the
   default implementation fills a temporary buffer and calls `Write()`.
+- `Writer::MatchedReaderCount()` reports how many readers the writer is
+  connected to, for backends that discover peers asynchronously (FastDDS),
+  where a message written before a reader is matched never reaches it.
+  Backends that deliver to every reader as soon as both exist (in-memory,
+  shared memory) return `Unsupported`.
 
 Backends should report unsupported behavior through `core::Status::Unsupported`
 instead of silently pretending to provide stronger delivery guarantees.

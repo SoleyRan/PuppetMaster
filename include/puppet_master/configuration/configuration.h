@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -15,6 +17,7 @@
 #include <puppet_master/runtime/component.h>
 #include <puppet_master/runtime/context.h>
 #include <puppet_master/scheduler/scheduler.h>
+#include <puppet_master/service/service.h>
 #include <puppet_master/transport/transport.h>
 
 namespace puppet_master::configuration {
@@ -36,6 +39,26 @@ struct TopicConfig {
 
     core::Status Validate() const;
     core::Result<transport::EndpointConfig> ToEndpointConfig() const;
+};
+
+// A request/reply service. Like a topic, it has an id local to the project
+// and a wire name shared by every process; see docs/services.md.
+struct ServiceConfig {
+    std::string id;
+    std::string name;
+    core::TransportKind transport {core::TransportKind::kInMemory};
+    std::string request_type;
+    std::string reply_type;
+    std::string encoding {"application/octet-stream"};
+    std::uint32_t request_version {0};
+    std::uint32_t reply_version {0};
+    std::size_t queue_depth {16};
+    core::Nanoseconds heartbeat_interval {std::chrono::milliseconds(100)};
+    // Backend settings for the service's topics, as for TopicConfig.
+    runtime::ParameterMap transport_parameters;
+
+    core::Status Validate() const;
+    core::Result<service::ServiceSpec> ToServiceSpec() const;
 };
 
 struct TriggerConfig {
@@ -62,6 +85,9 @@ struct ComponentConfig {
     // Reader-side policy by topic id, replacing the topic's message_policy for
     // this component's reader only. Keys must be listed in `readers`.
     std::map<std::string, core::MessagePolicy> reader_policies;
+    // Service ids this component provides and calls.
+    std::vector<std::string> servers;
+    std::vector<std::string> clients;
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<runtime::ComponentSpec> ToComponentSpec(const ProjectConfig& project) const;
@@ -74,9 +100,11 @@ struct ProjectConfig {
     scheduler::SchedulerOptions scheduler_options;
     std::vector<TopicConfig> topics;
     std::vector<ComponentConfig> components;
+    std::vector<ServiceConfig> services;
 
     core::Status AddTopic(TopicConfig topic);
     core::Status AddComponent(ComponentConfig component);
+    core::Status AddService(ServiceConfig service);
 
     core::Status Validate() const;
 
@@ -86,6 +114,7 @@ struct ProjectConfig {
     core::Result<ComponentConfig> FindComponent(std::string_view name) const;
     core::Result<transport::EndpointConfig> BuildEndpoint(std::string_view topic_id) const;
     core::Result<runtime::ComponentSpec> BuildComponentSpec(std::string_view component_name) const;
+    core::Result<ServiceConfig> FindService(std::string_view id) const;
 };
 
 using ComponentFactory = std::function<core::Result<runtime::ComponentPtr>(const runtime::ComponentSpec&)>;

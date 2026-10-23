@@ -427,22 +427,41 @@ core::Status RegisterTransport(runtime::RuntimeContext& runtime, core::Transport
 core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& project, Options base)
 {
     using ResultType = core::Result<Options>;
-    bool domain_set = false;
+
+    // Each ipc topic with settings, plus the three topics of each ipc service
+    // with settings, which share the service's.
+    struct Entry {
+        std::string label;
+        std::vector<std::string> topics;
+        const runtime::ParameterMap* parameters;
+    };
+    std::vector<Entry> entries;
     for (const auto& topic : project.topics) {
-        if (topic.transport != core::TransportKind::kIpc || topic.transport_parameters.empty()) {
-            continue;
+        if (topic.transport == core::TransportKind::kIpc && !topic.transport_parameters.empty()) {
+            entries.push_back(Entry {"topic " + topic.name, {topic.name}, &topic.transport_parameters});
         }
-        const auto invalid = [&topic](const core::Status& status) {
+    }
+    for (const auto& service : project.services) {
+        if (service.transport == core::TransportKind::kIpc && !service.transport_parameters.empty()) {
+            entries.push_back(Entry {"service " + service.name,
+                                     {service.name + "/request", service.name + "/reply", service.name + "/presence"},
+                                     &service.transport_parameters});
+        }
+    }
+
+    bool domain_set = false;
+    for (const auto& entry_info : entries) {
+        const auto invalid = [&entry_info](const core::Status& status) {
             return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm settings of topic " + topic.name + ": " + status.message()));
+                "shm settings of " + entry_info.label + ": " + status.message()));
         };
-        for (const auto& entry : topic.transport_parameters) {
+        for (const auto& entry : *entry_info.parameters) {
             if (entry.first != "slot_payload_size" && entry.first != "slot_count" && entry.first != "domain_id") {
                 return invalid(core::Status::InvalidArgument("unknown parameter " + entry.first
                                                              + "; expected slot_payload_size, slot_count, or domain_id"));
             }
         }
-        const auto& parameters = topic.transport_parameters;
+        const auto& parameters = *entry_info.parameters;
         auto domain = runtime::GetParameter<core::DomainId>(parameters, "domain_id", base.domain_id);
         if (!domain.ok()) {
             return invalid(domain.status());
@@ -460,7 +479,7 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
         if (parameters.count("slot_payload_size") == 0 && parameters.count("slot_count") == 0) {
             continue;
         }
-        TopicOptions geometry = base.ForTopic(topic.name);
+        TopicOptions geometry = base.ForTopic(entry_info.topics.front());
         auto payload = runtime::GetParameter<std::size_t>(parameters, "slot_payload_size", geometry.slot_payload_size);
         auto slots = runtime::GetParameter<std::size_t>(parameters, "slot_count", geometry.slot_count);
         if (!payload.ok()) {
@@ -475,7 +494,9 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
         if (!status.ok()) {
             return invalid(status);
         }
-        base.topics[topic.name] = geometry;
+        for (const auto& topic : entry_info.topics) {
+            base.topics[topic] = geometry;
+        }
     }
     auto status = base.Validate();
     if (!status.ok()) {
@@ -487,6 +508,109 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
 core::Status RemoveSegment(core::DomainId domain_id, const std::string& topic)
 {
     return detail::SharedRegion::Remove(detail::ObjectName(domain_id, topic));
+}
+
+const char* ToString(SegmentInfo::State state) noexcept
+{
+    switch (state) {
+        case SegmentInfo::State::kInUse:
+            return "in_use";
+        case SegmentInfo::State::kUnused:
+            return "unused";
+        case SegmentInfo::State::kUninitialized:
+            return "uninitialized";
+        case SegmentInfo::State::kIncompatible:
+            return "incompatible";
+    }
+    return "unknown";
+}
+
+namespace {
+
+// "/pm.<domain>.<hash>" -> domain. List() only returns names of that form.
+core::DomainId DomainOf(const std::string& object_name)
+{
+    const auto start = object_name.find('.') + 1;
+    const auto end = object_name.find('.', start);
+    return static_cast<core::DomainId>(std::stoul(object_name.substr(start, end - start)));
+}
+
+SegmentInfo Describe(const std::string& object_name, const detail::SegmentInspection& inspection)
+{
+    SegmentInfo info;
+    info.object_name = object_name;
+    info.domain_id = DomainOf(object_name);
+    info.size_bytes = inspection.size;
+    info.problem = inspection.problem;
+    switch (inspection.state) {
+        case detail::SegmentInspection::State::kUninitialized:
+            info.state = SegmentInfo::State::kUninitialized;
+            return info;
+        case detail::SegmentInspection::State::kIncompatible:
+            info.state = SegmentInfo::State::kIncompatible;
+            return info;
+        case detail::SegmentInspection::State::kValid:
+            break;
+    }
+    info.topic = inspection.topic;
+    info.descriptor = inspection.descriptor;
+    info.geometry = TopicOptions {inspection.geometry.slot_payload_size, inspection.geometry.slot_count};
+    info.messages_written = inspection.write_sequence;
+    for (const auto& participant : inspection.participants) {
+        if (detail::IsProcessAlive(participant)) {
+            info.live_pids.push_back(participant.pid);
+        } else {
+            ++info.dead_participants;
+        }
+    }
+    info.state = info.live_pids.empty() ? SegmentInfo::State::kUnused : SegmentInfo::State::kInUse;
+    return info;
+}
+
+}  // namespace
+
+core::Result<std::vector<SegmentInfo>> ListSegments(std::optional<core::DomainId> domain_id)
+{
+    using ResultType = core::Result<std::vector<SegmentInfo>>;
+    auto names = detail::SharedRegion::List(domain_id);
+    if (!names.ok()) {
+        return ResultType::FromStatus(names.status());
+    }
+    std::vector<SegmentInfo> segments;
+    for (const auto& name : names.value()) {
+        auto inspection = detail::InspectSegment(name);
+        if (!inspection.ok()) {
+            if (inspection.status().code() == core::StatusCode::kNotFound) {
+                continue;  // removed since it was listed
+            }
+            return ResultType::FromStatus(core::Status::Error(
+                inspection.status().code(), name + ": " + inspection.status().message()));
+        }
+        segments.push_back(Describe(name, inspection.value()));
+    }
+    return ResultType(std::move(segments));
+}
+
+core::Result<std::vector<SegmentInfo>> RemoveUnusedSegments(std::optional<core::DomainId> domain_id)
+{
+    using ResultType = core::Result<std::vector<SegmentInfo>>;
+    auto segments = ListSegments(domain_id);
+    if (!segments.ok()) {
+        return segments;
+    }
+    std::vector<SegmentInfo> removed;
+    for (auto& segment : segments.value()) {
+        if (segment.state == SegmentInfo::State::kInUse) {
+            continue;
+        }
+        auto status = detail::SharedRegion::Remove(segment.object_name);
+        if (!status.ok()) {
+            return ResultType::FromStatus(
+                core::Status::Error(status.code(), segment.object_name + ": " + status.message()));
+        }
+        removed.push_back(std::move(segment));
+    }
+    return ResultType(std::move(removed));
 }
 
 struct ShmTransport::Impl {

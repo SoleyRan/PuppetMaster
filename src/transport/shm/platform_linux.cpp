@@ -1,5 +1,6 @@
 #include "platform.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <thread>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/futex.h>
 #include <pthread.h>
@@ -144,9 +146,77 @@ core::Status SharedRegion::Remove(const std::string& name)
     return core::Status::Ok();
 }
 
+core::Result<std::unique_ptr<SharedRegion>> SharedRegion::OpenReadOnly(const std::string& name)
+{
+    using ResultType = core::Result<std::unique_ptr<SharedRegion>>;
+    const int fd = shm_open(name.c_str(), O_RDONLY, 0);
+    if (fd < 0) {
+        const int error = errno;
+        return ResultType::FromStatus(error == ENOENT ? core::Status::NotFound("no shared region " + name)
+                                                      : core::Status::Unavailable(ErrnoMessage("shm_open", error)));
+    }
+    struct stat info {};
+    if (fstat(fd, &info) != 0) {
+        const int error = errno;
+        close(fd);
+        return ResultType::FromStatus(core::Status::Unavailable(ErrnoMessage("fstat", error)));
+    }
+    const auto size = static_cast<std::size_t>(info.st_size);
+    if (size == 0) {
+        close(fd);
+        // Created but never sized: a creator crashed between the two steps.
+        return ResultType(std::unique_ptr<SharedRegion>(new SharedRegion(nullptr, 0, false, nullptr)));
+    }
+    void* data = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+    const int map_error = errno;
+    close(fd);
+    if (data == MAP_FAILED) {
+        return ResultType::FromStatus(core::Status::Unavailable(ErrnoMessage("mmap", map_error)));
+    }
+    return ResultType(std::unique_ptr<SharedRegion>(new SharedRegion(data, size, false, nullptr)));
+}
+
+core::Result<std::vector<std::string>> SharedRegion::List(std::optional<core::DomainId> domain)
+{
+    // POSIX shared memory objects appear in /dev/shm on Linux, named as
+    // passed to shm_open without the leading '/'. Only exact
+    // "pm.<domain>.<16 hex digits>" names are ours; companion objects carry
+    // a further suffix and other programs' files are left alone.
+    DIR* directory = opendir("/dev/shm");
+    if (directory == nullptr) {
+        return core::Result<std::vector<std::string>>::FromStatus(
+            core::Status::Unavailable(ErrnoMessage("opendir /dev/shm", errno)));
+    }
+    const std::string wanted_domain = domain ? std::to_string(*domain) : std::string();
+    std::vector<std::string> names;
+    while (const dirent* entry = readdir(directory)) {
+        const std::string file = entry->d_name;
+        if (file.rfind("pm.", 0) != 0) {
+            continue;
+        }
+        const auto dot = file.find('.', 3);
+        if (dot == std::string::npos || dot == 3) {
+            continue;
+        }
+        const auto domain_text = file.substr(3, dot - 3);
+        const auto hash = file.substr(dot + 1);
+        const bool digits = domain_text.find_first_not_of("0123456789") == std::string::npos;
+        const bool hex = hash.size() == 16 && hash.find_first_not_of("0123456789abcdef") == std::string::npos;
+        if (!digits || !hex || (domain && domain_text != wanted_domain)) {
+            continue;
+        }
+        names.push_back("/" + file);
+    }
+    closedir(directory);
+    std::sort(names.begin(), names.end());
+    return core::Result<std::vector<std::string>>(std::move(names));
+}
+
 SharedRegion::~SharedRegion()
 {
-    munmap(data_, size_);
+    if (data_ != nullptr) {
+        munmap(data_, size_);
+    }
 }
 
 core::Status WriterLock::InitializeStorage(void* storage)
