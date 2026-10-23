@@ -59,6 +59,7 @@ demo/                    Small runnable examples and an example configuration.
 examples/                Standalone downstream projects built against an install.
 tools/                   Command-line tools such as puppet_master_config.
 test/                    Unit, integration, and smoke tests.
+bench/                   Transport benchmarks (PUPPETMASTER_BUILD_BENCHMARKS).
 cmake/                   Package configuration templates.
 docs/                    Architecture notes and design decisions.
 ```
@@ -79,6 +80,7 @@ cmake -S . -B build -DPUPPETMASTER_BUILD_TESTS=OFF
 cmake -S . -B build -DPUPPETMASTER_ENABLE_FASTDDS=ON
 cmake -S . -B build -DPUPPETMASTER_ENABLE_GOODLOG=ON
 cmake -S . -B build -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
+cmake -S . -B build -DPUPPETMASTER_BUILD_BENCHMARKS=ON
 ```
 
 `PUPPETMASTER_ENABLE_FASTDDS` builds the optional FastDDS adapter target. The
@@ -89,6 +91,9 @@ which requires an installed `nlohmann_json` package.
 
 `PUPPETMASTER_ENABLE_SHM` (default `ON`) builds `PuppetMaster::ShmAdapter` on
 Linux and Windows. It needs no third-party packages.
+
+`PUPPETMASTER_BUILD_BENCHMARKS` (default `OFF`) builds the transport
+benchmark; see [Benchmarks](docs/benchmarks.md).
 
 `PUPPETMASTER_ENABLE_GOODLOG` builds `PuppetMaster::GoodLogAdapter`. CMake uses
 an installed GoodLog package when available or fetches a pinned revision from

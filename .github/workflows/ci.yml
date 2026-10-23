@@ -26,6 +26,32 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+  # Shared runners are too noisy to gate on numbers, so CI only proves the
+  # benchmark still runs and keeps the full results as an artifact, for
+  # comparing runs over time by hand. See docs/benchmarks.md.
+  benchmarks:
+    name: ubuntu-latest (benchmarks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPUPPETMASTER_BUILD_BENCHMARKS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Smoke test
+        run: ctest --test-dir build -R transport_bench --output-on-failure
+
+      - name: Run
+        run: build/bench/puppet_master_transport_bench --json bench-results.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transport-bench-${{ github.sha }}
+          path: bench-results.json
+
   sanitizers:
     name: ubuntu-latest (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest

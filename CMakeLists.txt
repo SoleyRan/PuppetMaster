@@ -28,6 +28,7 @@ option(PUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE
 option(PUPPETMASTER_ENABLE_GOODLOG "Build the optional GoodLog observability adapter." OFF)
 option(PUPPETMASTER_ENABLE_JSON_CONFIG "Build the optional JSON configuration adapter." OFF)
 option(PUPPETMASTER_ENABLE_SHM "Build the shared-memory transport (Linux and Windows only)." ON)
+option(PUPPETMASTER_BUILD_BENCHMARKS "Build transport benchmarks." OFF)
 set(
     PUPPETMASTER_GOODLOG_GIT_TAG
     "2eaaa2b67388dcfd41eaf8f3dd57e7f987bc31fa"
@@ -100,6 +101,10 @@ endif()
 if(PUPPETMASTER_BUILD_TESTS)
     enable_testing()
     add_subdirectory(test)
+endif()
+
+if(PUPPETMASTER_BUILD_BENCHMARKS)
+    add_subdirectory(bench)
 endif()
 
 set(PUPPETMASTER_CMAKE_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/PuppetMaster")
