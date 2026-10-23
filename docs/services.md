@@ -7,9 +7,17 @@ that must be acknowledged.
 
 Services are built from three ordinary topics, so they need no transport
 changes and inherit message versions and topic metrics. They are tested on
-the in-memory transport (one process) and the shared-memory transport
-(across processes, including a server crash). Any transport with queued
-readers works in principle; FastDDS has not been tested yet.
+the in-memory transport (one process), the shared-memory transport (across
+processes, including a server crash), and FastDDS 2.x and 3.x (across
+participants, including a stop and restart).
+
+On FastDDS, discovery is asynchronous: a client can see the server's
+heartbeat before its own request writer has matched the server's request
+reader, and a request written then would be dropped. `Call` therefore also
+waits, within its timeout, for `Writer::MatchedReaderCount()` to become
+non-zero, and returns `Unavailable` if it does not. Requests and replies ask
+for reliable delivery, so a lost UDP packet is retransmitted instead of
+failing the call.
 
 ## Usage
 

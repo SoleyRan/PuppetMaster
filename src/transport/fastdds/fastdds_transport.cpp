@@ -26,6 +26,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -79,15 +80,31 @@ void ApplyEndpointQos(const QosProfile& profile,
         : dds::VOLATILE_DURABILITY_QOS;
 }
 
+struct ReaderState;
+
+// The reader whose listener is running on this thread, if any. DDS holds the
+// DataReader's internal lock for the whole listener call, so a callback that
+// queries the same reader must not take entity_mutex: another thread may hold
+// entity_mutex while waiting for that internal lock in take_next_sample, and
+// the two would deadlock. DDS also keeps the DataReader alive until in-flight
+// listeners return, so the pointer it passed is safe to use without
+// entity_mutex for the duration of the call.
+struct ListenerScope {
+    const ReaderState* state {nullptr};
+    dds::DataReader* reader {nullptr};
+};
+thread_local ListenerScope g_listener_scope;
+
 // State shared between a FastDdsReader handle, its DDS listener and the
 // owning transport. signal_mutex guards notification state; entity_mutex
-// guards the DataReader pointer and DDS calls made through it.
+// guards the DataReader pointer and DDS calls made through it, except from
+// inside this reader's own listener (see ListenerScope).
 struct ReaderState {
     class Listener final : public dds::DataReaderListener {
     public:
         explicit Listener(ReaderState& state) : state_(state) {}
 
-        void on_data_available(dds::DataReader* /*reader*/) override
+        void on_data_available(dds::DataReader* reader) override
         {
             DataAvailableCallback callback;
             {
@@ -100,7 +117,14 @@ struct ReaderState {
             }
             state_.cv.notify_all();
             if (callback) {
-                callback();
+                const auto previous = g_listener_scope;
+                g_listener_scope = ListenerScope {&state_, reader};
+                try {
+                    callback();
+                } catch (...) {
+                    // A throwing callback must not unwind into DDS.
+                }
+                g_listener_scope = previous;
             }
         }
 
@@ -120,7 +144,7 @@ struct ReaderState {
     std::mutex entity_mutex;
     dds::Subscriber* subscriber {nullptr};
     dds::DataReader* reader {nullptr};
-    std::uint64_t sequence {0};
+    std::atomic<std::uint64_t> sequence {0};  // also advanced from listener scope
 
     Listener listener;
 
@@ -233,6 +257,9 @@ public:
 
     core::Result<std::size_t> PendingMessageCount() const override
     {
+        if (g_listener_scope.state == state_.get()) {
+            return core::Result<std::size_t>(static_cast<std::size_t>(g_listener_scope.reader->get_unread_count()));
+        }
         std::lock_guard<std::mutex> lock(state_->entity_mutex);
         if (state_->reader == nullptr) {
             return core::Result<std::size_t>::FromStatus(
@@ -244,15 +271,22 @@ public:
 private:
     core::Result<Message> TryTake()
     {
+        if (g_listener_scope.state == state_.get()) {
+            return TakeFrom(*g_listener_scope.reader);
+        }
         std::lock_guard<std::mutex> lock(state_->entity_mutex);
         if (state_->reader == nullptr) {
             return core::Result<Message>::FromStatus(core::Status::Unavailable("FastDDS reader is closed"));
         }
+        return TakeFrom(*state_->reader);
+    }
 
+    core::Result<Message> TakeFrom(dds::DataReader& reader)
+    {
         detail::BytePayload sample;
         dds::SampleInfo info;
         // Skip metadata-only samples (dispose / unregister notifications).
-        while (state_->reader->take_next_sample(&sample, &info) == kRetOk) {
+        while (reader.take_next_sample(&sample, &info) == kRetOk) {
             if (!info.valid_data) {
                 continue;
             }
@@ -320,6 +354,20 @@ public:
             return core::Status::Unavailable("FastDDS DataWriter rejected the sample");
         }
         return core::Status::Ok();
+    }
+
+    core::Result<std::size_t> MatchedReaderCount() const override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->writer == nullptr) {
+            return core::Result<std::size_t>::FromStatus(core::Status::Unavailable("FastDDS writer is closed"));
+        }
+        dds::PublicationMatchedStatus status;
+        if (state_->writer->get_publication_matched_status(status) != kRetOk) {
+            return core::Result<std::size_t>::FromStatus(
+                core::Status::Unavailable("FastDDS publication matched status is unavailable"));
+        }
+        return core::Result<std::size_t>(static_cast<std::size_t>(status.current_count));
     }
 
 private:

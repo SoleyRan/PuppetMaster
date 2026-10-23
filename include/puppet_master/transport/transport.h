@@ -98,6 +98,16 @@ public:
     virtual const MessageDescriptor& message_descriptor() const noexcept = 0;
     virtual core::Status Write(ByteView payload, WriteOptions options = {}) = 0;
 
+    // How many readers this writer is connected to now, for backends that
+    // discover peers asynchronously: a message written before a reader is
+    // matched may never reach it. Backends that deliver to every reader on
+    // the topic as soon as both exist return Unsupported.
+    virtual core::Result<std::size_t> MatchedReaderCount() const
+    {
+        return core::Result<std::size_t>::FromStatus(
+            core::Status::Unsupported("writer does not track matched readers"));
+    }
+
     // Publishes a message that `fill` writes in place, so producers can
     // serialize without building their own buffer first. `fill` receives
     // exactly `capacity` writable bytes and returns how many it used. It must

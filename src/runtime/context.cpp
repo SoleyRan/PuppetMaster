@@ -305,6 +305,11 @@ public:
         return core::Status::Ok();
     }
 
+    core::Result<std::size_t> MatchedReaderCount() const override
+    {
+        return writer_->MatchedReaderCount();
+    }
+
     // Forwarded so zero-copy backends keep their in-place path; the default
     // implementation would route through Write() and copy.
     core::Status WriteWith(

@@ -200,11 +200,17 @@ core::Result<ServiceEndpoints> EndpointsFor(const ServiceSpec& spec)
         }
     }
 
+    // Requests and replies are sent once, so they ask for reliable delivery;
+    // on FastDDS that is the difference between a lost UDP packet costing a
+    // retransmission and costing the whole call.
     core::MessagePolicy queued;
+    queued.delivery = core::DeliveryGuarantee::kReliable;
     queued.freshness = core::FreshnessPolicy::kQueued;
     queued.overflow = core::QueueOverflowPolicy::kDropOldest;
     queued.queue_depth = spec.queue_depth;
-    core::MessagePolicy latest;  // presence: only the newest heartbeat matters
+    // Presence: only the newest heartbeat matters, and the next one replaces a
+    // lost one, so best effort is enough.
+    core::MessagePolicy latest;
 
     return ResultType(ServiceEndpoints {
         transport::EndpointConfig {core::TopicSpec {request.value(), spec.transport, queued},
@@ -633,6 +639,25 @@ core::Result<transport::ByteBuffer> Client::Call(transport::ByteView request, co
                 return ResultType::FromStatus(server.status());
             }
             impl.replied.wait_for(lock, std::min<core::Nanoseconds>(give_up - now, kPollInterval));
+        }
+        // Seeing the heartbeat proves the server's presence writer reached
+        // us, not that our request writer has reached the server's reader.
+        // On backends that discover peers asynchronously, wait for that too,
+        // or the request is dropped and the call looks like a slow server.
+        while (true) {
+            const auto matched = impl.requests->MatchedReaderCount();
+            if (!matched.ok() || matched.value() > 0) {
+                break;  // Unsupported: delivery does not depend on matching
+            }
+            if (impl.closed) {
+                return ResultType::FromStatus(core::Status::Cancelled(Describe(impl.spec) + ": client is closed"));
+            }
+            const auto now = Now();
+            if (now >= deadline) {
+                return ResultType::FromStatus(core::Status::Unavailable(
+                    Describe(impl.spec) + ": the server is alive but its request reader was not matched in time"));
+            }
+            impl.replied.wait_for(lock, std::min<core::Nanoseconds>(deadline - now, std::chrono::milliseconds(5)));
         }
         request_id = ++impl.next_request;
         impl.pending.emplace(request_id, &call);

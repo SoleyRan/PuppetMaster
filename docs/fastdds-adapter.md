@@ -97,10 +97,18 @@ The transport abstraction moves byte payloads, so the adapter registers a
 length, then opaque bytes) once per `type_name` and binds DataReaders and
 DataWriters to it.
 
-- `transport::Reader` supports listener callbacks (invoked outside locks) and
-  blocking reads via `ReadOptions{wait, timeout}`; `timeout == 0` waits
-  indefinitely, an expired timeout returns `DeadlineExceeded`, and a
-  non-waiting read with no data returns `Unavailable`.
+- `transport::Reader` supports listener callbacks and blocking reads via
+  `ReadOptions{wait, timeout}`; `timeout == 0` waits indefinitely, an expired
+  timeout returns `DeadlineExceeded`, and a non-waiting read with no data
+  returns `Unavailable`.
+- Callbacks run on a DDS listener thread while DDS holds the DataReader's
+  internal lock. Calls from a callback into the same reader (`Read`,
+  `PendingMessageCount`) use the DataReader DDS passed to the listener
+  instead of the adapter's own lock, so they do not deadlock with a `Read` on
+  another thread. Earlier versions could deadlock there whenever data arrived
+  while another thread was reading.
+- `Writer::MatchedReaderCount()` returns the DataWriter's current publication
+  match count.
 - Endpoints whose descriptor conflicts with an existing topic return
   `InvalidArgument`.
 - After `Close()`, remaining reader/writer handles return `Unavailable`.

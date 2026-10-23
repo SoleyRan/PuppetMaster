@@ -403,6 +403,22 @@ if(PUPPETMASTER_ENABLE_FASTDDS)
         NAME puppet_master.fastdds_transport
         COMMAND puppet_master_fastdds_transport_test
     )
+    set_tests_properties(puppet_master.fastdds_transport PROPERTIES TIMEOUT 60)
+
+    add_executable(puppet_master_fastdds_service_test
+        fastdds_service_test.cpp
+    )
+
+    target_link_libraries(puppet_master_fastdds_service_test
+        PRIVATE
+            PuppetMaster::FastDdsAdapter
+    )
+
+    add_test(
+        NAME puppet_master.fastdds_service
+        COMMAND puppet_master_fastdds_service_test
+    )
+    set_tests_properties(puppet_master.fastdds_service PROPERTIES TIMEOUT 120)
 endif()
 
 if(TARGET puppet_master_shm_internal)

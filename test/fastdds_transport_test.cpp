@@ -330,6 +330,67 @@ void ConfigurationAndSchedulerFastDdsRoundTrip()
 
 }  // namespace
 
+// Regression: the runtime's data callback queries the reader (for queue-depth
+// metrics) from inside the DDS listener, while DDS holds the DataReader's
+// internal lock. A concurrent Read() on another thread used to hold the
+// adapter's entity lock while waiting for that internal lock, deadlocking
+// both. Readers that are read while data keeps arriving must not hang.
+void ReadWhileListenerRuns()
+{
+    auto context = runtime::RuntimeContext::Create();
+    assert(context.ok());
+    fastdds::Options options;
+    options.domain_id = 78;
+    assert(fastdds::RegisterTransport(*context.value(), core::TransportName::Unsafe("fastdds"), options).ok());
+
+    const auto endpoint = MakeEndpoint("/test/listener-read", "test.Bytes");
+    auto reader = context.value()->CreateReader(endpoint);  // ObservedReader: callback queries the reader
+    auto writer = context.value()->CreateWriter(endpoint);
+    assert(reader.ok() && writer.ok());
+    std::atomic<int> callbacks {0};
+    assert(reader.value()->SetDataAvailableCallback([&callbacks] {
+        ++callbacks;
+    }).ok());
+
+    std::atomic<bool> stop {false};
+    std::atomic<int> received {0};
+    std::thread consumer([&] {
+        transport::ReadOptions wait;
+        wait.wait = true;
+        wait.timeout = std::chrono::milliseconds(20);
+        while (!stop) {
+            if (reader.value()->Read(wait).ok()) {
+                ++received;
+            }
+        }
+    });
+    const std::string payload = "x";
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline && received < 500) {
+        assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    stop = true;
+    consumer.join();
+    assert(received > 0 && callbacks > 0);
+
+    // Called from inside the listener, Read and PendingMessageCount use the
+    // listener's reader directly.
+    std::atomic<bool> read_in_callback {false};
+    assert(reader.value()->SetDataAvailableCallback([&] {
+        if (reader.value()->Read().ok() && reader.value()->PendingMessageCount().ok()) {
+            read_in_callback = true;
+        }
+    }).ok());
+    for (int attempt = 0; attempt < 100 && !read_in_callback; ++attempt) {
+        assert(writer.value()->Write(transport::ByteView::From(payload.data(), payload.size())).ok());
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(read_in_callback);
+    assert(reader.value()->SetDataAvailableCallback({}).ok());
+    assert(context.value()->Close().ok());
+}
+
 int main()
 {
     RejectsEndpointsBeforeOpen();
@@ -337,6 +398,7 @@ int main()
     RejectsUnsupportedOverflowPolicy();
     PublishSubscribeRoundTrip();
     CloseWakesWaitingReader();
+    ReadWhileListenerRuns();
     RuntimeContextCreatesFastDdsEndpoints();
     ConfigurationAndSchedulerFastDdsRoundTrip();
     return 0;
