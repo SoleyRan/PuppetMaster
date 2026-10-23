@@ -8,6 +8,7 @@
 // (DeadlineExceeded). Runs on the in-memory transport; the same code runs
 // across processes with a shared-memory or FastDDS transport.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -58,7 +59,8 @@ ParameterRequest Make(ParameterRequest::Operation operation, const std::string& 
 {
     ParameterRequest request {};
     request.operation = operation;
-    std::strncpy(request.key, key.c_str(), sizeof(request.key) - 1);
+    // Truncates to fit and stays NUL-terminated (the struct is zeroed above).
+    std::memcpy(request.key, key.data(), std::min(key.size(), sizeof(request.key) - 1));
     request.value = value;
     return request;
 }

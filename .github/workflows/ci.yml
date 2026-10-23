@@ -56,6 +56,36 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
         run: setarch "$(uname -m)" -R ctest --test-dir build --output-on-failure
 
+  # The JSON adapter, system manifests, and puppet_master_config on MSVC,
+  # including their Windows-only paths (_dupenv_s, ';' search paths, and the
+  # Unsupported shm inspection). Warnings are errors, as in local checks.
+  json-config-windows:
+    name: windows-latest (JSON configuration)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install JSON dependency
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install nlohmann-json:x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build-json
+          -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON
+          "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+          "-DCMAKE_CXX_FLAGS=/W4 /WX /EHsc"
+
+      - name: Build
+        run: cmake --build build-json --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build-json -C Release --output-on-failure
+
   json-config:
     name: ubuntu-latest (JSON configuration)
     runs-on: ubuntu-latest
