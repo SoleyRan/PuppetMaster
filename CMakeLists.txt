@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(PuppetMaster
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "A C++ real-time middleware runtime for message-driven components and deterministic task scheduling."
     HOMEPAGE_URL "https://github.com/SoleyRan/PuppetMaster"
     LANGUAGES CXX
@@ -18,6 +18,18 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(PUPPETMASTER_IS_TOP_LEVEL ON)
 else()
     set(PUPPETMASTER_IS_TOP_LEVEL OFF)
+endif()
+
+# Before 1.0, every minor release may break the ABI and the API (0.2 added a
+# virtual function to transport::Writer, for example), so the shared library
+# soname and the CMake package compatibility both include the minor version.
+# From 1.0 on, only a major release breaks them.
+if(PROJECT_VERSION_MAJOR EQUAL 0)
+    set(PUPPETMASTER_SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}")
+    set(PUPPETMASTER_PACKAGE_COMPATIBILITY SameMinorVersion)
+else()
+    set(PUPPETMASTER_SOVERSION "${PROJECT_VERSION_MAJOR}")
+    set(PUPPETMASTER_PACKAGE_COMPATIBILITY SameMajorVersion)
 endif()
 
 option(PUPPETMASTER_BUILD_DEMOS "Build PuppetMaster example programs." ${PUPPETMASTER_IS_TOP_LEVEL})
@@ -118,7 +130,7 @@ configure_package_config_file(
 write_basic_package_version_file(
     "${PROJECT_BINARY_DIR}/PuppetMasterConfigVersion.cmake"
     VERSION "${PROJECT_VERSION}"
-    COMPATIBILITY SameMajorVersion
+    COMPATIBILITY ${PUPPETMASTER_PACKAGE_COMPATIBILITY}
 )
 
 install(

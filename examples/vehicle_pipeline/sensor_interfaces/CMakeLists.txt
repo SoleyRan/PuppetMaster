@@ -12,7 +12,7 @@ include(CMakePackageConfigHelpers)
 set(WHEEL_SPEED_VERSION 2 CACHE STRING "vehicle.WheelSpeed wire format version")
 set(IMU_SAMPLE_VERSION 1)
 
-find_package(PuppetMaster 0.1 CONFIG REQUIRED)
+find_package(PuppetMaster 0.2 CONFIG REQUIRED)
 
 set(GENERATED "${CMAKE_CURRENT_BINARY_DIR}/generated")
 configure_file(include/sensor_interfaces/messages.h.in "${GENERATED}/include/sensor_interfaces/messages.h" @ONLY)
@@ -38,7 +38,7 @@ install(EXPORT SensorInterfacesTargets NAMESPACE SensorInterfaces::
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/SensorInterfaces")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/SensorInterfacesConfig.cmake" [=[
 include(CMakeFindDependencyMacro)
-find_dependency(PuppetMaster 0.1 CONFIG)
+find_dependency(PuppetMaster 0.2 CONFIG)
 include("${CMAKE_CURRENT_LIST_DIR}/SensorInterfacesTargets.cmake")
 ]=])
 write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/SensorInterfacesConfigVersion.cmake"

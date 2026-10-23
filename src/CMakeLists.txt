@@ -102,7 +102,7 @@ set_target_properties(puppet_master
         OUTPUT_NAME puppet_master
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -160,7 +160,7 @@ set_target_properties(puppet_master_chrome_trace_adapter
         OUTPUT_NAME puppet_master_chrome_trace_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -210,7 +210,7 @@ set_target_properties(puppet_master_prometheus_adapter
         OUTPUT_NAME puppet_master_prometheus_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -260,7 +260,7 @@ set_target_properties(puppet_master_json_log_adapter
         OUTPUT_NAME puppet_master_json_log_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
@@ -317,7 +317,7 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
             OUTPUT_NAME puppet_master_json_config_adapter
             POSITION_INDEPENDENT_CODE ON
             VERSION "${PROJECT_VERSION}"
-            SOVERSION "${PROJECT_VERSION_MAJOR}"
+            SOVERSION "${PUPPETMASTER_SOVERSION}"
     )
 
     install(
@@ -363,7 +363,7 @@ if(PUPPETMASTER_ENABLE_GOODLOG)
             OUTPUT_NAME puppet_master_goodlog_adapter
             POSITION_INDEPENDENT_CODE ON
             VERSION "${PROJECT_VERSION}"
-            SOVERSION "${PROJECT_VERSION_MAJOR}"
+            SOVERSION "${PUPPETMASTER_SOVERSION}"
     )
 
     install(

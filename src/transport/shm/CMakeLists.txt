@@ -86,7 +86,7 @@ set_target_properties(puppet_master_shm_adapter
         OUTPUT_NAME puppet_master_shm_adapter
         POSITION_INDEPENDENT_CODE ON
         VERSION "${PROJECT_VERSION}"
-        SOVERSION "${PROJECT_VERSION_MAJOR}"
+        SOVERSION "${PUPPETMASTER_SOVERSION}"
 )
 
 install(
