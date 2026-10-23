@@ -93,4 +93,5 @@ node binary also accepts `--validate` and `--describe`.
   [Segment Lifetime](../../docs/shm-transport.md#segment-lifetime).
 - `TrivialCodec` copies structs byte for byte, so every process must use the
   same compiler ABI. Versions catch layout changes the owner declares, not
-  ABI differences between compilers; use a portable codec across them.
+  ABI differences between compilers; across those, use
+  [`PortableCodec`](../../docs/typed-messages.md#portable-codec).

@@ -60,6 +60,20 @@ add_test(
     COMMAND puppet_master_typed_transport_test
 )
 
+add_executable(puppet_master_portable_codec_test
+    portable_codec_test.cpp
+)
+
+target_link_libraries(puppet_master_portable_codec_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.portable_codec
+    COMMAND puppet_master_portable_codec_test
+)
+
 add_executable(puppet_master_component_parameters_test
     component_parameters_test.cpp
 )
