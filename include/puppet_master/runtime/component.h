@@ -10,6 +10,7 @@
 #include <puppet_master/core/status.h>
 #include <puppet_master/core/types.h>
 #include <puppet_master/runtime/parameters.h>
+#include <puppet_master/service/service.h>
 #include <puppet_master/transport/transport.h>
 
 namespace puppet_master::runtime {
@@ -59,6 +60,9 @@ struct ComponentSpec {
     std::vector<core::TriggerSpec> triggers;
     // Component-specific settings from configuration; see runtime/parameters.h.
     ParameterMap parameters;
+    // Services this component provides and calls; see service/component_services.h.
+    std::vector<service::ServiceSpec> servers;
+    std::vector<service::ServiceSpec> clients;
 
     core::Status Validate() const
     {
@@ -81,6 +85,15 @@ struct ComponentSpec {
             status = trigger.Validate();
             if (!status.ok()) {
                 return status;
+            }
+        }
+
+        for (const auto* services : {&servers, &clients}) {
+            for (const auto& spec : *services) {
+                status = spec.Validate();
+                if (!status.ok()) {
+                    return status;
+                }
             }
         }
 

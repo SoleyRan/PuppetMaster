@@ -33,6 +33,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/typed_endpoints.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/scheduler/scheduler.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/component_services.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/service/service.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/service/typed_service.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"

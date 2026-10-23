@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <puppet_master/runtime/context.h>
+#include <puppet_master/service/component_services.h>
 #include <puppet_master/service/service.h>
 #include <puppet_master/service/typed_service.h>
 
@@ -344,6 +345,62 @@ void TypedServicesAndVersions()
     assert(stale.status().message().find("/svc/add") != std::string::npos);
 }
 
+// Components get servers and clients from the services their spec declares,
+// so transport and queue settings come from configuration, not code.
+void ServicesFromComponentSpec()
+{
+    auto runtime = MakeRuntime();
+    auto add = service::TypedServiceSpec<AddRequest, AddReply>(core::TopicName::Unsafe("/svc/spec-add"),
+                                                               core::TransportKind::kInMemory);
+    add.heartbeat_interval = 20ms;
+    auto text = Spec("/svc/spec-text");
+
+    runtime::ComponentSpec provider {core::ComponentName::Unsafe("provider"), "", {}, {}, {}, {}, {add, text}, {}};
+    runtime::ComponentSpec caller {core::ComponentName::Unsafe("caller"), "", {}, {}, {}, {}, {}, {add, text}};
+    assert(provider.Validate().ok() && caller.Validate().ok());
+    runtime::ComponentContext provider_context(provider.name, *runtime);
+    runtime::ComponentContext caller_context(caller.name, *runtime);
+
+    auto text_server = service::CreateServer(provider_context, provider, "/svc/spec-text", Reverse);
+    auto text_client = service::CreateClient(caller_context, caller, "/svc/spec-text");
+    assert(text_server.ok() && text_client.ok());
+    auto reply = text_client.value()->Call(Bytes("spec"), 1s);
+    assert(reply.ok() && Text(reply.value()) == "ceps");
+
+    auto add_server = service::CreateTypedServer<AddRequest, AddReply>(
+        provider_context, provider, "/svc/spec-add",
+        [](const AddRequest& request) { return core::Result<AddReply>(AddReply {request.a + request.b}); });
+    auto add_client = service::CreateTypedClient<AddRequest, AddReply>(caller_context, caller, "/svc/spec-add");
+    assert(add_server.ok() && add_client.ok());
+    auto sum = add_client.value().Call(AddRequest {20, 22}, 1s);
+    assert(sum.ok() && sum.value().sum == 42);
+
+    // A service the spec does not declare in that role is NotFound.
+    assert(service::CreateClient(provider_context, provider, "/svc/spec-text").status().code()
+           == core::StatusCode::kNotFound);
+    assert(service::CreateServer(caller_context, caller, "/svc/spec-text", Reverse).status().code()
+           == core::StatusCode::kNotFound);
+    assert(service::CreateClient(caller_context, caller, "/svc/other").status().code() == core::StatusCode::kNotFound);
+
+    // A configured version that differs from the binary's type is refused,
+    // naming both, before anything is opened.
+    auto skewed = add;
+    skewed.name = core::TopicName::Unsafe("/svc/spec-skewed");
+    skewed.request.version = 9;
+    runtime::ComponentSpec stale {core::ComponentName::Unsafe("stale"), "", {}, {}, {}, {}, {}, {skewed}};
+    runtime::ComponentContext stale_context(stale.name, *runtime);
+    auto refused = service::CreateTypedClient<AddRequest, AddReply>(stale_context, stale, "/svc/spec-skewed");
+    assert(refused.status().code() == core::StatusCode::kInvalidArgument);
+    assert(refused.status().message().find("test.AddRequest v9") != std::string::npos);
+    assert(refused.status().message().find("test.AddRequest v1") != std::string::npos);
+
+    // An invalid service spec makes the component spec invalid.
+    auto broken = text;
+    broken.queue_depth = 0;
+    runtime::ComponentSpec invalid {core::ComponentName::Unsafe("invalid"), "", {}, {}, {}, {}, {broken}, {}};
+    assert(invalid.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
 }  // namespace
 
 int main()
@@ -356,6 +413,7 @@ int main()
     ExpiredRequestsAreSkipped();
     CloseCancelsPendingCalls();
     TypedServicesAndVersions();
+    ServicesFromComponentSpec();
     std::cout << "service tests passed\n";
     return 0;
 }

@@ -323,6 +323,99 @@ void SystemValidationFindsCrossProcessProblems()
     assert(Contains(two_writers.errors.front(), "written by several processes: extra, sensors"));
 }
 
+// A service declared by an interface file, served and called by components
+// in different processes, sized by the deployment.
+void ServicesThroughConfiguration()
+{
+    TempTree tree;
+    tree.Write("share/map_interfaces/topics.json", R"json({"services": [
+        {"id": "query", "name": "/map/query", "request_type": "map.Query", "request_version": 2,
+         "reply_type": "map.QueryResult", "encoding": "application/x-map", "queue_depth": 4}]})json");
+    tree.Write("nodes/map_server.json", R"json({
+        "imports": ["map_interfaces/topics.json"],
+        "components": [{"name": "map", "type": "map", "servers": ["query"]}]})json");
+    tree.Write("nodes/planner.json", R"json({
+        "imports": ["map_interfaces/topics.json"],
+        "components": [{"name": "planner", "type": "planner", "clients": ["query"]}]})json");
+    const auto deploy = tree.Write("deploy.json", R"json({"services": [
+        {"name": "/map/query", "transport": "shm", "transport_parameters": {"slot_payload_size": 2048}}]})json");
+
+    auto server = config::LoadJsonConfig(tree.Path("nodes/map_server.json"), Options(tree, deploy));
+    auto planner = config::LoadJsonConfig(tree.Path("nodes/planner.json"), Options(tree, deploy));
+    assert(server.ok() && planner.ok());
+
+    const auto& service = server.value().services.front();
+    assert(service.name == "/map/query" && service.transport == core::TransportKind::kIpc);
+    assert(service.request_version == 2 && service.queue_depth == 4);
+
+    // The component spec carries the full service spec.
+    auto spec = server.value().BuildComponentSpec("map");
+    assert(spec.ok() && spec.value().servers.size() == 1 && spec.value().clients.empty());
+    const auto& service_spec = spec.value().servers.front();
+    assert(service_spec.name.str() == "/map/query" && service_spec.transport == core::TransportKind::kIpc);
+    assert(service_spec.request.ToString() == "map.Query v2 (application/x-map)");
+    assert(service_spec.queue_depth == 4);
+    auto planner_spec = planner.value().BuildComponentSpec("planner");
+    assert(planner_spec.ok() && planner_spec.value().clients.size() == 1);
+
+    // The deployment sizes all three of the service's shm topics.
+    auto shm_options = shm::OptionsFromProject(server.value());
+    assert(shm_options.ok());
+    for (const char* topic : {"/map/query/request", "/map/query/reply", "/map/query/presence"}) {
+        assert(shm_options.value().ForTopic(topic).slot_payload_size == 2048);
+    }
+
+    const auto described = config::DescribeProject(server.value());
+    assert(Contains(described, "query -> /map/query [ipc, map.Query v2 -> map.QueryResult, queue 4"));
+    assert(Contains(described, "slot_payload_size=2048"));
+    assert(Contains(described, "serves: query"));
+
+    // Configuration errors.
+    for (const auto* json : {
+             R"json({"components": [{"name": "a", "servers": ["missing"]}]})json",
+             R"json({"services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p"}],
+                     "components": [{"name": "a", "clients": ["s", "s"]}]})json",
+             R"json({"services": [{"id": "s", "name": "/s", "reply_type": "p"}]})json",
+             R"json({"services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p", "queue_depth": 0}]})json",
+             R"json({"services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p", "extra": 1}]})json",
+             R"json({"topics": [{"id": "t", "name": "/s/request", "message_type": "m"}],
+                     "services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p"}]})json",
+         }) {
+        auto invalid = config::ParseJsonConfig(json);
+        assert(!invalid.ok());
+    }
+    auto collision = config::ParseJsonConfig(R"json({"topics": [{"id": "t", "name": "/s/request", "message_type": "m"}],
+        "services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p"}]})json");
+    assert(Contains(collision.status().message(), "uses topic /s/request, which topic t already uses"));
+
+    // System checks: a client with no server, two servers, and a contract
+    // that differs between processes.
+    const auto check = [](const std::vector<std::pair<std::string, const config::ProjectConfig*>>& entries) {
+        std::vector<config::NamedProject> named;
+        for (const auto& [label, project] : entries) {
+            named.push_back(config::NamedProject {label, project});
+        }
+        return config::ValidateSystem(named);
+    };
+    assert(check({{"map", &server.value()}, {"planner", &planner.value()}}).ok());
+    assert(check({{"map", &server.value()}, {"planner", &planner.value()}}).warnings.empty());
+
+    const auto orphan = check({{"planner", &planner.value()}});
+    assert(!orphan.ok() && Contains(orphan.errors.front(), "service /map/query is called by planner but served by no process"));
+
+    const auto doubled = check({{"map", &server.value()}, {"map2", &server.value()}, {"planner", &planner.value()}});
+    assert(!doubled.ok() && Contains(doubled.errors.front(), "served by several processes: map, map2"));
+
+    const auto lonely = check({{"map", &server.value()}});
+    assert(lonely.ok() && Contains(lonely.warnings.front(), "served by map but called by no process"));
+
+    auto skewed = planner.value();
+    skewed.services.front().request_version = 3;
+    const auto mismatch = check({{"map", &server.value()}, {"planner", &skewed}});
+    assert(!mismatch.ok() && Contains(mismatch.errors.front(), "map.Query v2"));
+    assert(Contains(mismatch.errors.front(), "map.Query v3"));
+}
+
 }  // namespace
 
 int main()
@@ -332,5 +425,6 @@ int main()
     ReaderPoliciesApplyPerReader();
     DeploymentSetsTransportNotIdentity();
     SystemValidationFindsCrossProcessProblems();
+    ServicesThroughConfiguration();
     return 0;
 }

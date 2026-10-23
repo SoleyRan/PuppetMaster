@@ -228,7 +228,8 @@ by the team that decides it:
 
 ### Imports
 
-An interface file declares only topics, and is installed with its package,
+An interface file declares only topics and services (see
+[Services](services.md#configuration)), and is installed with its package,
 for example to `<prefix>/share/sensor_interfaces/topics.json`:
 
 ```json
@@ -258,7 +259,7 @@ directories of installed packages.
 
 - Imported files may import others; the topics land in declaration order. A
   file reached twice is read once, and a cycle is an error.
-- Imported files may contain only `imports` and `topics`.
+- Imported files may contain only `imports`, `topics`, and `services`.
 - A topic id declared twice, in any file, is an error that names the file of
   the first declaration.
 - Errors inside an imported file name that file.
@@ -284,7 +285,7 @@ keyed by topic id, and every key must also be in `readers`.
 
 ### Deployment Files
 
-A deployment file decides where topics run. It is applied after the project
+A deployment file decides where topics and services run. It is applied after the project
 loads, with `JsonLoadOptions::deployment_path` or `--deployment FILE`:
 
 ```json
@@ -326,7 +327,9 @@ It reports as errors a topic declared with different types, encodings,
 versions, or transports in different processes; a topic that is read but
 written by no process; and a topic written by more than one process. A topic
 written but read by no process is a warning. Topics that a process declares
-but does not use are ignored.
+but does not use are ignored. Services get the same checks, with serving in
+place of writing and calling in place of reading; see
+[Services](services.md#configuration).
 
 Run it where every process's configuration is available: in system
 integration CI, and before starting the processes on a target.

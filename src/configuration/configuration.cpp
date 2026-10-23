@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace puppet_master::configuration {
@@ -132,6 +133,40 @@ core::Status ValidateTaskDependencies(const std::vector<ComponentConfig>& compon
     return core::Status::Ok();
 }
 
+// Service ids are unique, each service is valid, and no service's topics
+// collide with a declared topic or another service's topics.
+core::Status ValidateServices(const ProjectConfig& project)
+{
+    std::set<std::string> ids;
+    std::map<std::string, std::string> wire_names;  // topic name -> owner, for collisions
+    for (const auto& topic : project.topics) {
+        wire_names.emplace(topic.name, "topic " + topic.id);
+    }
+    for (const auto& service : project.services) {
+        if (!ids.insert(service.id).second) {
+            return core::Status::AlreadyExists("service id is duplicated: " + service.id);
+        }
+        auto spec = service.ToServiceSpec();
+        if (!spec.ok()) {
+            return spec.status();
+        }
+        auto endpoints = service::EndpointsFor(spec.value());
+        if (!endpoints.ok()) {
+            return endpoints.status();
+        }
+        for (const auto* endpoint :
+             {&endpoints.value().request, &endpoints.value().reply, &endpoints.value().presence}) {
+            const auto inserted = wire_names.emplace(endpoint->topic.name.str(), "service " + service.id);
+            if (!inserted.second && inserted.first->second != "service " + service.id) {
+                return core::Status::InvalidArgument("service " + service.id + " uses topic "
+                                                     + endpoint->topic.name.str() + ", which "
+                                                     + inserted.first->second + " already uses");
+            }
+        }
+    }
+    return core::Status::Ok();
+}
+
 bool SamePolicy(const core::MessagePolicy& lhs, const core::MessagePolicy& rhs)
 {
     return lhs.delivery == rhs.delivery && lhs.retention == rhs.retention
@@ -174,11 +209,26 @@ bool SameTriggers(const std::vector<core::TriggerSpec>& lhs, const std::vector<c
     return true;
 }
 
+bool SameServices(const std::vector<service::ServiceSpec>& lhs, const std::vector<service::ServiceSpec>& rhs)
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].name != rhs[i].name || lhs[i].transport != rhs[i].transport || lhs[i].request != rhs[i].request
+            || lhs[i].reply != rhs[i].reply) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SameSpec(const runtime::ComponentSpec& lhs, const runtime::ComponentSpec& rhs)
 {
     return lhs.name == rhs.name && lhs.description == rhs.description
         && SameEndpoints(lhs.readers, rhs.readers) && SameEndpoints(lhs.writers, rhs.writers)
-        && SameTriggers(lhs.triggers, rhs.triggers);
+        && SameTriggers(lhs.triggers, rhs.triggers) && SameServices(lhs.servers, rhs.servers)
+        && SameServices(lhs.clients, rhs.clients);
 }
 
 }  // namespace
@@ -204,6 +254,37 @@ core::Status TopicConfig::Validate() const
     }
 
     return message_policy.Validate();
+}
+
+core::Status ServiceConfig::Validate() const
+{
+    auto spec = ToServiceSpec();
+    return spec.ok() ? core::Status::Ok() : spec.status();
+}
+
+core::Result<service::ServiceSpec> ServiceConfig::ToServiceSpec() const
+{
+    using ResultType = core::Result<service::ServiceSpec>;
+    auto status = ValidateConfigId("service id", id);
+    if (!status.ok()) {
+        return ResultType::FromStatus(std::move(status));
+    }
+    auto service_name = core::TopicName::Create(name);
+    if (!service_name.ok()) {
+        return ResultType::FromStatus(core::Status::Error(
+            service_name.status().code(), "service " + id + ": " + service_name.status().message()));
+    }
+    service::ServiceSpec spec(std::move(service_name).value());
+    spec.transport = transport;
+    spec.request = transport::MessageDescriptor {request_type, encoding, request_version};
+    spec.reply = transport::MessageDescriptor {reply_type, encoding, reply_version};
+    spec.queue_depth = queue_depth;
+    spec.heartbeat_interval = heartbeat_interval;
+    status = spec.Validate();
+    if (!status.ok()) {
+        return ResultType::FromStatus(core::Status::Error(status.code(), "service " + id + ": " + status.message()));
+    }
+    return ResultType(std::move(spec));
 }
 
 core::Result<transport::EndpointConfig> TopicConfig::ToEndpointConfig() const
@@ -354,7 +435,7 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         return core::Result<runtime::ComponentSpec>::FromStatus(component_name.status());
     }
 
-    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}, parameters};
+    runtime::ComponentSpec spec {component_name.value(), description, {}, {}, {}, parameters, {}, {}};
 
     for (const auto& topic_id : readers) {
         auto endpoint = project.BuildEndpoint(topic_id);
@@ -377,6 +458,27 @@ core::Result<runtime::ComponentSpec> ComponentConfig::ToComponentSpec(const Proj
         if (!status.ok()) {
             return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::Error(
                 status.code(), "component " + name + " reader policy for " + topic_id + ": " + status.message()));
+        }
+    }
+
+    for (const auto& [ids, output, kind] :
+         {std::make_tuple(&servers, &spec.servers, "server"), std::make_tuple(&clients, &spec.clients, "client")}) {
+        std::set<std::string> seen;
+        for (const auto& service_id : *ids) {
+            if (!seen.insert(service_id).second) {
+                return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::InvalidArgument(
+                    "component " + name + " lists " + kind + " " + service_id + " twice"));
+            }
+            auto service = project.FindService(service_id);
+            if (!service.ok()) {
+                return core::Result<runtime::ComponentSpec>::FromStatus(core::Status::Error(
+                    service.status().code(), "component " + name + " " + kind + ": " + service.status().message()));
+            }
+            auto service_spec = service.value().ToServiceSpec();
+            if (!service_spec.ok()) {
+                return core::Result<runtime::ComponentSpec>::FromStatus(service_spec.status());
+            }
+            output->push_back(std::move(service_spec).value());
         }
     }
 
@@ -454,6 +556,31 @@ core::Status ProjectConfig::AddComponent(ComponentConfig component)
     return core::Status::Ok();
 }
 
+core::Status ProjectConfig::AddService(ServiceConfig service)
+{
+    auto status = service.Validate();
+    if (!status.ok()) {
+        return status;
+    }
+    if (FindService(service.id).ok()) {
+        return core::Status::AlreadyExists("service id is duplicated: " + service.id);
+    }
+    services.push_back(std::move(service));
+    return core::Status::Ok();
+}
+
+core::Result<ServiceConfig> ProjectConfig::FindService(std::string_view id) const
+{
+    const std::string key(id.data(), id.size());
+    const auto found = std::find_if(services.begin(), services.end(), [&key](const auto& service) {
+        return service.id == key;
+    });
+    if (found == services.end()) {
+        return core::Result<ServiceConfig>::FromStatus(core::Status::NotFound("service id is not configured: " + key));
+    }
+    return *found;
+}
+
 core::Status ProjectConfig::Validate() const
 {
     auto status = runtime_options.Validate();
@@ -496,6 +623,11 @@ core::Status ProjectConfig::Validate() const
                     + std::string(core::ToString(topic.transport)) + " topic " + topic.name);
             }
         }
+    }
+
+    status = ValidateServices(*this);
+    if (!status.ok()) {
+        return status;
     }
 
     for (const auto& component : components) {

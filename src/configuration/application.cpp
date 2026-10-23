@@ -100,6 +100,23 @@ std::string DescribeProject(const ProjectConfig& project)
         text << "]\n";
     }
 
+    if (!project.services.empty()) {
+        text << "services (" << project.services.size() << "):\n";
+        for (const auto& service : project.services) {
+            const auto version = [](std::uint32_t value) {
+                return value == 0 ? std::string() : " v" + std::to_string(value);
+            };
+            text << "  " << service.id << " -> " << service.name << " [" << core::ToString(service.transport) << ", "
+                 << service.request_type << version(service.request_version) << " -> " << service.reply_type
+                 << version(service.reply_version) << ", queue " << service.queue_depth << ", heartbeat "
+                 << Milliseconds(service.heartbeat_interval);
+            for (const auto& [key, value] : service.transport_parameters) {
+                text << ", " << key << "=" << value;
+            }
+            text << "]\n";
+        }
+    }
+
     text << "components (" << project.components.size() << "):\n";
     for (const auto& component : project.components) {
         text << "  " << component.name;
@@ -123,6 +140,12 @@ std::string DescribeProject(const ProjectConfig& project)
         }
         if (!component.writers.empty()) {
             text << "    writes: " << Join(component.writers) << '\n';
+        }
+        if (!component.servers.empty()) {
+            text << "    serves: " << Join(component.servers) << '\n';
+        }
+        if (!component.clients.empty()) {
+            text << "    calls: " << Join(component.clients) << '\n';
         }
         if (!component.parameters.empty()) {
             std::vector<std::string> parameters;
@@ -233,6 +256,78 @@ SystemReport ValidateSystem(const std::vector<NamedProject>& projects)
         if (topic.readers.empty()) {
             report.warnings.push_back("topic " + name + " is written by "
                                       + Join({topic.writers.begin(), topic.writers.end()}) + " but read by no process");
+        }
+    }
+
+    // Services, by wire name: one serving process, and the same contract
+    // wherever the service is used.
+    struct ServiceUse {
+        std::string label;
+        const ServiceConfig* service;
+    };
+    struct ServiceUses {
+        std::vector<ServiceUse> declarations;
+        std::set<std::string> servers;
+        std::set<std::string> clients;
+    };
+    std::map<std::string, ServiceUses> services;
+    for (const auto& entry : projects) {
+        const auto& project = *entry.project;
+        for (const auto& service : project.services) {
+            services[service.name].declarations.push_back(ServiceUse {entry.label, &service});
+        }
+        for (const auto& component : project.components) {
+            for (const auto& id : component.servers) {
+                auto service = project.FindService(id);
+                if (service.ok()) {
+                    services[service.value().name].servers.insert(entry.label);
+                }
+            }
+            for (const auto& id : component.clients) {
+                auto service = project.FindService(id);
+                if (service.ok()) {
+                    services[service.value().name].clients.insert(entry.label);
+                }
+            }
+        }
+    }
+    const auto contract = [](const ServiceConfig& service) {
+        return transport::MessageDescriptor {service.request_type, service.encoding, service.request_version}.ToString()
+            + " -> "
+            + transport::MessageDescriptor {service.reply_type, service.encoding, service.reply_version}.ToString()
+            + " over " + core::ToString(service.transport);
+    };
+    for (const auto& [name, service] : services) {
+        if (service.servers.empty() && service.clients.empty()) {
+            continue;
+        }
+        const ServiceUse* first = nullptr;
+        for (const auto& use : service.declarations) {
+            if (service.servers.count(use.label) == 0 && service.clients.count(use.label) == 0) {
+                continue;
+            }
+            if (first == nullptr) {
+                first = &use;
+                continue;
+            }
+            if (contract(*first->service) != contract(*use.service)) {
+                report.errors.push_back("service " + name + " is " + contract(*first->service) + " in "
+                                        + first->label + " but " + contract(*use.service) + " in " + use.label);
+            }
+        }
+        if (service.servers.empty()) {
+            report.errors.push_back("service " + name + " is called by "
+                                    + Join({service.clients.begin(), service.clients.end()})
+                                    + " but served by no process");
+        } else if (service.servers.size() > 1) {
+            // Not detected at runtime: every server would answer each request.
+            report.errors.push_back("service " + name + " is served by several processes: "
+                                    + Join({service.servers.begin(), service.servers.end()}));
+        }
+        if (service.clients.empty()) {
+            report.warnings.push_back("service " + name + " is served by "
+                                      + Join({service.servers.begin(), service.servers.end()})
+                                      + " but called by no process");
         }
     }
     return report;

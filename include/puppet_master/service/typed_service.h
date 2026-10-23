@@ -30,6 +30,30 @@ core::Result<transport::ByteBuffer> EncodeMessage(const T& value)
 
 }  // namespace detail
 
+namespace detail {
+
+// A configured spec must carry what this binary's types encode; otherwise
+// the binary would misread the other side.
+template <typename Request, typename Reply>
+core::Status CheckTypedSpec(const ServiceSpec& spec)
+{
+    const auto request = transport::DescriptorFor<Request>();
+    const auto reply = transport::DescriptorFor<Reply>();
+    if (spec.request != request) {
+        return core::Status::InvalidArgument("service " + spec.name.str() + " is configured with request "
+                                             + spec.request.ToString() + ", but this binary was built for "
+                                             + request.ToString());
+    }
+    if (spec.reply != reply) {
+        return core::Status::InvalidArgument("service " + spec.name.str() + " is configured with reply "
+                                             + spec.reply.ToString() + ", but this binary was built for "
+                                             + reply.ToString());
+    }
+    return core::Status::Ok();
+}
+
+}  // namespace detail
+
 template <typename Request, typename Reply>
 ServiceSpec TypedServiceSpec(core::TopicName name, core::TransportKind transport)
 {

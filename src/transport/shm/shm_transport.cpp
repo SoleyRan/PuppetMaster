@@ -427,22 +427,41 @@ core::Status RegisterTransport(runtime::RuntimeContext& runtime, core::Transport
 core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& project, Options base)
 {
     using ResultType = core::Result<Options>;
-    bool domain_set = false;
+
+    // Each ipc topic with settings, plus the three topics of each ipc service
+    // with settings, which share the service's.
+    struct Entry {
+        std::string label;
+        std::vector<std::string> topics;
+        const runtime::ParameterMap* parameters;
+    };
+    std::vector<Entry> entries;
     for (const auto& topic : project.topics) {
-        if (topic.transport != core::TransportKind::kIpc || topic.transport_parameters.empty()) {
-            continue;
+        if (topic.transport == core::TransportKind::kIpc && !topic.transport_parameters.empty()) {
+            entries.push_back(Entry {"topic " + topic.name, {topic.name}, &topic.transport_parameters});
         }
-        const auto invalid = [&topic](const core::Status& status) {
+    }
+    for (const auto& service : project.services) {
+        if (service.transport == core::TransportKind::kIpc && !service.transport_parameters.empty()) {
+            entries.push_back(Entry {"service " + service.name,
+                                     {service.name + "/request", service.name + "/reply", service.name + "/presence"},
+                                     &service.transport_parameters});
+        }
+    }
+
+    bool domain_set = false;
+    for (const auto& entry_info : entries) {
+        const auto invalid = [&entry_info](const core::Status& status) {
             return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm settings of topic " + topic.name + ": " + status.message()));
+                "shm settings of " + entry_info.label + ": " + status.message()));
         };
-        for (const auto& entry : topic.transport_parameters) {
+        for (const auto& entry : *entry_info.parameters) {
             if (entry.first != "slot_payload_size" && entry.first != "slot_count" && entry.first != "domain_id") {
                 return invalid(core::Status::InvalidArgument("unknown parameter " + entry.first
                                                              + "; expected slot_payload_size, slot_count, or domain_id"));
             }
         }
-        const auto& parameters = topic.transport_parameters;
+        const auto& parameters = *entry_info.parameters;
         auto domain = runtime::GetParameter<core::DomainId>(parameters, "domain_id", base.domain_id);
         if (!domain.ok()) {
             return invalid(domain.status());
@@ -460,7 +479,7 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
         if (parameters.count("slot_payload_size") == 0 && parameters.count("slot_count") == 0) {
             continue;
         }
-        TopicOptions geometry = base.ForTopic(topic.name);
+        TopicOptions geometry = base.ForTopic(entry_info.topics.front());
         auto payload = runtime::GetParameter<std::size_t>(parameters, "slot_payload_size", geometry.slot_payload_size);
         auto slots = runtime::GetParameter<std::size_t>(parameters, "slot_count", geometry.slot_count);
         if (!payload.ok()) {
@@ -475,7 +494,9 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
         if (!status.ok()) {
             return invalid(status);
         }
-        base.topics[topic.name] = geometry;
+        for (const auto& topic : entry_info.topics) {
+            base.topics[topic] = geometry;
+        }
     }
     auto status = base.Validate();
     if (!status.ok()) {

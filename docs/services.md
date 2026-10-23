@@ -115,8 +115,9 @@ instance does not affect a newer one.
   Transit time is not counted, so the server errs toward handling a request
   its client may just have given up on.
 - A server runs its handler on one thread, in arrival order. Only one
-  server per service is supported. A second one is not detected: both would
-  handle every request and the client would keep the first reply.
+  server per service is supported. The transport does not prevent a second
+  one, which would handle every request too; `validate --system` reports it
+  before deployment (see [Configuration](#configuration)).
 - Clients may call from several threads at once; each call waits for its
   own reply.
 
@@ -143,6 +144,64 @@ request that fails to decode is answered with the decode error instead of
 reaching the handler. For other settings, build the spec with
 `TypedServiceSpec<Request, Reply>(name, transport)`, adjust it, and pass it
 to the overloads that take a `ServiceSpec`.
+
+## Configuration
+
+Services are declared like topics, with a local id and a wire name, and
+components list the ones they provide (`servers`) and call (`clients`):
+
+```json
+{
+    "services": [{
+        "id": "query", "name": "/map/query",
+        "request_type": "map.Query", "request_version": 2,
+        "reply_type": "map.QueryResult", "encoding": "application/x-map",
+        "queue_depth": 16, "heartbeat_interval_ns": 100000000
+    }],
+    "components": [
+        {"name": "map", "type": "map_server", "servers": ["query"]},
+        {"name": "planner", "type": "planner", "clients": ["query"]}
+    ]
+}
+```
+
+`request_version` and `reply_version` default to 0, `encoding` to
+`application/octet-stream`, `queue_depth` to 16, and the heartbeat to 100 ms.
+
+Interface files may declare `services` next to `topics`, so the team that
+serves a service publishes its contract once and every caller imports it.
+Deployment files place them by wire name; the settings apply to all three of
+the service's topics, and `shm::OptionsFromProject` sizes them:
+
+```json
+{"services": [{"name": "/map/query", "transport": "shm",
+               "transport_parameters": {"slot_payload_size": 65536}}]}
+```
+
+The component spec then carries each service's full `ServiceSpec`, and
+`puppet_master/service/component_services.h` creates servers and clients from
+it by service name, so component code does not repeat transport or queue
+settings:
+
+```cpp
+core::Status Initialize(runtime::ComponentContext& context) override
+{
+    auto server = service::CreateTypedServer<MapQuery, MapQueryResult>(
+        context, spec_, "/map/query", [this](const MapQuery& query) { return Lookup(query); });
+    ...
+}
+```
+
+`CreateServer` and `CreateClient` return `NotFound` when the spec does not
+declare that service in that role. The typed variants also refuse a
+configured request or reply descriptor that differs from the types' codecs,
+naming both versions.
+
+`--describe` lists services and which components serve and call them.
+`validate --system` checks them across processes like topics: the same
+contract (types, versions, encoding, transport) everywhere, exactly one
+serving process, which is how a second server is caught before it runs, and
+a warning for a service that no process calls.
 
 ## Example
 

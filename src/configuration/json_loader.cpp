@@ -201,15 +201,38 @@ void DecodeReaders(const Json& component, const std::string& path, const Project
     }
 }
 
+ServiceConfig DecodeService(const Json& value, const std::string& path)
+{
+    CheckObject(value, path, {"id", "name", "transport", "request_type", "reply_type", "encoding",
+                              "request_version", "reply_version", "queue_depth", "heartbeat_interval_ns"});
+    ServiceConfig service;
+    Read(value, "id", service.id, path);
+    Read(value, "name", service.name, path);
+    ReadEnum(value, "transport", service.transport, ParseTransportKind, path);
+    Read(value, "request_type", service.request_type, path);
+    Read(value, "reply_type", service.reply_type, path);
+    Read(value, "encoding", service.encoding, path);
+    Read(value, "request_version", service.request_version, path);
+    Read(value, "reply_version", service.reply_version, path);
+    Read(value, "queue_depth", service.queue_depth, path);
+    auto heartbeat = service.heartbeat_interval.count();
+    Read(value, "heartbeat_interval_ns", heartbeat, path);
+    service.heartbeat_interval = core::Nanoseconds(heartbeat);
+    return service;
+}
+
 ComponentConfig DecodeComponent(const Json& value, const std::string& path, const ProjectConfig& project)
 {
-    CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type", "parameters"});
+    CheckObject(value, path, {"name", "description", "readers", "writers", "triggers", "type", "parameters",
+                              "servers", "clients"});
     ComponentConfig component;
     Read(value, "name", component.name, path);
     Read(value, "type", component.type, path);
     Read(value, "description", component.description, path);
     DecodeReaders(value, path, project, component);
     Read(value, "writers", component.writers, path);
+    Read(value, "servers", component.servers, path);
+    Read(value, "clients", component.clients, path);
     component.parameters = ReadParameters(value, path);
     std::size_t trigger_index = 0;
     for (const auto& entry : Array(value, "triggers", path)) {
@@ -285,13 +308,15 @@ public:
             }
             const auto imported = ReadJsonFile(resolved);
             try {
-                CheckObject(imported, "$", {"imports", "topics"});
+                CheckObject(imported, "$", {"imports", "topics", "services"});
             } catch (const std::invalid_argument& error) {
-                Fail(resolved.string(), std::string(error.what()) + " (an imported file may only declare topics)");
+                Fail(resolved.string(),
+                     std::string(error.what()) + " (an imported file may only declare topics and services)");
             }
             chain_.push_back(key);
             ImportInto(imported, resolved, project, origins);
             AppendTopics(imported, resolved.string(), project, origins);
+            AppendServices(imported, resolved.string(), project, origins);
             chain_.pop_back();
         }
     }
@@ -322,6 +347,30 @@ public:
                                + (first.empty() || first == file ? std::string() : " in " + first));
             }
             project.topics.push_back(std::move(topic));
+        }
+    }
+
+    // Service ids share `origins` with topics under a "service:" prefix, so
+    // both report where a duplicate was first declared.
+    static void AppendServices(const Json& root, const std::string& file, ProjectConfig& project,
+                               std::map<std::string, std::string>& origins)
+    {
+        std::size_t index = 0;
+        for (const auto& value : Array(root, "services", "$")) {
+            const auto path = "$.services[" + std::to_string(index++) + "]";
+            ServiceConfig service;
+            try {
+                service = DecodeService(value, path);
+            } catch (const std::invalid_argument& error) {
+                Fail(file, error.what());
+            }
+            const auto inserted = origins.emplace("service:" + service.id, file);
+            if (!inserted.second) {
+                const auto& first = inserted.first->second;
+                Fail(file, "service id " + service.id + " is already declared"
+                               + (first.empty() || first == file ? std::string() : " in " + first));
+            }
+            project.services.push_back(std::move(service));
         }
     }
 
@@ -387,7 +436,7 @@ void DecodeProjectSettings(const Json& root, ProjectConfig& project)
 // which cannot have imports.
 ProjectConfig Decode(const Json& root, const std::filesystem::path& file, ImportResolver* resolver)
 {
-    CheckObject(root, "$", {"imports", "runtime", "scheduler", "topics", "components"});
+    CheckObject(root, "$", {"imports", "runtime", "scheduler", "topics", "services", "components"});
     ProjectConfig project;
     DecodeProjectSettings(root, project);
     std::map<std::string, std::string> origins;
@@ -398,6 +447,7 @@ ProjectConfig Decode(const Json& root, const std::filesystem::path& file, Import
         resolver->ImportInto(root, file, project, origins);
     }
     ImportResolver::AppendTopics(root, file.string(), project, origins);
+    ImportResolver::AppendServices(root, file.string(), project, origins);
     std::size_t index = 0;
     for (const auto& value : Array(root, "components", "$")) {
         project.components.push_back(DecodeComponent(value, "$.components[" + std::to_string(index++) + "]", project));
@@ -412,14 +462,21 @@ void ApplyDeployment(const std::filesystem::path& file, ProjectConfig& project)
 {
     const auto root = ReadJsonFile(file);
     try {
-        CheckObject(root, "$", {"topics", "defaults"});
+        CheckObject(root, "$", {"topics", "services", "defaults"});
         if (root.contains("defaults")) {
             const auto& defaults = root.at("defaults");
             CheckObject(defaults, "$.defaults", {"transport", "transport_parameters"});
+            const auto parameters = ReadParameters(defaults, "$.defaults", "transport_parameters");
             for (auto& topic : project.topics) {
                 ReadEnum(defaults, "transport", topic.transport, ParseTransportKind, "$.defaults");
-                for (const auto& [key, value] : ReadParameters(defaults, "$.defaults", "transport_parameters")) {
+                for (const auto& [key, value] : parameters) {
                     topic.transport_parameters[key] = value;
+                }
+            }
+            for (auto& service : project.services) {
+                ReadEnum(defaults, "transport", service.transport, ParseTransportKind, "$.defaults");
+                for (const auto& [key, value] : parameters) {
+                    service.transport_parameters[key] = value;
                 }
             }
         }
@@ -443,6 +500,27 @@ void ApplyDeployment(const std::filesystem::path& file, ProjectConfig& project)
                 ReadEnum(value, "transport", topic.transport, ParseTransportKind, path);
                 for (const auto& [key, parameter] : ReadParameters(value, path, "transport_parameters")) {
                     topic.transport_parameters[key] = parameter;
+                }
+            }
+        }
+        // Services likewise, by wire name. Their settings apply to all three
+        // of the service's topics.
+        index = 0;
+        for (const auto& value : Array(root, "services", "$")) {
+            const auto path = "$.services[" + std::to_string(index++) + "]";
+            CheckObject(value, path, {"name", "transport", "transport_parameters"});
+            std::string name;
+            Read(value, "name", name, path);
+            if (name.empty()) {
+                throw std::invalid_argument(path + ".name is required");
+            }
+            for (auto& service : project.services) {
+                if (service.name != name) {
+                    continue;
+                }
+                ReadEnum(value, "transport", service.transport, ParseTransportKind, path);
+                for (const auto& [key, parameter] : ReadParameters(value, path, "transport_parameters")) {
+                    service.transport_parameters[key] = parameter;
                 }
             }
         }
