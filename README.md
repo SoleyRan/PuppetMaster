@@ -150,6 +150,8 @@ See [FastDDS Adapter](docs/fastdds-adapter.md) for the optional DDS backend.
 See [Shared-Memory Transport](docs/shm-transport.md) for same-host IPC.
 See [Typed Messages](docs/typed-messages.md) for struct and codec-based
 endpoints.
+See [Services](docs/services.md) for request/reply calls with timeouts and
+server liveness.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [Launcher And Configuration Tools](docs/launcher.md) for running

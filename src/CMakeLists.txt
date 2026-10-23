@@ -33,6 +33,8 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/runtime/typed_endpoints.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/scheduler/scheduler.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/service.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/service/typed_service.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/message.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/registry.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/transport/transport.h"
@@ -55,6 +57,7 @@ add_library(puppet_master
     runtime/component.cpp
     runtime/context.cpp
     scheduler/scheduler.cpp
+    service/service.cpp
     transport/inmemory/inmemory_transport.cpp
     ${PUPPETMASTER_PUBLIC_HEADERS}
 )
