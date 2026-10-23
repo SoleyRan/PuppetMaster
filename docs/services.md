@@ -18,10 +18,10 @@ readers works in principle; FastDDS has not been tested yet.
 
 namespace service = puppet_master::service;
 
-service::ServiceSpec spec(core::TopicName::Unsafe("/fmc/report"));
+service::ServiceSpec spec(core::TopicName::Unsafe("/map/query"));
 spec.transport = core::TransportKind::kIpc;
-spec.request = transport::MessageDescriptor {"fmc.Report", "application/x-fmc"};
-spec.reply = transport::MessageDescriptor {"fmc.ReportResult", "application/x-fmc"};
+spec.request = transport::MessageDescriptor {"map.Query", "application/x-map"};
+spec.reply = transport::MessageDescriptor {"map.QueryResult", "application/x-map"};
 
 // Server: one per service.
 auto server = service::Server::Create(runtime, spec, [](const service::Request& request) {
@@ -45,13 +45,13 @@ codecs; see [Typed Services](#typed-services).
 
 ## Topics
 
-A service named `/fmc/report` uses:
+A service named `/map/query` uses:
 
 | Topic | Writer | Reader | Policy | Carries |
 |---|---|---|---|---|
-| `/fmc/report/request` | clients | server | queued | header + request payload |
-| `/fmc/report/reply` | server | clients | queued | header + reply payload |
-| `/fmc/report/presence` | server | clients | latest | server instance id, heartbeat |
+| `/map/query/request` | clients | server | queued | header + request payload |
+| `/map/query/reply` | server | clients | queued | header + reply payload |
+| `/map/query/presence` | server | clients | latest | server instance id, heartbeat |
 
 The request and reply descriptors are those of the payload types, with the
 type name prefixed `service.request:` and `service.reply:` so a plain
@@ -119,7 +119,7 @@ server restarted.
 ```cpp
 #include <puppet_master/service/typed_service.h>
 
-const auto name = core::TopicName::Unsafe("/fmc/register");
+const auto name = core::TopicName::Unsafe("/system/register");
 
 auto server = service::MakeTypedServer<RegisterRequest, RegisterReply>(
     runtime, name, core::TransportKind::kIpc,
