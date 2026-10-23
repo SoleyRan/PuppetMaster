@@ -203,6 +203,35 @@ if(TARGET puppet_master_config)
         NAME puppet_master.config_tool_validate
         COMMAND puppet_master_config validate "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json"
     )
+
+    # The example manifest resolves node configs through ${VEHICLE_PREFIX},
+    # which points at packages built separately. Without that install, the
+    # tool must name the missing node config instead of passing.
+    add_test(
+        NAME puppet_master.config_tool_system_missing_node
+        COMMAND puppet_master_config system validate
+            "${PROJECT_SOURCE_DIR}/examples/vehicle_pipeline/integration/system.json"
+    )
+    set_tests_properties(puppet_master.config_tool_system_missing_node
+        PROPERTIES
+            ENVIRONMENT "VEHICLE_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/no-vehicle-install"
+            PASS_REGULAR_EXPRESSION "config monitor_node/monitor.json of node monitor not found"
+    )
+endif()
+
+if(PUPPETMASTER_ENABLE_JSON_CONFIG)
+    add_executable(puppet_master_system_manifest_test
+        system_manifest_test.cpp
+    )
+
+    target_link_libraries(puppet_master_system_manifest_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.system_manifest
+        COMMAND puppet_master_system_manifest_test
+    )
 endif()
 
 if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)

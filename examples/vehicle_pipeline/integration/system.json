@@ -1,0 +1,12 @@
+{
+    "name": "vehicle_pipeline",
+    "config_paths": ["${VEHICLE_PREFIX}/share"],
+    "bin_paths": ["${VEHICLE_PREFIX}/bin"],
+    "deployment": "deploy.json",
+    "nodes": [
+        {"name": "monitor", "executable": "monitor_node", "config": "monitor_node/monitor.json"},
+        {"name": "estimator", "executable": "estimator_node", "config": "estimator_node/estimator.json",
+         "start_delay_ms": 500},
+        {"name": "sensors", "executable": "sensor_node", "config": "sensor_node/sensors.json"}
+    ]
+}

@@ -16,7 +16,7 @@ sensor_node ──wheel, imu──► estimator_node ──state──► monito
 | `sensor_node` | sensor team | wheel speed and IMU publishers |
 | `estimator_node` | estimation team | fuses both inputs into `VehicleState` |
 | `monitor_node` | monitoring team | checks states, counts sequence gaps |
-| `integration/` | system integrator | `deploy.json`, system check, run scripts |
+| `integration/` | system integrator | `system.json`, `deploy.json`, run scripts |
 
 Configuration is split into three layers, each owned by the team that
 decides it:
@@ -64,6 +64,17 @@ integration/build_all.sh "$HOME/pm-install" "$HOME/vehicle"
 integration/run_pipeline.sh "$HOME/vehicle" "$HOME/pm-install/bin/puppet_master_config" 3
 ```
 
+`integration/system.json` is the system manifest: it lists the three nodes in
+start order with their binaries and config files, the import search path,
+and the deployment. `run_pipeline.sh` reads everything from it, so the
+system check, CI, and the launch use the same node list:
+
+```bash
+export VEHICLE_PREFIX="$HOME/vehicle"   # the manifest's ${VEHICLE_PREFIX}
+puppet_master_config system validate integration/system.json
+puppet_master_config system commands integration/system.json   # start commands
+```
+
 To run a node by hand, point the import search path at the shared `share`
 directory and pass the deployment:
 
@@ -78,9 +89,6 @@ node binary also accepts `--validate` and `--describe`.
 
 ## Known Limits
 
-- The system check sees only the files it is given. Keep the list of nodes in
-  one place, such as `run_pipeline.sh`, so CI and deployment check the same
-  set.
 - Shared-memory segments persist in `/dev/shm` after the processes exit; see
   [Segment Lifetime](../../docs/shm-transport.md#segment-lifetime).
 - `TrivialCodec` copies structs byte for byte, so every process must use the

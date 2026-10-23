@@ -1,54 +1,56 @@
 #!/usr/bin/env bash
-# System integration: checks every node's configuration together, then runs
-# the three processes over shared memory, stops them after a few seconds,
+# System integration: checks every node of system.json together, then starts
+# them in manifest order over shared memory, stops them after a few seconds,
 # and checks that the monitor received states without loss.
 #
 #     ./run_pipeline.sh <install-prefix> <puppet_master_config> [seconds]
 #
-# <install-prefix> holds every package, as installed by build_all.sh.
+# <install-prefix> holds every package, as installed by build_all.sh. The
+# node list, search paths, and deployment all come from system.json; nothing
+# here names a node's files.
 set -euo pipefail
 
 PREFIX=$(cd "${1:?usage: run_pipeline.sh <install-prefix> <puppet_master_config> [seconds]}" && pwd)
 CONFIG_TOOL=${2:?usage: run_pipeline.sh <install-prefix> <puppet_master_config> [seconds]}
 SECONDS_TO_RUN=${3:-3}
-DEPLOY=$(cd "$(dirname "$0")" && pwd)/deploy.json
-SHARE=$PREFIX/share
-export PUPPETMASTER_CONFIG_PATH=$SHARE
+MANIFEST=$(cd "$(dirname "$0")" && pwd)/system.json
+export VEHICLE_PREFIX=$PREFIX
 LOGS=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$LOGS"' EXIT
 
-NODES=("$SHARE/sensor_node/sensors.json" "$SHARE/estimator_node/estimator.json" "$SHARE/monitor_node/monitor.json")
-
 # One check for the whole system: no node can see the others' files.
-"$CONFIG_TOOL" validate --system --deployment "$DEPLOY" "${NODES[@]}"
+"$CONFIG_TOOL" system validate "$MANIFEST"
 
-# Each binary checks its own component types.
-"$PREFIX/bin/sensor_node" --validate --deployment "$DEPLOY" "${NODES[0]}" > /dev/null
-"$PREFIX/bin/estimator_node" --validate --deployment "$DEPLOY" "${NODES[1]}" > /dev/null
-"$PREFIX/bin/monitor_node" --validate --deployment "$DEPLOY" "${NODES[2]}" > /dev/null
-
-# Consumers first, so they see the first message the sensors write.
-"$PREFIX/bin/monitor_node" --deployment "$DEPLOY" "${NODES[2]}" > "$LOGS/monitor.log" 2>&1 &
-MONITOR=$!
-"$PREFIX/bin/estimator_node" --deployment "$DEPLOY" "${NODES[1]}" > "$LOGS/estimator.log" 2>&1 &
-ESTIMATOR=$!
-sleep 0.5
-"$PREFIX/bin/sensor_node" --deployment "$DEPLOY" "${NODES[0]}" > "$LOGS/sensors.log" 2>&1 &
-SENSORS=$!
+# Each node: its own --validate checks component types, then it starts.
+# Lines are name<TAB>command...<TAB>#delay_ms=N, in start order.
+NAMES=()
+PIDS=()
+while IFS=$'\t' read -r -a fields; do
+    name=${fields[0]}
+    delay=${fields[${#fields[@]}-1]#\#delay_ms=}
+    command=("${fields[@]:1:${#fields[@]}-2}")
+    node_config=${command[${#command[@]}-1]}
+    "${command[@]:0:${#command[@]}-1}" --validate "$node_config" > /dev/null
+    "${command[@]}" > "$LOGS/$name.log" 2>&1 &
+    NAMES+=("$name")
+    PIDS+=($!)
+    sleep "$(awk "BEGIN {print $delay / 1000}")"
+done < <("$CONFIG_TOOL" system commands "$MANIFEST")
 
 sleep "$SECONDS_TO_RUN"
 
-# Producers first, so downstream nodes drain what is in flight.
+# Reverse start order, so producers stop first and downstream nodes drain
+# what is in flight.
 status=0
-for pid in $SENSORS $ESTIMATOR $MONITOR; do
-    kill -INT "$pid" 2>/dev/null || true
-    wait "$pid" || status=1
+for ((index = ${#PIDS[@]} - 1; index >= 0; --index)); do
+    kill -INT "${PIDS[$index]}" 2>/dev/null || true
+    wait "${PIDS[$index]}" || status=1
     sleep 0.2
 done
 
-for node in sensors estimator monitor; do
-    echo "--- $node"
-    grep -v "<info>" "$LOGS/$node.log" || true
+for name in "${NAMES[@]}"; do
+    echo "--- $name"
+    grep -v "<info>" "$LOGS/$name.log" || true
 done
 
 summary=$(grep "monitor summary" "$LOGS/monitor.log" || true)

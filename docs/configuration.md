@@ -333,3 +333,65 @@ place of writing and calling in place of reading; see
 
 Run it where every process's configuration is available: in system
 integration CI, and before starting the processes on a target.
+
+### System Manifests
+
+The system check only sees the files it is given, so a list of nodes kept
+separately by CI, a launch script, and a deployment tool can drift apart. A
+system manifest is the one list of a system's processes:
+
+```json
+{
+    "name": "vehicle_pipeline",
+    "config_paths": ["${VEHICLE_PREFIX}/share"],
+    "bin_paths": ["${VEHICLE_PREFIX}/bin"],
+    "deployment": "deploy.json",
+    "nodes": [
+        {"name": "monitor", "executable": "monitor_node", "config": "monitor_node/monitor.json"},
+        {"name": "estimator", "executable": "estimator_node", "config": "estimator_node/estimator.json",
+         "start_delay_ms": 500},
+        {"name": "sensors", "executable": "sensor_node", "config": "sensor_node/sensors.json",
+         "arguments": []}
+    ]
+}
+```
+
+- `nodes` are in start order. Names must be unique and are used as labels in
+  system reports.
+- `${NAME}` in any string is replaced with the environment variable `NAME`,
+  so one manifest serves any install prefix. An unset variable is an error,
+  not an empty string.
+- Relative `config_paths`, `bin_paths`, and `deployment` resolve against the
+  manifest's directory.
+- A node's `config` resolves like an import: next to the manifest, then in
+  `config_paths`. It must exist when the manifest loads.
+- An `executable` without a directory is looked up in `bin_paths`; if it is
+  not there it is left for `PATH`. One with a directory resolves against the
+  manifest.
+- Node files load with `config_paths` after `PUPPETMASTER_CONFIG_PATH`, and
+  with the manifest's deployment.
+
+`puppet_master_config system` works on a manifest:
+
+| Command | Effect |
+|---|---|
+| `system validate system.json` | Load every node, check each, then check them together; exit 1 on any error |
+| `system describe system.json` | Print every node's configuration |
+| `system commands system.json` | Print each node's start command, one per line |
+
+`system commands` prints `name`, then the command's words, then
+`#delay_ms=N`, separated by tabs. The command is the executable, the
+launcher's `--config-path` and `--deployment` options, the node's
+`arguments`, and its config, so a launch script needs no paths of its own:
+
+```bash
+while IFS=$'\t' read -r -a fields; do
+    command=("${fields[@]:1:${#fields[@]}-2}")
+    "${command[@]}" &
+    sleep "$(awk "BEGIN {print ${fields[-1]#\#delay_ms=} / 1000}")"
+done < <(puppet_master_config system commands system.json)
+```
+
+In C++, `LoadSystemManifest`, `LoadSystemNodes`, and `ValidateSystemManifest`
+in `puppet_master/configuration/system_manifest.h` do the same, and
+`SystemManifest::CommandFor(node)` builds a start command.
