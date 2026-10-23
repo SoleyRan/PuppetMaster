@@ -166,6 +166,18 @@ if(TARGET puppet_master_configuration_system_demo)
     )
 endif()
 
+if(TARGET puppet_master_service_demo)
+    add_test(
+        NAME puppet_master.service_demo
+        COMMAND puppet_master_service_demo
+    )
+    set_tests_properties(puppet_master.service_demo
+        PROPERTIES
+            PASS_REGULAR_EXPRESSION "service demo finished"
+            TIMEOUT 30
+    )
+endif()
+
 if(TARGET puppet_master_launcher_demo)
     set(PUPPETMASTER_DEMO_CONFIG "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json")
 

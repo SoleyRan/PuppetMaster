@@ -264,6 +264,22 @@ void ServerAbsenceAndRestart()
     assert(restarted.ok() && restarted.value().instance_id != first_id);
     auto reply = c.Call(Bytes("back"), 1s);
     assert(reply.ok() && Text(reply.value()) == "kcab");
+
+    // An orderly close announces itself: calls fail at once, saying so,
+    // instead of waiting out the liveness window.
+    second.value()->Close();
+    const auto closed_at = std::chrono::steady_clock::now();
+    auto withdrawn = c.Call(Bytes("x"), 2s);
+    assert(withdrawn.status().code() == core::StatusCode::kUnavailable);
+    assert(withdrawn.status().message().find("the server stopped") != std::string::npos);
+    assert(std::chrono::steady_clock::now() - closed_at < 50ms);
+
+    // A server started after the goodbye is used right away.
+    auto third = service::Server::Create(*runtime, Spec("/svc/absent"), Reverse);
+    assert(third.ok());
+    auto resumed = c.Call(Bytes("again"), 1s);
+    assert(resumed.ok() && Text(resumed.value()) == "niaga");
+    assert(c.Server().value().instance_id == third.value()->instance_id());
 }
 
 void ExpiredRequestsAreSkipped()

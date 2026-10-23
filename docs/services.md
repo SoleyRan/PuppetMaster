@@ -89,6 +89,12 @@ arrives. Source timestamps are not used, because not every transport carries
 them and they do not compare across hosts. A changed `instance_id` means the
 server restarted.
 
+`Server::Close()` writes a goodbye (sequence 0) after its last heartbeat, so
+clients of a server that stops in order fail their calls at once with
+`Unavailable` ("the server stopped") instead of waiting out the liveness
+window. Only a crashed server is detected by silence. A goodbye from an older
+instance does not affect a newer one.
+
 ## Semantics
 
 - `Call` returns the reply, or:
@@ -137,6 +143,13 @@ request that fails to decode is answered with the decode error instead of
 reaching the handler. For other settings, build the spec with
 `TypedServiceSpec<Request, Reply>(name, transport)`, adjust it, and pass it
 to the overloads that take a `ServiceSpec`.
+
+## Example
+
+`demo/service_demo.cpp` runs a parameter store service with two clients:
+typed get/set calls, handler errors, a slow handler that times out
+(`DeadlineExceeded`), an orderly server stop that fails calls at once
+(`Unavailable`), and a restart picked up through a new instance id.
 
 ## Limits
 

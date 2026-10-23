@@ -23,6 +23,8 @@ constexpr std::uint32_t kReplyMagic = 0x50524d50;    // "PMRP"
 constexpr std::uint16_t kHeaderVersion = 1;
 constexpr std::size_t kHeaderSize = 32;
 constexpr std::size_t kPresenceSize = 16;
+// Heartbeat sequences start at 1; 0 announces that the server stopped.
+constexpr std::uint64_t kOfflineSequence = 0;
 // How often blocking loops wake to notice Close(), at most.
 constexpr auto kPollInterval = std::chrono::milliseconds(20);
 
@@ -237,11 +239,12 @@ struct Server::Impl {
     std::atomic<std::uint64_t> expired {0};
     std::uint64_t heartbeat_sequence {0};
 
-    void Announce()
+    // A heartbeat, or with `offline` the announcement that this server stops.
+    void Announce(bool offline = false)
     {
         core::Byte message[kPresenceSize];
         PutU64(message, instance_id);
-        PutU64(message + 8, ++heartbeat_sequence);
+        PutU64(message + 8, offline ? kOfflineSequence : ++heartbeat_sequence);
         presence->Write(ByteView(message, sizeof(message)));
     }
 
@@ -420,6 +423,9 @@ void Server::Close() noexcept
     if (impl_->heartbeat.joinable()) {
         impl_->heartbeat.join();
     }
+    // An orderly stop says so, so clients need not wait out the liveness
+    // window; only a crashed server is noticed by silence.
+    impl_->Announce(true);
     impl_->wake.notify_all();
     if (impl_->worker.joinable()) {
         impl_->worker.join();
@@ -457,6 +463,9 @@ struct Client::Impl {
     // process received a new one, on its own clock: source timestamps are
     // not carried by every transport and do not compare across hosts.
     std::uint64_t server_instance {0};
+    // Set by an orderly goodbye; cleared by the next heartbeat. A call then
+    // fails at once instead of waiting for a server to appear.
+    bool server_withdrew {false};
     std::uint64_t heartbeat_sequence {0};
     core::TimePoint heartbeat_at {};
 
@@ -476,9 +485,22 @@ struct Client::Impl {
             if (instance == server_instance && sequence == heartbeat_sequence) {
                 continue;
             }
+            if (sequence == kOfflineSequence) {
+                // Only the current server can withdraw itself; a stale
+                // goodbye from an older instance is ignored.
+                if (instance == server_instance) {
+                    server_instance = 0;
+                    heartbeat_sequence = 0;
+                    heartbeat_at = {};
+                    server_withdrew = true;
+                    replied.notify_all();  // wake calls waiting on this server
+                }
+                continue;
+            }
             server_instance = instance;
             heartbeat_sequence = sequence;
             heartbeat_at = Now();
+            server_withdrew = false;
         }
     }
 
@@ -488,9 +510,14 @@ struct Client::Impl {
         PollPresenceLocked();
         const auto age = Now() - heartbeat_at;
         if (server_instance == 0 || age > Liveness()) {
-            return core::Result<ServerInfo>::FromStatus(core::Status::Unavailable(
-                Describe(spec) + " has no live server"
-                + (server_instance == 0 ? std::string() : " (last heartbeat " + std::to_string(age.count() / 1000000) + " ms ago)")));
+            std::string reason;
+            if (server_withdrew) {
+                reason = " (the server stopped)";
+            } else if (server_instance != 0) {
+                reason = " (last heartbeat " + std::to_string(age.count() / 1000000) + " ms ago)";
+            }
+            return core::Result<ServerInfo>::FromStatus(
+                core::Status::Unavailable(Describe(spec) + " has no live server" + reason));
         }
         return core::Result<ServerInfo>(ServerInfo {server_instance, age});
     }
@@ -589,19 +616,20 @@ core::Result<transport::ByteBuffer> Client::Call(transport::ByteView request, co
     {
         // A client that has not seen a heartbeat yet, such as one created a
         // moment ago, waits up to one liveness window for it before deciding
-        // there is no server.
+        // there is no server. A server that said goodbye fails the call at
+        // once.
         std::unique_lock<std::mutex> lock(impl.mutex);
         const auto give_up = std::min(deadline, Now() + impl.Liveness());
         while (true) {
             if (impl.closed) {
                 return ResultType::FromStatus(core::Status::Cancelled(Describe(impl.spec) + ": client is closed"));
             }
-            auto server = impl.LiveServerLocked();
+            auto server = impl.LiveServerLocked();  // polls presence first
             if (server.ok()) {
                 break;
             }
             const auto now = Now();
-            if (now >= give_up) {
+            if (impl.server_withdrew || now >= give_up) {
                 return ResultType::FromStatus(server.status());
             }
             impl.replied.wait_for(lock, std::min<core::Nanoseconds>(give_up - now, kPollInterval));
