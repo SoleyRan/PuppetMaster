@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -39,6 +40,15 @@ public:
     // existing mappings stay valid. A missing name is not an error. No-op on
     // Windows, which frees a region when its last handle closes.
     static core::Status Remove(const std::string& name);
+
+    // Maps an existing region read-only, for inspection. NotFound if it does
+    // not exist. Unsupported on Windows.
+    static core::Result<std::unique_ptr<SharedRegion>> OpenReadOnly(const std::string& name);
+
+    // Names of the regions this layer created in `domain` (every domain if
+    // none), as passed to CreateOrOpen. Unsupported on Windows, which does
+    // not keep regions after their processes exit.
+    static core::Result<std::vector<std::string>> List(std::optional<core::DomainId> domain);
 
     ~SharedRegion();
     SharedRegion(const SharedRegion&) = delete;

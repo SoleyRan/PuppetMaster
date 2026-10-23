@@ -511,6 +511,23 @@ if(TARGET PuppetMaster::ShmAdapter)
         COMMAND puppet_master_shm_transport_test
     )
 
+    add_executable(puppet_master_shm_segments_test
+        shm_segments_test.cpp
+    )
+
+    target_link_libraries(puppet_master_shm_segments_test
+        PRIVATE
+            PuppetMaster::ShmAdapter
+    )
+
+    # Lists and removes everything in its own shm domain, so it must not run
+    # alongside another instance of itself.
+    add_test(
+        NAME puppet_master.shm_segments
+        COMMAND puppet_master_shm_segments_test
+    )
+    set_tests_properties(puppet_master.shm_segments PROPERTIES RUN_SERIAL TRUE)
+
     add_executable(puppet_master_shm_service_test
         shm_service_test.cpp
     )

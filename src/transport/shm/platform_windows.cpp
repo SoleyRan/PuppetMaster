@@ -97,6 +97,18 @@ core::Status SharedRegion::Remove(const std::string& /*name*/)
     return core::Status::Ok();
 }
 
+core::Result<std::unique_ptr<SharedRegion>> SharedRegion::OpenReadOnly(const std::string& /*name*/)
+{
+    return core::Result<std::unique_ptr<SharedRegion>>::FromStatus(
+        core::Status::Unsupported("shm segment inspection is not supported on Windows"));
+}
+
+core::Result<std::vector<std::string>> SharedRegion::List(std::optional<core::DomainId> /*domain*/)
+{
+    return core::Result<std::vector<std::string>>::FromStatus(core::Status::Unsupported(
+        "shm segments are not listed on Windows; they are freed when their last process exits"));
+}
+
 SharedRegion::~SharedRegion()
 {
     UnmapViewOfFile(data_);

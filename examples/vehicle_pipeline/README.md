@@ -89,8 +89,10 @@ node binary also accepts `--validate` and `--describe`.
 
 ## Known Limits
 
-- Shared-memory segments persist in `/dev/shm` after the processes exit; see
-  [Segment Lifetime](../../docs/shm-transport.md#segment-lifetime).
+- Shared-memory segments persist in `/dev/shm` after the processes exit;
+  `puppet_master_config shm list` shows them and `shm clean` removes those no
+  running process uses. See
+  [Listing And Cleaning Up](../../docs/shm-transport.md#listing-and-cleaning-up).
 - `TrivialCodec` copies structs byte for byte, so every process must use the
   same compiler ABI. Versions catch layout changes the owner declares, not
   ABI differences between compilers; across those, use

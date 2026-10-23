@@ -510,6 +510,109 @@ core::Status RemoveSegment(core::DomainId domain_id, const std::string& topic)
     return detail::SharedRegion::Remove(detail::ObjectName(domain_id, topic));
 }
 
+const char* ToString(SegmentInfo::State state) noexcept
+{
+    switch (state) {
+        case SegmentInfo::State::kInUse:
+            return "in_use";
+        case SegmentInfo::State::kUnused:
+            return "unused";
+        case SegmentInfo::State::kUninitialized:
+            return "uninitialized";
+        case SegmentInfo::State::kIncompatible:
+            return "incompatible";
+    }
+    return "unknown";
+}
+
+namespace {
+
+// "/pm.<domain>.<hash>" -> domain. List() only returns names of that form.
+core::DomainId DomainOf(const std::string& object_name)
+{
+    const auto start = object_name.find('.') + 1;
+    const auto end = object_name.find('.', start);
+    return static_cast<core::DomainId>(std::stoul(object_name.substr(start, end - start)));
+}
+
+SegmentInfo Describe(const std::string& object_name, const detail::SegmentInspection& inspection)
+{
+    SegmentInfo info;
+    info.object_name = object_name;
+    info.domain_id = DomainOf(object_name);
+    info.size_bytes = inspection.size;
+    info.problem = inspection.problem;
+    switch (inspection.state) {
+        case detail::SegmentInspection::State::kUninitialized:
+            info.state = SegmentInfo::State::kUninitialized;
+            return info;
+        case detail::SegmentInspection::State::kIncompatible:
+            info.state = SegmentInfo::State::kIncompatible;
+            return info;
+        case detail::SegmentInspection::State::kValid:
+            break;
+    }
+    info.topic = inspection.topic;
+    info.descriptor = inspection.descriptor;
+    info.geometry = TopicOptions {inspection.geometry.slot_payload_size, inspection.geometry.slot_count};
+    info.messages_written = inspection.write_sequence;
+    for (const auto& participant : inspection.participants) {
+        if (detail::IsProcessAlive(participant)) {
+            info.live_pids.push_back(participant.pid);
+        } else {
+            ++info.dead_participants;
+        }
+    }
+    info.state = info.live_pids.empty() ? SegmentInfo::State::kUnused : SegmentInfo::State::kInUse;
+    return info;
+}
+
+}  // namespace
+
+core::Result<std::vector<SegmentInfo>> ListSegments(std::optional<core::DomainId> domain_id)
+{
+    using ResultType = core::Result<std::vector<SegmentInfo>>;
+    auto names = detail::SharedRegion::List(domain_id);
+    if (!names.ok()) {
+        return ResultType::FromStatus(names.status());
+    }
+    std::vector<SegmentInfo> segments;
+    for (const auto& name : names.value()) {
+        auto inspection = detail::InspectSegment(name);
+        if (!inspection.ok()) {
+            if (inspection.status().code() == core::StatusCode::kNotFound) {
+                continue;  // removed since it was listed
+            }
+            return ResultType::FromStatus(core::Status::Error(
+                inspection.status().code(), name + ": " + inspection.status().message()));
+        }
+        segments.push_back(Describe(name, inspection.value()));
+    }
+    return ResultType(std::move(segments));
+}
+
+core::Result<std::vector<SegmentInfo>> RemoveUnusedSegments(std::optional<core::DomainId> domain_id)
+{
+    using ResultType = core::Result<std::vector<SegmentInfo>>;
+    auto segments = ListSegments(domain_id);
+    if (!segments.ok()) {
+        return segments;
+    }
+    std::vector<SegmentInfo> removed;
+    for (auto& segment : segments.value()) {
+        if (segment.state == SegmentInfo::State::kInUse) {
+            continue;
+        }
+        auto status = detail::SharedRegion::Remove(segment.object_name);
+        if (!status.ok()) {
+            return ResultType::FromStatus(
+                core::Status::Error(status.code(), segment.object_name + ": " + status.message()));
+        }
+        removed.push_back(std::move(segment));
+    }
+    return ResultType(std::move(removed));
+}
+
 struct ShmTransport::Impl {
     mutable std::mutex mutex;
     bool open {false};

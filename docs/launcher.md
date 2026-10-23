@@ -110,6 +110,7 @@ puppet_master_config validate config/*.json
 puppet_master_config validate --system --deployment deploy.json nodes/*.json
 puppet_master_config describe config/vehicle.json
 puppet_master_config system validate system.json
+puppet_master_config shm clean --dry-run
 ```
 
 `validate` accepts several files, prints `ok` or every problem per file, and
@@ -126,6 +127,10 @@ example every node of a release in integration CI. See
 manifest, which lists every node with its binary, config, and the search
 path and deployment; `system commands` prints each node's start command for
 launch scripts. See [System Manifests](configuration.md#system-manifests).
+
+`shm list` and `shm clean` show and remove leftover shared-memory segments
+(when the shared-memory adapter is built). See
+[Listing And Cleaning Up](shm-transport.md#listing-and-cleaning-up).
 
 ## Library Helpers
 

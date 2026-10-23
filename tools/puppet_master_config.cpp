@@ -5,11 +5,13 @@
 //     puppet_master_config validate --system sensors.json estimator.json monitor.json
 //     puppet_master_config describe config/vehicle.json
 //     puppet_master_config system validate system.json
+//     puppet_master_config shm list
 //
 // Component types are not checked here because factories live in the
 // application binary; run the application with --validate for that.
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,7 +19,14 @@
 #include <puppet_master/configuration/json_loader.h>
 #include <puppet_master/configuration/system_manifest.h>
 
+#ifdef PUPPETMASTER_CONFIG_WITH_SHM
+#include <puppet_master/transport/shm/shm_transport.h>
+#endif
+
 namespace config = puppet_master::configuration;
+#ifdef PUPPETMASTER_CONFIG_WITH_SHM
+namespace shm = puppet_master::transport::shm;
+#endif
 
 namespace {
 
@@ -36,7 +45,11 @@ int Usage(std::ostream& out)
         << "                     together\n"
         << "  system describe    print every node's configuration\n"
         << "  system commands    print each node's start command, one per line:\n"
-        << "                     name<TAB>word<TAB>...<TAB>#delay_ms=N\n";
+        << "                     name<TAB>word<TAB>...<TAB>#delay_ms=N\n"
+        << "       puppet_master_config shm list [--domain N]\n"
+        << "       puppet_master_config shm clean [--domain N] [--dry-run]\n"
+        << "  shm list           list this host's shared-memory segments and who uses them\n"
+        << "  shm clean          remove the segments no running process uses (Linux)\n";
     return 2;
 }
 
@@ -111,6 +124,79 @@ int RunSystem(const std::string& action, const std::string& path)
     return 0;
 }
 
+// `shm list|clean [--domain N] [--dry-run]`: shared-memory segments left in
+// /dev/shm by this host's processes.
+int RunShm(int argc, char** argv)
+{
+#ifdef PUPPETMASTER_CONFIG_WITH_SHM
+    const std::string action = argv[2];
+    if (action != "list" && action != "clean") {
+        return Usage(std::cerr);
+    }
+    std::optional<puppet_master::core::DomainId> domain;
+    bool dry_run = false;
+    for (int index = 3; index < argc; ++index) {
+        const std::string argument = argv[index];
+        if (argument == "--domain" && index + 1 < argc) {
+            const std::string value = argv[++index];
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos || value.size() > 9) {
+                std::cerr << "--domain must be a number\n";
+                return 2;
+            }
+            domain = static_cast<puppet_master::core::DomainId>(std::stoul(value));
+        } else if (argument == "--dry-run" && action == "clean") {
+            dry_run = true;
+        } else {
+            return Usage(std::cerr);
+        }
+    }
+
+    // A dry run lists what clean would remove: everything not in use.
+    auto segments = action == "list" || dry_run ? shm::ListSegments(domain) : shm::RemoveUnusedSegments(domain);
+    if (!segments.ok()) {
+        std::cerr << segments.status().ToString() << '\n';
+        return 1;
+    }
+    std::size_t shown = 0;
+    for (const auto& segment : segments.value()) {
+        if (action == "clean" && segment.state == shm::SegmentInfo::State::kInUse) {
+            continue;
+        }
+        ++shown;
+        std::cout << (action == "list" ? "" : dry_run ? "would remove " : "removed ") << segment.object_name << "  "
+                  << shm::ToString(segment.state);
+        if (!segment.topic.empty()) {
+            std::cout << "  " << segment.topic << "  " << segment.descriptor.ToString() << "  "
+                      << segment.geometry.slot_payload_size << " B x " << segment.geometry.slot_count << " slots, "
+                      << segment.messages_written << " written";
+        } else if (!segment.problem.empty()) {
+            std::cout << "  (" << segment.problem << ")";
+        }
+        if (!segment.live_pids.empty()) {
+            std::cout << "  pids";
+            for (const auto pid : segment.live_pids) {
+                std::cout << ' ' << pid;
+            }
+        }
+        if (segment.dead_participants != 0) {
+            std::cout << "  " << segment.dead_participants << " exited";
+        }
+        std::cout << '\n';
+    }
+    if (action == "clean") {
+        std::cout << (dry_run ? "would remove " : "removed ") << shown << " segment(s)\n";
+    } else if (shown == 0) {
+        std::cout << "no segments\n";
+    }
+    return 0;
+#else
+    (void)argc;
+    (void)argv;
+    std::cerr << "puppet_master_config was built without the shared-memory adapter\n";
+    return 1;
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -123,6 +209,9 @@ int main(int argc, char** argv)
         return Usage(std::cerr);
     }
     const std::string command = argv[1];
+    if (command == "shm") {
+        return RunShm(argc, argv);
+    }
     if (command == "system") {
         if (argc != 4) {
             return Usage(std::cerr);

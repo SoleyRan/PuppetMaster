@@ -464,4 +464,46 @@ void Segment::ReclaimDeadParticipants() noexcept
         }
     }
 }
+
+core::Result<SegmentInspection> InspectSegment(const std::string& name)
+{
+    using ResultType = core::Result<SegmentInspection>;
+    auto region = SharedRegion::OpenReadOnly(name);
+    if (!region.ok()) {
+        return ResultType::FromStatus(region.status());
+    }
+    SegmentInspection inspection;
+    inspection.size = region.value()->size();
+    if (inspection.size < HeaderSize()) {
+        inspection.state = inspection.size == 0 ? SegmentInspection::State::kUninitialized
+                                                : SegmentInspection::State::kIncompatible;
+        inspection.problem = inspection.size == 0 ? "never sized" : "smaller than a segment header";
+        return ResultType(std::move(inspection));
+    }
+    const auto& header = *static_cast<const SegmentHeader*>(region.value()->data());
+    if (header.magic.load(std::memory_order_acquire) != kMagic) {
+        inspection.state = SegmentInspection::State::kUninitialized;
+        inspection.problem = "header never published";
+        return ResultType(std::move(inspection));
+    }
+    if (header.layout_version != kLayoutVersion || header.header_size != HeaderSize()) {
+        inspection.state = SegmentInspection::State::kIncompatible;
+        inspection.problem = "layout version " + std::to_string(header.layout_version) + ", expected "
+            + std::to_string(kLayoutVersion);
+        return ResultType(std::move(inspection));
+    }
+    inspection.topic = LoadName(header.topic_name);
+    inspection.descriptor = StoredDescriptor(header);
+    inspection.geometry = SegmentGeometry {static_cast<std::size_t>(header.slot_payload_size), header.slot_count};
+    inspection.write_sequence = header.write_seq.load(std::memory_order_acquire) & ~kWritingBit;
+    for (const auto& entry : header.participants) {
+        if (Kind(entry.state.load(std::memory_order_acquire)) != kParticipantActive) {
+            continue;
+        }
+        inspection.participants.push_back(ProcessIdentity {
+            entry.pid.load(std::memory_order_relaxed), entry.start_time.load(std::memory_order_relaxed)});
+    }
+    return ResultType(std::move(inspection));
+}
+
 }  // namespace puppet_master::transport::shm::detail
