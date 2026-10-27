@@ -276,12 +276,14 @@ struct Server::Impl {
         replies->Write(ByteView(message));
     }
 
-    void Serve(const transport::Message& message)
+    // True if the handler ran; false for a request that was dropped
+    // unhandled (malformed, or past its deadline).
+    bool Serve(const transport::Message& message)
     {
         Header header;
         ByteView payload;
         if (!Decode(message.payload, kRequestMagic, header, payload)) {
-            return;
+            return false;
         }
         // The deadline is measured on this host's clock from when the request
         // arrived. Transit time is not counted, so the server errs toward
@@ -293,7 +295,7 @@ struct Server::Impl {
         Request request {payload, header.client_id, header.request_id, deadline};
         if (header.budget_ns != 0 && Now() > deadline) {
             ++expired;  // the client has stopped waiting
-            return;
+            return false;
         }
         core::Result<ByteBuffer> result = core::Result<ByteBuffer>::FromStatus(core::Status::Internal(""));
         try {
@@ -312,6 +314,7 @@ struct Server::Impl {
             Reply(header, result.status().code(),
                   ByteView(reinterpret_cast<const core::Byte*>(text.data()), text.size()));
         }
+        return true;
     }
 
     // Serves requests in arrival order. Polls as well as waiting for the data
@@ -437,8 +440,12 @@ core::Result<std::size_t> Server::ServePending(std::size_t limit)
         auto queued = impl.requests->PendingMessageCount();
         budget = queued.ok() ? queued.value() : impl.spec.queue_depth;
     }
+    // The budget counts requests taken, expired ones included, so a backlog
+    // of expired requests cannot stretch the pass; only handled ones count
+    // toward the result.
+    std::size_t taken = 0;
     std::size_t served = 0;
-    while (served < budget) {
+    while (taken < budget) {
         if (is_closed()) {
             break;  // Close() from a handler, or from another thread
         }
@@ -446,8 +453,10 @@ core::Result<std::size_t> Server::ServePending(std::size_t limit)
         if (!message.ok()) {
             break;  // drained
         }
-        impl.Serve(message.value());
-        ++served;
+        ++taken;
+        if (impl.Serve(message.value())) {
+            ++served;
+        }
     }
     return ResultType(served);
 }

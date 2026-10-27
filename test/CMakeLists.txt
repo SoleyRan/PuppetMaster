@@ -207,6 +207,18 @@ if(TARGET puppet_master_service_demo)
     )
 endif()
 
+if(TARGET puppet_master_scheduled_service_demo)
+    add_test(
+        NAME puppet_master.scheduled_service_demo
+        COMMAND puppet_master_scheduled_service_demo
+    )
+    set_tests_properties(puppet_master.scheduled_service_demo
+        PROPERTIES
+            PASS_REGULAR_EXPRESSION "scheduled service demo finished"
+            TIMEOUT 30
+    )
+endif()
+
 if(TARGET puppet_master_launcher_demo)
     set(PUPPETMASTER_DEMO_CONFIG "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json")
 

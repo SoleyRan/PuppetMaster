@@ -86,11 +86,13 @@ public:
     static core::Result<std::unique_ptr<Server>> Create(
         runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler, ServerOptions options = {});
 
-    // kCaller only: handles queued requests in arrival order on the calling
-    // thread and returns how many, at most `limit` (0 means all queued).
-    // Requests that arrive meanwhile are left for the next call, so a burst
-    // cannot keep one call running forever. FailedPrecondition in kOwnThread
-    // mode or after Close().
+    // kCaller only: takes queued requests in arrival order on the calling
+    // thread, at most `limit` (0 means all queued), and returns how many it
+    // handled. Requests whose client deadline already passed are taken but
+    // dropped unhandled (see expired_count()), so they do not count. Requests
+    // that arrive meanwhile are left for the next call, so a burst cannot
+    // keep one call running forever. FailedPrecondition in kOwnThread mode
+    // or after Close().
     core::Result<std::size_t> ServePending(std::size_t limit = 0);
 
     // Requests waiting to be handled, where the transport can tell.
