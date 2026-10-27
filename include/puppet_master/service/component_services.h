@@ -31,9 +31,31 @@ inline core::Result<ServiceSpec> FindServiceSpec(
         core::Status::NotFound(std::string("component declares no ") + kind + " for service " + name));
 }
 
+// kCaller when one of the spec's service triggers names the service: the
+// scheduler then runs the component on requests, and the component serves
+// them in Execute() with ServePending. kOwnThread otherwise.
+inline ServerOptions OptionsFor(const runtime::ComponentSpec& spec, const ServiceSpec& service)
+{
+    ServerOptions options;
+    for (const auto& trigger : spec.triggers) {
+        if (trigger.kind != core::TriggerKind::kService) {
+            continue;
+        }
+        for (const auto& name : trigger.service_dependencies) {
+            if (name == service.name) {
+                options.mode = ServeMode::kCaller;
+            }
+        }
+    }
+    return options;
+}
+
 }  // namespace detail
 
-// Server for `name`, which the spec must list in `servers`.
+// Server for `name`, which the spec must list in `servers`. If a service
+// trigger of the spec names it, the server is ServeMode::kCaller and the
+// component must call ServePending() in Execute(); see
+// docs/services.md#scheduled-servers.
 inline core::Result<std::unique_ptr<Server>> CreateServer(
     runtime::ComponentContext& context, const runtime::ComponentSpec& spec, const std::string& name, Handler handler)
 {
@@ -41,7 +63,8 @@ inline core::Result<std::unique_ptr<Server>> CreateServer(
     if (!service.ok()) {
         return core::Result<std::unique_ptr<Server>>::FromStatus(service.status());
     }
-    return Server::Create(context.runtime(), std::move(service).value(), std::move(handler));
+    const auto options = detail::OptionsFor(spec, service.value());
+    return Server::Create(context.runtime(), std::move(service).value(), std::move(handler), options);
 }
 
 // Client for `name`, which the spec must list in `clients`.
@@ -71,7 +94,9 @@ core::Result<std::unique_ptr<Server>> CreateTypedServer(
     if (!status.ok()) {
         return ResultType::FromStatus(std::move(status));
     }
-    return MakeTypedServer<Request, Reply>(context.runtime(), std::move(service).value(), std::move(handler));
+    const auto options = detail::OptionsFor(spec, service.value());
+    return MakeTypedServer<Request, Reply>(
+        context.runtime(), std::move(service).value(), std::move(handler), options);
 }
 
 template <typename Request, typename Reply>

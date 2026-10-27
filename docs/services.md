@@ -276,6 +276,19 @@ components list the ones they provide (`servers`) and call (`clients`):
 `request_version` and `reply_version` default to 0, `encoding` to
 `application/octet-stream`, `queue_depth` to 16, and the heartbeat to 100 ms.
 
+A [service trigger](scheduler.md#service-triggers) names service ids from the
+component's `servers`:
+
+```json
+{"name": "map", "type": "map_server", "servers": ["query"],
+ "triggers": [{"kind": "service", "services": ["query"], "priority": 10, "deadline_ns": 5000000}]}
+```
+
+`CreateServer` and `CreateTypedServer` (below) then create that server with
+`ServeMode::kCaller`, and the component calls `ServePending()` in `Execute()`.
+Without the trigger they create it with its own thread, and `ServePending()`
+returns `FailedPrecondition`.
+
 Interface files may declare `services` next to `topics`, so the team that
 serves a service publishes its contract once and every caller imports it.
 Deployment files place them by wire name; the settings apply to all three of

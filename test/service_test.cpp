@@ -530,6 +530,20 @@ void ServicesFromComponentSpec()
     broken.queue_depth = 0;
     runtime::ComponentSpec invalid {core::ComponentName::Unsafe("invalid"), "", {}, {}, {}, {}, {broken}, {}};
     assert(invalid.Validate().code() == core::StatusCode::kInvalidArgument);
+
+    // A service trigger in the spec makes CreateServer's server kCaller:
+    // ServePending works on it, and refuses on the untriggered one.
+    auto scheduled = Spec("/svc/spec-scheduled");
+    core::TriggerSpec on_request;
+    on_request.kind = core::TriggerKind::kService;
+    on_request.service_dependencies = {scheduled.name};
+    runtime::ComponentSpec triggered {
+        core::ComponentName::Unsafe("triggered"), "", {}, {}, {on_request}, {}, {scheduled}, {}};
+    runtime::ComponentContext triggered_context(triggered.name, *runtime);
+    auto caller_mode = service::CreateServer(triggered_context, triggered, "/svc/spec-scheduled", Reverse);
+    assert(caller_mode.ok());
+    assert(caller_mode.value()->ServePending().ok());
+    assert(text_server.value()->ServePending().status().code() == core::StatusCode::kFailedPrecondition);
 }
 
 }  // namespace

@@ -69,6 +69,9 @@ struct TriggerConfig {
     std::vector<std::string> task_dependencies;
     std::int32_t priority {0};
     core::Nanoseconds deadline {0};
+    // Service ids, for service triggers; each must be in the component's
+    // `servers`.
+    std::vector<std::string> services;
 
     core::Status Validate(const ProjectConfig& project) const;
     core::Result<core::TriggerSpec> ToTriggerSpec(const ProjectConfig& project) const;

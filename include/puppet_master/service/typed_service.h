@@ -119,7 +119,8 @@ using TypedHandler = std::function<core::Result<Reply>(const Request&)>;
 // passed to the handler.
 template <typename Request, typename Reply>
 core::Result<std::unique_ptr<Server>> MakeTypedServer(
-    runtime::RuntimeContext& runtime, ServiceSpec spec, TypedHandler<Request, Reply> handler)
+    runtime::RuntimeContext& runtime, ServiceSpec spec, TypedHandler<Request, Reply> handler,
+    ServerOptions options = {})
 {
     if (!handler) {
         return core::Result<std::unique_ptr<Server>>::FromStatus(
@@ -135,7 +136,7 @@ core::Result<std::unique_ptr<Server>> MakeTypedServer(
             return core::Result<transport::ByteBuffer>::FromStatus(reply.status());
         }
         return detail::EncodeMessage(reply.value());
-    });
+    }, options);
 }
 
 template <typename Request, typename Reply>

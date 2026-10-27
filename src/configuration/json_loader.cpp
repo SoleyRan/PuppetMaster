@@ -238,7 +238,7 @@ ComponentConfig DecodeComponent(const Json& value, const std::string& path, cons
     for (const auto& entry : Array(value, "triggers", path)) {
         const auto trigger_path = path + ".triggers[" + std::to_string(trigger_index++) + "]";
         CheckObject(entry, trigger_path, {"kind", "period_ns", "dependency_policy", "data_topics",
-                                          "task_dependencies", "priority", "deadline_ns"});
+                                          "task_dependencies", "services", "priority", "deadline_ns"});
         TriggerConfig trigger;
         ReadEnum(entry, "kind", trigger.kind, ParseTriggerKind, trigger_path);
         auto period = trigger.period.count();
@@ -251,6 +251,7 @@ ComponentConfig DecodeComponent(const Json& value, const std::string& path, cons
         ReadEnum(entry, "dependency_policy", trigger.dependency_policy, ParseDependencyPolicy, trigger_path);
         Read(entry, "data_topics", trigger.data_topics, trigger_path);
         Read(entry, "task_dependencies", trigger.task_dependencies, trigger_path);
+        Read(entry, "services", trigger.services, trigger_path);
         component.triggers.push_back(std::move(trigger));
     }
     return component;
