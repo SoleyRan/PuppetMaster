@@ -88,6 +88,21 @@ add_test(
     COMMAND puppet_master_component_parameters_test
 )
 
+add_executable(puppet_master_scheduled_service_test
+    scheduled_service_test.cpp
+)
+
+target_link_libraries(puppet_master_scheduled_service_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.scheduled_service
+    COMMAND puppet_master_scheduled_service_test
+)
+set_tests_properties(puppet_master.scheduled_service PROPERTIES TIMEOUT 60)
+
 add_executable(puppet_master_service_test
     service_test.cpp
 )

@@ -225,10 +225,18 @@ core::Result<ServiceEndpoints> EndpointsFor(const ServiceSpec& spec)
 // ---------------------------------------------------------------- Server
 
 struct Server::Impl {
-    Impl(ServiceSpec spec_in, Handler handler_in) : spec(std::move(spec_in)), handler(std::move(handler_in)) {}
+    Impl(ServiceSpec spec_in, Handler handler_in, ServerOptions options_in)
+        : spec(std::move(spec_in)), handler(std::move(handler_in)), options(options_in)
+    {
+    }
 
     ServiceSpec spec;
     Handler handler;
+    ServerOptions options;
+    // kCaller: one ServePending at a time, so requests keep arrival order
+    // even if several threads call it; serving_thread is the one inside.
+    std::mutex serve_mutex;
+    std::atomic<std::thread::id> serving_thread {};
     std::uint64_t instance_id {RandomId()};
     transport::ReaderPtr requests;
     transport::WriterPtr replies;
@@ -341,7 +349,7 @@ struct Server::Impl {
 };
 
 core::Result<std::unique_ptr<Server>> Server::Create(
-    runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler)
+    runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler, ServerOptions options)
 {
     using ResultType = core::Result<std::unique_ptr<Server>>;
     if (!handler) {
@@ -351,7 +359,7 @@ core::Result<std::unique_ptr<Server>> Server::Create(
     if (!endpoints.ok()) {
         return ResultType::FromStatus(endpoints.status());
     }
-    auto impl = std::make_shared<Impl>(std::move(spec), std::move(handler));
+    auto impl = std::make_shared<Impl>(std::move(spec), std::move(handler), options);
 
     auto requests = runtime.CreateReader(endpoints.value().request);
     auto replies = runtime.CreateWriter(endpoints.value().reply);
@@ -366,25 +374,84 @@ core::Result<std::unique_ptr<Server>> Server::Create(
     impl->replies = std::move(replies).value();
     impl->presence = std::move(presence).value();
 
-    std::weak_ptr<Impl> weak = impl;
-    auto status = impl->requests->SetDataAvailableCallback([weak] {
-        if (auto self = weak.lock()) {
-            {
-                std::lock_guard<std::mutex> lock(self->mutex);
-                self->pending = true;
+    // kCaller: arrival is someone else's to notice (the scheduler's service
+    // trigger, through its own reader), so the server installs no callback.
+    if (impl->options.mode == ServeMode::kOwnThread) {
+        std::weak_ptr<Impl> weak = impl;
+        auto status = impl->requests->SetDataAvailableCallback([weak] {
+            if (auto self = weak.lock()) {
+                {
+                    std::lock_guard<std::mutex> lock(self->mutex);
+                    self->pending = true;
+                }
+                self->wake.notify_one();
             }
-            self->wake.notify_one();
+        });
+        if (!status.ok() && status.code() != core::StatusCode::kUnsupported) {
+            return ResultType::FromStatus(status);
         }
-    });
-    if (!status.ok() && status.code() != core::StatusCode::kUnsupported) {
-        return ResultType::FromStatus(status);
     }
     // The first heartbeat goes out before Create returns, so clients that
-    // already exist see the server at once.
+    // already exist see the server at once. Heartbeats keep their own thread
+    // in both modes: a component busy with other work is alive, not gone.
     impl->Announce();
     impl->heartbeat = std::thread([impl = impl.get()] { impl->Beat(); });
-    impl->worker = std::thread([impl = impl.get()] { impl->Run(); });
+    if (impl->options.mode == ServeMode::kOwnThread) {
+        impl->worker = std::thread([impl = impl.get()] { impl->Run(); });
+    }
     return ResultType(std::unique_ptr<Server>(new Server(std::move(impl))));
+}
+
+core::Result<std::size_t> Server::ServePending(std::size_t limit)
+{
+    using ResultType = core::Result<std::size_t>;
+    auto& impl = *impl_;
+    if (impl.options.mode != ServeMode::kCaller) {
+        return ResultType::FromStatus(core::Status::FailedPrecondition(
+            Describe(impl.spec) + ": ServePending needs ServeMode::kCaller; this server serves on its own thread"));
+    }
+    if (impl.serving_thread.load() == std::this_thread::get_id()) {
+        return ResultType::FromStatus(core::Status::FailedPrecondition(
+            Describe(impl.spec) + ": ServePending called from its own handler"));
+    }
+    std::lock_guard<std::mutex> serving(impl.serve_mutex);
+    const auto is_closed = [&impl] {
+        std::lock_guard<std::mutex> lock(impl.mutex);
+        return impl.closed;
+    };
+    if (is_closed()) {
+        return ResultType::FromStatus(core::Status::FailedPrecondition(Describe(impl.spec) + ": server is closed"));
+    }
+    impl.serving_thread.store(std::this_thread::get_id());
+    struct Leave {
+        std::atomic<std::thread::id>& thread;
+        ~Leave() { thread.store(std::thread::id {}); }
+    } leave {impl.serving_thread};
+    // Bound the pass by what is queued now (or by `limit`), so requests
+    // arriving during it wait for the next trigger instead of extending it.
+    std::size_t budget = limit;
+    if (budget == 0) {
+        auto queued = impl.requests->PendingMessageCount();
+        budget = queued.ok() ? queued.value() : impl.spec.queue_depth;
+    }
+    std::size_t served = 0;
+    while (served < budget) {
+        if (is_closed()) {
+            break;  // Close() from a handler, or from another thread
+        }
+        auto message = impl.requests->Read();
+        if (!message.ok()) {
+            break;  // drained
+        }
+        impl.Serve(message.value());
+        ++served;
+    }
+    return ResultType(served);
+}
+
+core::Result<std::size_t> Server::PendingCount() const
+{
+    return impl_->requests->PendingMessageCount();
 }
 
 Server::Server(std::shared_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -435,6 +502,12 @@ void Server::Close() noexcept
     impl_->wake.notify_all();
     if (impl_->worker.joinable()) {
         impl_->worker.join();
+    }
+    // kCaller: wait out a ServePending that is inside the handler, so the
+    // handler is not running when Close returns. Not when Close is called
+    // from that handler: the pass stops after it, having seen `closed`.
+    if (impl_->serving_thread.load() != std::this_thread::get_id()) {
+        std::lock_guard<std::mutex> serving(impl_->serve_mutex);
     }
     impl_->requests->SetDataAvailableCallback({});
 }

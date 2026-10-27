@@ -169,6 +169,8 @@ std::string DescribeProject(const ProjectConfig& project)
                     break;
                 case core::TriggerKind::kManual:
                     break;
+                case core::TriggerKind::kService:
+                    break;
             }
             if (trigger.priority != 0) {
                 text << ", priority " << trigger.priority;

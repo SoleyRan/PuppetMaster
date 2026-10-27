@@ -1,5 +1,7 @@
 #include <puppet_master/scheduler/scheduler.h>
 
+#include <puppet_master/service/service.h>
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -60,6 +62,18 @@ core::Result<transport::EndpointConfig> FindReaderEndpoint(
     return *found;
 }
 
+core::Result<service::ServiceSpec> FindServedService(const runtime::ComponentSpec& spec, const core::TopicName& name)
+{
+    const auto found = std::find_if(spec.servers.begin(), spec.servers.end(), [&name](const auto& service) {
+        return service.name == name;
+    });
+    if (found == spec.servers.end()) {
+        return core::Result<service::ServiceSpec>::FromStatus(core::Status::InvalidArgument(
+            "service trigger names a service the component does not serve: " + name.str()));
+    }
+    return *found;
+}
+
 transport::EndpointConfig MakeTriggerEndpoint(transport::EndpointConfig endpoint)
 {
     endpoint.topic.message_policy.freshness = core::FreshnessPolicy::kLatest;
@@ -97,6 +111,19 @@ core::Status ValidateTrigger(const runtime::ComponentSpec& spec, const core::Tri
         return core::Status::InvalidArgument("task dependency trigger requires at least one task dependency");
     }
 
+    if (trigger.kind == core::TriggerKind::kService) {
+        std::set<core::TopicName> seen;
+        for (const auto& service : trigger.service_dependencies) {
+            if (!seen.insert(service).second) {
+                return core::Status::InvalidArgument("service trigger has duplicate service: " + service.str());
+            }
+            auto found = FindServedService(spec, service);
+            if (!found.ok()) {
+                return found.status();
+            }
+        }
+    }
+
     return core::Status::Ok();
 }
 
@@ -108,6 +135,7 @@ core::Status ValidateComponentSpec(const runtime::ComponentSpec& spec)
     }
 
     std::map<core::TopicName, std::size_t> data_trigger_topics;
+    std::map<core::TopicName, std::size_t> service_triggers;
     for (std::size_t index = 0; index < spec.triggers.size(); ++index) {
         const auto& trigger = spec.triggers[index];
         status = ValidateTrigger(spec, trigger);
@@ -121,6 +149,16 @@ core::Status ValidateComponentSpec(const runtime::ComponentSpec& spec)
                     return core::Status::InvalidArgument(
                         "component " + spec.name.str() + " triggers " + std::to_string(inserted.first->second)
                             + " and " + std::to_string(index) + " share data topic " + topic.str());
+                }
+            }
+        }
+        if (trigger.kind == core::TriggerKind::kService) {
+            for (const auto& service : trigger.service_dependencies) {
+                const auto inserted = service_triggers.emplace(service, index);
+                if (!inserted.second) {
+                    return core::Status::InvalidArgument(
+                        "component " + spec.name.str() + " triggers " + std::to_string(inserted.first->second)
+                            + " and " + std::to_string(index) + " share service " + service.str());
                 }
             }
         }
@@ -172,6 +210,7 @@ struct Scheduler::Impl {
         }
 
         runtime::ComponentSpec spec;
+        // Notification readers of data and service triggers; dropped at Stop.
         std::vector<transport::ReaderPtr> data_trigger_readers;
         std::vector<DataTriggerState> data_triggers;
         std::vector<TaskTriggerState> task_triggers;
@@ -272,6 +311,13 @@ struct Scheduler::Impl {
             }
 
             auto status = InstallDataTriggers(weak_self);
+            if (!status.ok()) {
+                Stop(true);
+                finish_start();
+                return status;
+            }
+
+            status = InstallServiceTriggers(weak_self);
             if (!status.ok()) {
                 Stop(true);
                 finish_start();
@@ -668,6 +714,68 @@ private:
             }
         }
 
+        return core::Status::Ok();
+    }
+
+    // Service triggers: a notification reader on each served service's
+    // request topic queues the component when a request arrives. The
+    // component's own kCaller Server reads the requests; this reader only
+    // notices them, with a latest-only queue so it holds no backlog. Several
+    // requests before the component runs coalesce into one execution, which
+    // ServePending drains.
+    core::Status InstallServiceTriggers(std::weak_ptr<Impl> weak_self)
+    {
+        std::vector<core::ComponentName> names;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            for (const auto& entry : components) {
+                names.push_back(core::ComponentName::Unsafe(entry.first));
+            }
+        }
+
+        for (const auto& name : names) {
+            auto spec = runtime.FindComponent(name);
+            if (!spec.ok()) {
+                return spec.status();
+            }
+
+            for (const auto& trigger : spec.value().triggers) {
+                if (trigger.kind != core::TriggerKind::kService) {
+                    continue;
+                }
+                const auto priority = trigger.priority;
+                const auto deadline = EffectiveDeadline(trigger);
+                for (const auto& service_name : trigger.service_dependencies) {
+                    auto served = FindServedService(spec.value(), service_name);
+                    if (!served.ok()) {
+                        return served.status();
+                    }
+                    auto endpoints = service::EndpointsFor(served.value());
+                    if (!endpoints.ok()) {
+                        return endpoints.status();
+                    }
+                    auto reader = runtime.CreateReader(MakeTriggerEndpoint(endpoints.value().request));
+                    if (!reader.ok()) {
+                        return reader.status();
+                    }
+                    auto status = reader.value()->SetDataAvailableCallback([weak_self, name, deadline, priority]() {
+                        if (auto self = weak_self.lock()) {
+                            std::lock_guard<std::mutex> lock(self->mutex);
+                            if (self->running && !self->stopping) {
+                                self->QueueEvent(name, deadline, priority);
+                            }
+                        }
+                    });
+                    if (!status.ok()) {
+                        return core::Status::Error(status.code(), "service trigger of component " + name.str()
+                                                                       + " on " + service_name.str() + ": "
+                                                                       + status.message());
+                    }
+                    std::lock_guard<std::mutex> lock(mutex);
+                    components.at(name.str()).data_trigger_readers.push_back(reader.value());
+                }
+            }
+        }
         return core::Status::Ok();
     }
 

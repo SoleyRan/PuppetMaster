@@ -202,6 +202,7 @@ bool SameTriggers(const std::vector<core::TriggerSpec>& lhs, const std::vector<c
             || lhs[i].dependency_policy != rhs[i].dependency_policy
             || lhs[i].data_dependencies != rhs[i].data_dependencies
             || lhs[i].task_dependencies != rhs[i].task_dependencies
+            || lhs[i].service_dependencies != rhs[i].service_dependencies
             || lhs[i].priority != rhs[i].priority || lhs[i].deadline != rhs[i].deadline) {
             return false;
         }

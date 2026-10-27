@@ -122,12 +122,75 @@ instance does not affect a newer one.
   time has run out when it dequeues them, without running the handler.
   Transit time is not counted, so the server errs toward handling a request
   its client may just have given up on.
-- A server runs its handler on one thread, in arrival order. Only one
+- A server runs its handler on one thread at a time, in arrival order: its
+  own thread by default, or the scheduler's, see
+  [Scheduled Servers](#scheduled-servers). Only one
   server per service is supported. The transport does not prevent a second
   one, which would handle every request too; `validate --system` reports it
   before deployment (see [Configuration](#configuration)).
 - Clients may call from several threads at once; each call waits for its
   own reply.
+
+## Scheduled Servers
+
+By default a server runs its handler on a thread of its own, outside the
+scheduler: a slow handler competes with every component for the CPU, and its
+work has no priority or deadline. A server created with `ServeMode::kCaller`
+has no handler thread. The component that owns it calls `ServePending()` in
+`Execute()`, and a [service trigger](scheduler.md#service-triggers) runs
+`Execute()` when a request arrives:
+
+```cpp
+class MapServer final : public runtime::Component {
+public:
+    runtime::ComponentSpec Describe() const override
+    {
+        runtime::ComponentSpec spec {core::ComponentName::Unsafe("map"), "answers map queries"};
+        spec.servers = {query_spec_};
+        core::TriggerSpec trigger;
+        trigger.kind = core::TriggerKind::kService;
+        trigger.service_dependencies = {query_spec_.name};
+        trigger.priority = 10;
+        spec.triggers = {trigger};
+        return spec;
+    }
+
+    core::Status Initialize(runtime::ComponentContext& context) override
+    {
+        service::ServerOptions options;
+        options.mode = service::ServeMode::kCaller;
+        auto server = service::Server::Create(context.runtime(), query_spec_, Handle, options);
+        if (!server.ok()) {
+            return server.status();
+        }
+        server_ = std::move(server).value();
+        return core::Status::Ok();
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        auto served = server_->ServePending();
+        return served.ok() ? core::Status::Ok() : served.status();
+    }
+
+private:
+    service::ServiceSpec query_spec_ {core::TopicName::Unsafe("/map/query")};
+    std::unique_ptr<service::Server> server_;
+};
+```
+
+- `ServePending(limit)` handles what is queued when it is called, at most
+  `limit` requests (0: all queued), in arrival order. Requests arriving during
+  the pass wait for the next execution, so a burst cannot hold the component.
+  Requests that pile up before the component runs coalesce into one
+  execution.
+- Heartbeats keep their own thread in both modes. A component busy with other
+  work is alive; its clients wait for their reply, not report `Unavailable`.
+- A request's deadline still applies: one that waited in the queue past its
+  client's timeout is dropped when its turn comes, unhandled.
+- `ServePending` returns `FailedPrecondition` on a `kOwnThread` server, after
+  `Close()`, and when called from its own handler. `Close()` waits for a
+  handler that is running, except when called from that handler.
 
 ## Typed Services
 

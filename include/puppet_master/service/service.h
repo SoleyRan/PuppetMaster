@@ -64,13 +64,37 @@ struct Request {
 // message; an exception is returned as Internal.
 using Handler = std::function<core::Result<transport::ByteBuffer>(const Request&)>;
 
+// Who runs the handler.
+enum class ServeMode : std::uint8_t {
+    // A thread of the server's own, as soon as a request arrives.
+    kOwnThread = 0,
+    // Whoever calls ServePending(), typically a component's Execute() run by
+    // the scheduler on a service trigger, so requests are handled under the
+    // component's priority and deadline, serially with its other work.
+    kCaller,
+};
+
+struct ServerOptions {
+    ServeMode mode {ServeMode::kOwnThread};
+};
+
 class PUPPET_MASTER_API Server final {
 public:
-    // Opens the service's topics on `runtime` and starts serving on a
-    // dedicated thread, in arrival order. The handler is never called after
-    // Close() returns.
+    // Opens the service's topics on `runtime` and starts announcing. With
+    // kOwnThread it also serves on a dedicated thread, in arrival order. The
+    // handler is never called after Close() returns.
     static core::Result<std::unique_ptr<Server>> Create(
-        runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler);
+        runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler, ServerOptions options = {});
+
+    // kCaller only: handles queued requests in arrival order on the calling
+    // thread and returns how many, at most `limit` (0 means all queued).
+    // Requests that arrive meanwhile are left for the next call, so a burst
+    // cannot keep one call running forever. FailedPrecondition in kOwnThread
+    // mode or after Close().
+    core::Result<std::size_t> ServePending(std::size_t limit = 0);
+
+    // Requests waiting to be handled, where the transport can tell.
+    core::Result<std::size_t> PendingCount() const;
 
     ~Server();
     Server(const Server&) = delete;
