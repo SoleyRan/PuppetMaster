@@ -5,6 +5,29 @@ each minor release may break the API and the ABI: the shared libraries carry
 the minor version in their soname (`libpuppet_master.so.0.2`), and
 `find_package(PuppetMaster 0.2)` accepts only 0.2.x.
 
+## Unreleased
+
+### Added
+
+- **Scheduled servers.** `TriggerKind::kService` runs a component when a
+  request arrives for a service it serves, under its priority, deadline,
+  and serial execution like any other trigger. The component's server uses
+  `ServeMode::kCaller` and is drained with `Server::ServePending()` in
+  `Execute()`. In configuration: `{"kind": "service", "services": [...]}`;
+  `CreateServer` picks the mode from the component's triggers. See
+  [Scheduled Servers](docs/services.md#scheduled-servers).
+- **Asynchronous calls.** `Client::CallAsync` and `TypedClient::CallAsync`
+  send without blocking and report the result to a callback, so a component
+  can call a service from `Execute()` without holding a scheduler worker.
+  See [Asynchronous Calls](docs/services.md#asynchronous-calls).
+
+### Changed
+
+- Breaking API: `core::TriggerSpec` has a new last field,
+  `service_dependencies`, and `TriggerKind` a new value, `kService`; code
+  that switches over `TriggerKind` needs a case for it.
+- `Server::Create` and `MakeTypedServer` take an optional `ServerOptions`.
+
 ## 0.2.0
 
 ### Added

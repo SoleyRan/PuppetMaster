@@ -1,10 +1,13 @@
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -320,6 +323,134 @@ void CloseCancelsPendingCalls()
     server.value()->Close();
 }
 
+// Collects CallAsync results across threads.
+struct AsyncResults {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::vector<core::Result<transport::ByteBuffer>> results;
+
+    service::ReplyCallback Callback()
+    {
+        return [this](core::Result<transport::ByteBuffer> result) {
+            std::lock_guard<std::mutex> lock(mutex);
+            results.push_back(std::move(result));
+            ready.notify_all();
+        };
+    }
+
+    bool WaitFor(std::size_t count, std::chrono::milliseconds timeout = 3s)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return ready.wait_for(lock, timeout, [&] { return results.size() >= count; });
+    }
+};
+
+void AsyncCallsAndOutcomes()
+{
+    auto runtime = MakeRuntime();
+    // Queues deep enough for every call this test has in flight at once; a
+    // queue that overflows drops the oldest requests (see Semantics).
+    auto spec = Spec("/svc/async");
+    spec.queue_depth = 64;
+    auto server = service::Server::Create(*runtime, spec, Reverse);
+    auto client = service::Client::Create(*runtime, spec);
+    assert(server.ok() && client.ok() && client.value()->WaitForService(1s).ok());
+
+    // Many calls in flight at once, each completed exactly once, on the
+    // dispatcher thread, without the caller blocking.
+    AsyncResults replies;
+    const auto caller = std::this_thread::get_id();
+    std::atomic<int> on_caller {0};
+    for (int index = 0; index < 20; ++index) {
+        assert(client.value()->CallAsync(Bytes("ab"), 2s, [&](core::Result<transport::ByteBuffer> result) {
+            if (std::this_thread::get_id() == caller) {
+                ++on_caller;
+            }
+            replies.Callback()(std::move(result));
+        }).ok());
+    }
+    assert(replies.WaitFor(20));
+    assert(on_caller.load() == 0);
+    for (const auto& result : replies.results) {
+        if (!result.ok()) {
+            std::cerr << "async call failed: " << result.status().ToString() << '\n';
+        }
+        assert(result.ok() && Text(result.value()) == "ba");
+    }
+    assert(client.value()->PendingCalls() == 0);
+
+    // Handler errors and timeouts reach the callback like Call's results.
+    AsyncResults errors;
+    assert(client.value()->CallAsync(Bytes("fail"), 1s, errors.Callback()).ok());
+    assert(client.value()->CallAsync(Bytes("slow:300"), 50ms, errors.Callback()).ok());
+    assert(errors.WaitFor(2));
+    std::vector<core::StatusCode> codes;
+    for (const auto& result : errors.results) {
+        codes.push_back(result.status().code());
+    }
+    assert(std::count(codes.begin(), codes.end(), core::StatusCode::kNotFound) == 1);
+    assert(std::count(codes.begin(), codes.end(), core::StatusCode::kDeadlineExceeded) == 1);
+
+    // Bad arguments are returned, and the callback is not called.
+    assert(client.value()->CallAsync(Bytes("x"), 0ms, errors.Callback()).code() == core::StatusCode::kInvalidArgument);
+    assert(client.value()->CallAsync(Bytes("x"), 1s, {}).code() == core::StatusCode::kInvalidArgument);
+
+    // The reply callback can chain the next call; it is sent from the
+    // dispatcher without waiting there.
+    AsyncResults chained;
+    assert(client.value()->CallAsync(Bytes("one"), 1s, [&](core::Result<transport::ByteBuffer> first) {
+        assert(first.ok());
+        client.value()->CallAsync(Bytes("two"), 1s, chained.Callback());
+    }).ok());
+    assert(chained.WaitFor(1));
+    assert(chained.results.front().ok() && Text(chained.results.front().value()) == "owt");
+
+    // Call from a reply callback would wait on the dispatcher it blocks.
+    AsyncResults nested;
+    assert(client.value()->CallAsync(Bytes("x"), 1s, [&](core::Result<transport::ByteBuffer>) {
+        nested.Callback()(client.value()->Call(Bytes("y"), 1s));
+    }).ok());
+    assert(nested.WaitFor(1));
+    assert(nested.results.front().status().code() == core::StatusCode::kFailedPrecondition);
+
+    // Close cancels what is pending, on the closing thread.
+    AsyncResults cancelled;
+    assert(client.value()->CallAsync(Bytes("slow:500"), 5s, cancelled.Callback()).ok());
+    assert(client.value()->PendingCalls() == 1);
+    client.value()->Close();
+    assert(cancelled.results.size() == 1);
+    assert(cancelled.results.front().status().code() == core::StatusCode::kCancelled);
+    // After close, calls fail on the calling thread before CallAsync returns.
+    AsyncResults late;
+    assert(client.value()->CallAsync(Bytes("x"), 1s, late.Callback()).ok());
+    assert(late.results.size() == 1 && late.results.front().status().code() == core::StatusCode::kCancelled);
+}
+
+// A server that stops during async calls fails them with Unavailable.
+void AsyncServerStops()
+{
+    auto runtime = MakeRuntime();
+    auto server = service::Server::Create(*runtime, Spec("/svc/async-stop"), Reverse);
+    auto client = service::Client::Create(*runtime, Spec("/svc/async-stop"));
+    assert(server.ok() && client.ok() && client.value()->WaitForService(1s).ok());
+    AsyncResults results;
+    assert(client.value()->CallAsync(Bytes("slow:400"), 5s, results.Callback()).ok());
+    assert(client.value()->CallAsync(Bytes("slow:400"), 5s, results.Callback()).ok());
+    std::this_thread::sleep_for(30ms);
+    const auto stopped_at = std::chrono::steady_clock::now();
+    server.value()->Close();
+    assert(results.WaitFor(2));
+    assert(std::chrono::steady_clock::now() - stopped_at < 2s);
+    for (const auto& result : results.results) {
+        assert(result.status().code() == core::StatusCode::kUnavailable);
+    }
+    // No server at all: the call fails, after one liveness window at most.
+    AsyncResults none;
+    assert(client.value()->CallAsync(Bytes("x"), 2s, none.Callback()).ok());
+    assert(none.WaitFor(1));
+    assert(none.results.front().status().code() == core::StatusCode::kUnavailable);
+}
+
 void TypedServicesAndVersions()
 {
     auto runtime = MakeRuntime();
@@ -399,6 +530,20 @@ void ServicesFromComponentSpec()
     broken.queue_depth = 0;
     runtime::ComponentSpec invalid {core::ComponentName::Unsafe("invalid"), "", {}, {}, {}, {}, {broken}, {}};
     assert(invalid.Validate().code() == core::StatusCode::kInvalidArgument);
+
+    // A service trigger in the spec makes CreateServer's server kCaller:
+    // ServePending works on it, and refuses on the untriggered one.
+    auto scheduled = Spec("/svc/spec-scheduled");
+    core::TriggerSpec on_request;
+    on_request.kind = core::TriggerKind::kService;
+    on_request.service_dependencies = {scheduled.name};
+    runtime::ComponentSpec triggered {
+        core::ComponentName::Unsafe("triggered"), "", {}, {}, {on_request}, {}, {scheduled}, {}};
+    runtime::ComponentContext triggered_context(triggered.name, *runtime);
+    auto caller_mode = service::CreateServer(triggered_context, triggered, "/svc/spec-scheduled", Reverse);
+    assert(caller_mode.ok());
+    assert(caller_mode.value()->ServePending().ok());
+    assert(text_server.value()->ServePending().status().code() == core::StatusCode::kFailedPrecondition);
 }
 
 }  // namespace
@@ -412,6 +557,8 @@ int main()
     ServerAbsenceAndRestart();
     ExpiredRequestsAreSkipped();
     CloseCancelsPendingCalls();
+    AsyncCallsAndOutcomes();
+    AsyncServerStops();
     TypedServicesAndVersions();
     ServicesFromComponentSpec();
     std::cout << "service tests passed\n";

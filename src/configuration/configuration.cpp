@@ -202,6 +202,7 @@ bool SameTriggers(const std::vector<core::TriggerSpec>& lhs, const std::vector<c
             || lhs[i].dependency_policy != rhs[i].dependency_policy
             || lhs[i].data_dependencies != rhs[i].data_dependencies
             || lhs[i].task_dependencies != rhs[i].task_dependencies
+            || lhs[i].service_dependencies != rhs[i].service_dependencies
             || lhs[i].priority != rhs[i].priority || lhs[i].deadline != rhs[i].deadline) {
             return false;
         }
@@ -351,6 +352,16 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
                 "task dependency trigger requires at least one task dependency"));
     }
 
+    if (kind != core::TriggerKind::kService && !services.empty()) {
+        return core::Result<core::TriggerSpec>::FromStatus(
+            core::Status::InvalidArgument("trigger services can only be used with service triggers"));
+    }
+
+    if (kind == core::TriggerKind::kService && services.empty()) {
+        return core::Result<core::TriggerSpec>::FromStatus(
+            core::Status::InvalidArgument("service trigger requires at least one service id"));
+    }
+
     core::TriggerSpec trigger;
     trigger.kind = kind;
     trigger.period = period;
@@ -391,6 +402,23 @@ core::Result<core::TriggerSpec> TriggerConfig::ToTriggerSpec(const ProjectConfig
         trigger.task_dependencies.push_back(task_name.value());
     }
 
+    std::set<std::string> seen_services;
+    for (const auto& service_id : services) {
+        if (!seen_services.insert(service_id).second) {
+            return core::Result<core::TriggerSpec>::FromStatus(
+                core::Status::InvalidArgument("service trigger lists service " + service_id + " twice"));
+        }
+        auto service = project.FindService(service_id);
+        if (!service.ok()) {
+            return core::Result<core::TriggerSpec>::FromStatus(service.status());
+        }
+        auto service_name = core::TopicName::Create(service.value().name);
+        if (!service_name.ok()) {
+            return core::Result<core::TriggerSpec>::FromStatus(service_name.status());
+        }
+        trigger.service_dependencies.push_back(service_name.value());
+    }
+
     auto status = trigger.Validate();
     if (!status.ok()) {
         return core::Result<core::TriggerSpec>::FromStatus(std::move(status));
@@ -412,15 +440,17 @@ core::Status ComponentConfig::Validate(const ProjectConfig& project) const
     }
 
     for (const auto& trigger : triggers) {
-        if (trigger.kind != core::TriggerKind::kData) {
-            continue;
-        }
-
         for (const auto& topic_id : trigger.data_topics) {
             const auto found = std::find(readers.begin(), readers.end(), topic_id);
             if (found == readers.end()) {
                 return core::Status::InvalidArgument(
                     "component data trigger topic must also be declared as a reader: " + topic_id);
+            }
+        }
+        for (const auto& service_id : trigger.services) {
+            if (std::find(servers.begin(), servers.end(), service_id) == servers.end()) {
+                return core::Status::InvalidArgument(
+                    "component " + name + " service trigger service must also be declared in servers: " + service_id);
             }
         }
     }
@@ -915,6 +945,7 @@ core::Result<core::TriggerKind> ParseTriggerKind(std::string_view value)
             {"data", core::TriggerKind::kData},
             {"task", core::TriggerKind::kTaskDependency},
             {"task_dependency", core::TriggerKind::kTaskDependency},
+            {"service", core::TriggerKind::kService},
         },
         "trigger kind");
 }

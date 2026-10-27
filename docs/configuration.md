@@ -65,6 +65,7 @@ Configuration validation is strict by design:
 - topic message type and encoding are required
 - referenced topics must exist
 - a data trigger topic must also be declared as a component reader
+- a service trigger's `services` must also be in the component's `servers`
 - periodic triggers must have a positive period
 - trigger-specific fields cannot be attached to the wrong trigger kind
 

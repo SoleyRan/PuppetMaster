@@ -122,12 +122,112 @@ instance does not affect a newer one.
   time has run out when it dequeues them, without running the handler.
   Transit time is not counted, so the server errs toward handling a request
   its client may just have given up on.
-- A server runs its handler on one thread, in arrival order. Only one
+- A server runs its handler on one thread at a time, in arrival order: its
+  own thread by default, or the scheduler's, see
+  [Scheduled Servers](#scheduled-servers). Only one
   server per service is supported. The transport does not prevent a second
   one, which would handle every request too; `validate --system` reports it
   before deployment (see [Configuration](#configuration)).
 - Clients may call from several threads at once; each call waits for its
   own reply.
+
+## Scheduled Servers
+
+By default a server runs its handler on a thread of its own, outside the
+scheduler: a slow handler competes with every component for the CPU, and its
+work has no priority or deadline. A server created with `ServeMode::kCaller`
+has no handler thread. The component that owns it calls `ServePending()` in
+`Execute()`, and a [service trigger](scheduler.md#service-triggers) runs
+`Execute()` when a request arrives:
+
+```cpp
+class MapServer final : public runtime::Component {
+public:
+    runtime::ComponentSpec Describe() const override
+    {
+        runtime::ComponentSpec spec {core::ComponentName::Unsafe("map"), "answers map queries"};
+        spec.servers = {query_spec_};
+        core::TriggerSpec trigger;
+        trigger.kind = core::TriggerKind::kService;
+        trigger.service_dependencies = {query_spec_.name};
+        trigger.priority = 10;
+        spec.triggers = {trigger};
+        return spec;
+    }
+
+    core::Status Initialize(runtime::ComponentContext& context) override
+    {
+        service::ServerOptions options;
+        options.mode = service::ServeMode::kCaller;
+        auto server = service::Server::Create(context.runtime(), query_spec_, Handle, options);
+        if (!server.ok()) {
+            return server.status();
+        }
+        server_ = std::move(server).value();
+        return core::Status::Ok();
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        auto served = server_->ServePending();
+        return served.ok() ? core::Status::Ok() : served.status();
+    }
+
+private:
+    service::ServiceSpec query_spec_ {core::TopicName::Unsafe("/map/query")};
+    std::unique_ptr<service::Server> server_;
+};
+```
+
+- `ServePending(limit)` handles what is queued when it is called, at most
+  `limit` requests (0: all queued), in arrival order. Requests arriving during
+  the pass wait for the next execution, so a burst cannot hold the component.
+  Requests that pile up before the component runs coalesce into one
+  execution.
+- Heartbeats keep their own thread in both modes. A component busy with other
+  work is alive; its clients wait for their reply, not report `Unavailable`.
+- A request's deadline still applies: one that waited in the queue past its
+  client's timeout is dropped when its turn comes, unhandled.
+- `ServePending` returns `FailedPrecondition` on a `kOwnThread` server, after
+  `Close()`, and when called from its own handler. `Close()` waits for a
+  handler that is running, except when called from that handler.
+
+## Asynchronous Calls
+
+`Call` blocks its thread until the reply. From a component's `Execute()` that
+holds a scheduler worker for the whole call. With one worker, calling a
+[scheduled server](#scheduled-servers) on the same scheduler cannot work: the
+server needs the worker the caller is holding, and the call times out.
+`CallAsync` sends the request and returns at once:
+
+```cpp
+core::Status Execute(runtime::ComponentContext&) override
+{
+    if (auto reply = TakeReply()) {
+        return Use(*reply);  // a later execution consumes the reply
+    }
+    return client_->CallAsync(request, 500ms, [this](core::Result<transport::ByteBuffer> reply) {
+        StoreReply(std::move(reply));
+        scheduler_->Trigger(name_);  // run Execute() again to use it
+    });
+}
+```
+
+- `done` is called exactly once, with what `Call` would have returned: on the
+  client's dispatcher thread for a reply, a timeout, or a server that stopped;
+  on the calling thread before `CallAsync` returns if the call fails before it
+  is sent (no live server, client closed); on the closing thread with
+  `Cancelled` for calls still pending at `Close()`.
+- `done` runs on the dispatcher that delivers every reply of this client, so
+  it should only hand the result on. It may chain another `CallAsync`; it may
+  not use `Call`, which returns `FailedPrecondition` there.
+- Like `Call`, `CallAsync` may first wait up to one liveness window for a
+  server it has not seen yet, except from `done`.
+- `PendingCalls()` counts calls sent and not completed. Keep it within the
+  service's `queue_depth`: requests beyond it are dropped on overflow and
+  time out.
+- `TypedClient::CallAsync` decodes the reply; an undecodable reply reaches
+  `done` as the codec's error.
 
 ## Typed Services
 
@@ -175,6 +275,19 @@ components list the ones they provide (`servers`) and call (`clients`):
 
 `request_version` and `reply_version` default to 0, `encoding` to
 `application/octet-stream`, `queue_depth` to 16, and the heartbeat to 100 ms.
+
+A [service trigger](scheduler.md#service-triggers) names service ids from the
+component's `servers`:
+
+```json
+{"name": "map", "type": "map_server", "servers": ["query"],
+ "triggers": [{"kind": "service", "services": ["query"], "priority": 10, "deadline_ns": 5000000}]}
+```
+
+`CreateServer` and `CreateTypedServer` (below) then create that server with
+`ServeMode::kCaller`, and the component calls `ServePending()` in `Execute()`.
+Without the trigger they create it with its own thread, and `ServePending()`
+returns `FailedPrecondition`.
 
 Interface files may declare `services` next to `topics`, so the team that
 serves a service publishes its contract once and every caller imports it.

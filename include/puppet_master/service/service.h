@@ -64,13 +64,37 @@ struct Request {
 // message; an exception is returned as Internal.
 using Handler = std::function<core::Result<transport::ByteBuffer>(const Request&)>;
 
+// Who runs the handler.
+enum class ServeMode : std::uint8_t {
+    // A thread of the server's own, as soon as a request arrives.
+    kOwnThread = 0,
+    // Whoever calls ServePending(), typically a component's Execute() run by
+    // the scheduler on a service trigger, so requests are handled under the
+    // component's priority and deadline, serially with its other work.
+    kCaller,
+};
+
+struct ServerOptions {
+    ServeMode mode {ServeMode::kOwnThread};
+};
+
 class PUPPET_MASTER_API Server final {
 public:
-    // Opens the service's topics on `runtime` and starts serving on a
-    // dedicated thread, in arrival order. The handler is never called after
-    // Close() returns.
+    // Opens the service's topics on `runtime` and starts announcing. With
+    // kOwnThread it also serves on a dedicated thread, in arrival order. The
+    // handler is never called after Close() returns.
     static core::Result<std::unique_ptr<Server>> Create(
-        runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler);
+        runtime::RuntimeContext& runtime, ServiceSpec spec, Handler handler, ServerOptions options = {});
+
+    // kCaller only: handles queued requests in arrival order on the calling
+    // thread and returns how many, at most `limit` (0 means all queued).
+    // Requests that arrive meanwhile are left for the next call, so a burst
+    // cannot keep one call running forever. FailedPrecondition in kOwnThread
+    // mode or after Close().
+    core::Result<std::size_t> ServePending(std::size_t limit = 0);
+
+    // Requests waiting to be handled, where the transport can tell.
+    core::Result<std::size_t> PendingCount() const;
 
     ~Server();
     Server(const Server&) = delete;
@@ -94,6 +118,8 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
+using ReplyCallback = std::function<void(core::Result<transport::ByteBuffer>)>;
+
 struct ServerInfo {
     std::uint64_t instance_id {0};
     // Age of the newest heartbeat when it was read.
@@ -114,8 +140,30 @@ public:
     //   DeadlineExceeded  the server is alive but did not reply in time
     //   Cancelled         the client was closed during the call
     //   the handler's own error, with its message
-    // Safe to call from several threads at once.
+    // Safe to call from several threads at once. Blocks the calling thread:
+    // from a component's Execute(), prefer CallAsync, so a scheduler worker
+    // is not held while the server, perhaps on the same scheduler, works.
     core::Result<transport::ByteBuffer> Call(transport::ByteView request, core::Nanoseconds timeout);
+
+    // Sends `request` without waiting for the reply. `done` is called
+    // exactly once with what Call would have returned:
+    //   - on the client's dispatcher thread, for a reply, a timeout, or a
+    //     server that stopped during the call;
+    //   - on the calling thread, before CallAsync returns, if the call fails
+    //     before it is sent (no live server, client closed), so do not hold a
+    //     lock `done` takes while calling CallAsync;
+    //   - on the thread calling Close(), with Cancelled, for calls still
+    //     pending then.
+    // Like Call, it may first wait up to one liveness window for a server it
+    // has not seen yet, unless called from `done` itself. `done` should not
+    // block: it delays every other reply of this client. Hand the result on,
+    // for example to the component that consumes it (Scheduler::Trigger).
+    // Returns InvalidArgument for a bad timeout or empty callback, without
+    // calling `done`; otherwise Ok.
+    core::Status CallAsync(transport::ByteView request, core::Nanoseconds timeout, ReplyCallback done);
+
+    // Calls sent and not yet completed.
+    std::size_t PendingCalls() const;
 
     // Waits until a live server is seen, up to `timeout`.
     core::Result<ServerInfo> WaitForService(core::Nanoseconds timeout);

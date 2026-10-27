@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -82,6 +83,29 @@ public:
         return transport::Codec<Reply>::Decode(transport::ByteView(reply.value()));
     }
 
+    // Client::CallAsync with the reply decoded; an undecodable reply reaches
+    // `done` as the codec's error. An encoding failure is returned, without
+    // calling `done`.
+    core::Status CallAsync(const Request& request, core::Nanoseconds timeout,
+                           std::function<void(core::Result<Reply>)> done)
+    {
+        if (!done) {
+            return core::Status::InvalidArgument("service call callback must not be empty");
+        }
+        auto encoded = detail::EncodeMessage(request);
+        if (!encoded.ok()) {
+            return encoded.status();
+        }
+        return client_->CallAsync(transport::ByteView(encoded.value()), timeout,
+                                  [done = std::move(done)](core::Result<transport::ByteBuffer> reply) {
+                                      if (!reply.ok()) {
+                                          done(core::Result<Reply>::FromStatus(reply.status()));
+                                          return;
+                                      }
+                                      done(transport::Codec<Reply>::Decode(transport::ByteView(reply.value())));
+                                  });
+    }
+
     Client& raw() noexcept { return *client_; }
 
 private:
@@ -95,7 +119,8 @@ using TypedHandler = std::function<core::Result<Reply>(const Request&)>;
 // passed to the handler.
 template <typename Request, typename Reply>
 core::Result<std::unique_ptr<Server>> MakeTypedServer(
-    runtime::RuntimeContext& runtime, ServiceSpec spec, TypedHandler<Request, Reply> handler)
+    runtime::RuntimeContext& runtime, ServiceSpec spec, TypedHandler<Request, Reply> handler,
+    ServerOptions options = {})
 {
     if (!handler) {
         return core::Result<std::unique_ptr<Server>>::FromStatus(
@@ -111,7 +136,7 @@ core::Result<std::unique_ptr<Server>> MakeTypedServer(
             return core::Result<transport::ByteBuffer>::FromStatus(reply.status());
         }
         return detail::EncodeMessage(reply.value());
-    });
+    }, options);
 }
 
 template <typename Request, typename Reply>

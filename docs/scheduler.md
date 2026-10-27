@@ -13,6 +13,7 @@ This milestone adds:
 - periodic trigger dispatch
 - data trigger dispatch through reader callbacks
 - task dependency dispatch after successful upstream execution
+- service trigger dispatch when a request arrives for a served service
 - a configurable worker pool (one worker by default)
 - per-component serial execution with cross-component parallelism
 - trigger coalescing with a per-component pending-event bound
@@ -164,6 +165,28 @@ chains. `Stop()` and the next `Start()` discard partial readiness.
 `Start()` rejects unresolved dependencies, duplicate names within a dependency
 list, self-dependencies, and cycles in the registered task graph. Register all
 upstream components before starting the scheduler.
+
+## Service Triggers
+
+A service trigger runs a component when a request arrives for a service it
+serves, so requests are handled under the component's priority and deadline,
+serially with its other triggers, instead of on a thread of the server's own:
+
+```cpp
+core::TriggerSpec trigger;
+trigger.kind = core::TriggerKind::kService;
+trigger.service_dependencies = {core::TopicName::Unsafe("/map/query")};
+trigger.priority = 10;
+```
+
+Each named service must be in the component's `ComponentSpec::servers`; the
+scheduler rejects the component otherwise. As for data triggers, the scheduler
+watches the service's request topic with its own latest-only reader, and the
+component reads the requests itself: it creates its `service::Server` with
+`ServeMode::kCaller` and calls `ServePending()` in `Execute()`. Requests that
+arrive while the component is queued or running coalesce into the next
+execution, which drains them; see
+[Scheduled Servers](services.md#scheduled-servers).
 
 ## Deadline Observation and Limitations
 

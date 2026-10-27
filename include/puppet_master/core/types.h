@@ -43,6 +43,9 @@ enum class TriggerKind : std::uint8_t {
     kData,
     kTaskDependency,
     kManual,
+    // A request arrived for a service the component serves; see
+    // docs/services.md#scheduled-servers.
+    kService,
 };
 
 enum class DependencyPolicy : std::uint8_t {
@@ -96,6 +99,8 @@ inline const char* ToString(TriggerKind kind) noexcept
             return "task_dependency";
         case TriggerKind::kManual:
             return "manual";
+        case TriggerKind::kService:
+            return "service";
     }
     return "unknown";
 }
@@ -237,11 +242,20 @@ struct TriggerSpec {
     std::vector<TaskName> task_dependencies;
     std::int32_t priority {0};
     Nanoseconds deadline {0};
+    // kService: wire names of services in the component's `servers`. Last,
+    // so existing positional initializers keep their meaning.
+    std::vector<TopicName> service_dependencies;
 
     Status Validate() const
     {
         if (kind == TriggerKind::kPeriodic && period <= Nanoseconds::zero()) {
             return Status::InvalidArgument("periodic trigger period must be greater than zero");
+        }
+        if (kind == TriggerKind::kService && service_dependencies.empty()) {
+            return Status::InvalidArgument("service trigger requires at least one service");
+        }
+        if (kind != TriggerKind::kService && !service_dependencies.empty()) {
+            return Status::InvalidArgument("trigger services can only be used with service triggers");
         }
         if (kind != TriggerKind::kData && kind != TriggerKind::kTaskDependency
             && dependency_policy != DependencyPolicy::kAll) {

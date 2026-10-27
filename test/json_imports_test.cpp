@@ -7,21 +7,29 @@
 //     <root>/nodes/*.json                             (one per process)
 //     <root>/deploy.json                              (system integrator)
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <puppet_master/configuration/application.h>
 #include <puppet_master/configuration/json_loader.h>
+#include <puppet_master/runtime/component.h>
+#include <puppet_master/scheduler/scheduler.h>
+#include <puppet_master/service/component_services.h>
 #include <puppet_master/transport/shm/shm_transport.h>
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace fs = std::filesystem;
+namespace runtime = puppet_master::runtime;
+namespace service = puppet_master::service;
 namespace shm = puppet_master::transport::shm;
+namespace transport = puppet_master::transport;
 
 namespace {
 
@@ -388,6 +396,38 @@ void ServicesThroughConfiguration()
         "services": [{"id": "s", "name": "/s", "request_type": "r", "reply_type": "p"}]})json");
     assert(Contains(collision.status().message(), "uses topic /s/request, which topic t already uses"));
 
+    // Service triggers name service ids, resolved to wire names.
+    const char* kService = R"json("services": [{"id": "s", "name": "/svc/s", "request_type": "r", "reply_type": "p"}])json";
+    const auto with_trigger = [kService](const std::string& component) {
+        return std::string("{") + kService + R"json(, "components": [)json" + component + "]}";
+    };
+    auto triggered = config::ParseJsonConfig(with_trigger(
+        R"json({"name": "a", "servers": ["s"],
+                "triggers": [{"kind": "service", "services": ["s"], "priority": 5}]})json"));
+    assert(triggered.ok());
+    auto triggered_spec = triggered.value().BuildComponentSpec("a");
+    assert(triggered_spec.ok());
+    const auto& trigger = triggered_spec.value().triggers.front();
+    assert(trigger.kind == core::TriggerKind::kService && trigger.priority == 5);
+    assert(trigger.service_dependencies.size() == 1 && trigger.service_dependencies.front().str() == "/svc/s");
+    assert(Contains(config::DescribeProject(triggered.value()), "trigger: service on requests to s, priority 5"));
+    for (const auto* component : {
+             // not in servers
+             R"json({"name": "a", "clients": ["s"], "triggers": [{"kind": "service", "services": ["s"]}]})json",
+             // unknown id
+             R"json({"name": "a", "servers": ["s"], "triggers": [{"kind": "service", "services": ["x"]}]})json",
+             // none, twice, on another kind
+             R"json({"name": "a", "servers": ["s"], "triggers": [{"kind": "service"}]})json",
+             R"json({"name": "a", "servers": ["s"], "triggers": [{"kind": "service", "services": ["s", "s"]}]})json",
+             R"json({"name": "a", "servers": ["s"], "triggers": [{"kind": "manual", "services": ["s"]}]})json",
+         }) {
+        auto invalid = config::ParseJsonConfig(with_trigger(component));
+        assert(!invalid.ok());
+    }
+    auto not_served = config::ParseJsonConfig(with_trigger(
+        R"json({"name": "a", "clients": ["s"], "triggers": [{"kind": "service", "services": ["s"]}]})json"));
+    assert(Contains(not_served.status().message(), "must also be declared in servers: s"));
+
     // System checks: a client with no server, two servers, and a contract
     // that differs between processes.
     const auto check = [](const std::vector<std::pair<std::string, const config::ProjectConfig*>>& entries) {
@@ -416,6 +456,86 @@ void ServicesThroughConfiguration()
     assert(Contains(mismatch.errors.front(), "map.Query v3"));
 }
 
+// A component configured with a service trigger: CreateServer gives it a
+// kCaller server, and requests are handled in its Execute(), driven by the
+// application's scheduler.
+class EchoServer final : public runtime::Component {
+public:
+    explicit EchoServer(runtime::ComponentSpec spec) : spec_(std::move(spec)) {}
+
+    runtime::ComponentSpec Describe() const override { return spec_; }
+
+    core::Status Initialize(runtime::ComponentContext& context) override
+    {
+        auto server = service::CreateServer(context, spec_, "/svc/echo", [](const service::Request& request) {
+            return core::Result<transport::ByteBuffer>(
+                transport::ByteBuffer(request.payload.begin(), request.payload.end()));
+        });
+        if (!server.ok()) {
+            return server.status();
+        }
+        server_ = std::move(server).value();
+        return core::Status::Ok();
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        auto served = server_->ServePending();  // fails unless the server is kCaller
+        if (!served.ok()) {
+            return served.status();
+        }
+        served_ += served.value();
+        return core::Status::Ok();
+    }
+
+    core::Status Shutdown(runtime::ComponentContext&) override
+    {
+        server_.reset();
+        return core::Status::Ok();
+    }
+
+    static std::atomic<std::size_t> served_;
+
+private:
+    runtime::ComponentSpec spec_;
+    std::unique_ptr<service::Server> server_;
+};
+
+std::atomic<std::size_t> EchoServer::served_ {0};
+
+void ConfiguredServiceTriggerRunsThroughApplication()
+{
+    auto project = config::ParseJsonConfig(R"json({
+        "services": [{"id": "echo", "name": "/svc/echo", "request_type": "t", "reply_type": "t",
+                      "heartbeat_interval_ns": 20000000}],
+        "components": [{"name": "echo", "type": "echo", "servers": ["echo"],
+                        "triggers": [{"kind": "service", "services": ["echo"], "priority": 3}]}]
+    })json");
+    assert(project.ok());
+    const auto service_spec = project.value().FindService("echo").value().ToServiceSpec().value();
+
+    config::ComponentFactoryRegistry factories;
+    assert(factories.Register("echo", [](const runtime::ComponentSpec& spec) {
+        return core::Result<runtime::ComponentPtr>(std::make_shared<EchoServer>(spec));
+    }).ok());
+    auto app = config::Application::Create(std::move(project).value(), factories);
+    assert(app.ok());
+    assert(app.value()->Start().ok());
+
+    auto client = service::Client::Create(app.value()->runtime(), service_spec);
+    assert(client.ok());
+    for (int index = 0; index < 5; ++index) {
+        const std::string text = "ping " + std::to_string(index);
+        auto reply = client.value()->Call(transport::ByteView::From(text.data(), text.size()), std::chrono::seconds(2));
+        assert(reply.ok() && std::string(reply.value().begin(), reply.value().end()) == text);
+    }
+    assert(app.value()->scheduler().WaitIdle(std::chrono::seconds(1)).ok());
+    assert(EchoServer::served_.load() == 5);
+    assert(app.value()->scheduler().last_error().ok());
+    client.value()->Close();
+    assert(app.value()->Stop().ok());
+}
+
 }  // namespace
 
 int main()
@@ -426,5 +546,6 @@ int main()
     DeploymentSetsTransportNotIdentity();
     SystemValidationFindsCrossProcessProblems();
     ServicesThroughConfiguration();
+    ConfiguredServiceTriggerRunsThroughApplication();
     return 0;
 }
