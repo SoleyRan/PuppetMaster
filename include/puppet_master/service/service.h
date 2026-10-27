@@ -118,6 +118,8 @@ private:
     std::shared_ptr<Impl> impl_;
 };
 
+using ReplyCallback = std::function<void(core::Result<transport::ByteBuffer>)>;
+
 struct ServerInfo {
     std::uint64_t instance_id {0};
     // Age of the newest heartbeat when it was read.
@@ -138,8 +140,30 @@ public:
     //   DeadlineExceeded  the server is alive but did not reply in time
     //   Cancelled         the client was closed during the call
     //   the handler's own error, with its message
-    // Safe to call from several threads at once.
+    // Safe to call from several threads at once. Blocks the calling thread:
+    // from a component's Execute(), prefer CallAsync, so a scheduler worker
+    // is not held while the server, perhaps on the same scheduler, works.
     core::Result<transport::ByteBuffer> Call(transport::ByteView request, core::Nanoseconds timeout);
+
+    // Sends `request` without waiting for the reply. `done` is called
+    // exactly once with what Call would have returned:
+    //   - on the client's dispatcher thread, for a reply, a timeout, or a
+    //     server that stopped during the call;
+    //   - on the calling thread, before CallAsync returns, if the call fails
+    //     before it is sent (no live server, client closed), so do not hold a
+    //     lock `done` takes while calling CallAsync;
+    //   - on the thread calling Close(), with Cancelled, for calls still
+    //     pending then.
+    // Like Call, it may first wait up to one liveness window for a server it
+    // has not seen yet, unless called from `done` itself. `done` should not
+    // block: it delays every other reply of this client. Hand the result on,
+    // for example to the component that consumes it (Scheduler::Trigger).
+    // Returns InvalidArgument for a bad timeout or empty callback, without
+    // calling `done`; otherwise Ok.
+    core::Status CallAsync(transport::ByteView request, core::Nanoseconds timeout, ReplyCallback done);
+
+    // Calls sent and not yet completed.
+    std::size_t PendingCalls() const;
 
     // Waits until a live server is seen, up to `timeout`.
     core::Result<ServerInfo> WaitForService(core::Nanoseconds timeout);

@@ -192,6 +192,43 @@ private:
   `Close()`, and when called from its own handler. `Close()` waits for a
   handler that is running, except when called from that handler.
 
+## Asynchronous Calls
+
+`Call` blocks its thread until the reply. From a component's `Execute()` that
+holds a scheduler worker for the whole call. With one worker, calling a
+[scheduled server](#scheduled-servers) on the same scheduler cannot work: the
+server needs the worker the caller is holding, and the call times out.
+`CallAsync` sends the request and returns at once:
+
+```cpp
+core::Status Execute(runtime::ComponentContext&) override
+{
+    if (auto reply = TakeReply()) {
+        return Use(*reply);  // a later execution consumes the reply
+    }
+    return client_->CallAsync(request, 500ms, [this](core::Result<transport::ByteBuffer> reply) {
+        StoreReply(std::move(reply));
+        scheduler_->Trigger(name_);  // run Execute() again to use it
+    });
+}
+```
+
+- `done` is called exactly once, with what `Call` would have returned: on the
+  client's dispatcher thread for a reply, a timeout, or a server that stopped;
+  on the calling thread before `CallAsync` returns if the call fails before it
+  is sent (no live server, client closed); on the closing thread with
+  `Cancelled` for calls still pending at `Close()`.
+- `done` runs on the dispatcher that delivers every reply of this client, so
+  it should only hand the result on. It may chain another `CallAsync`; it may
+  not use `Call`, which returns `FailedPrecondition` there.
+- Like `Call`, `CallAsync` may first wait up to one liveness window for a
+  server it has not seen yet, except from `done`.
+- `PendingCalls()` counts calls sent and not completed. Keep it within the
+  service's `queue_depth`: requests beyond it are dropped on overflow and
+  time out.
+- `TypedClient::CallAsync` decodes the reply; an undecodable reply reaches
+  `done` as the codec's error.
+
 ## Typed Services
 
 ```cpp

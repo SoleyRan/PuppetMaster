@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -80,6 +81,29 @@ public:
             return core::Result<Reply>::FromStatus(reply.status());
         }
         return transport::Codec<Reply>::Decode(transport::ByteView(reply.value()));
+    }
+
+    // Client::CallAsync with the reply decoded; an undecodable reply reaches
+    // `done` as the codec's error. An encoding failure is returned, without
+    // calling `done`.
+    core::Status CallAsync(const Request& request, core::Nanoseconds timeout,
+                           std::function<void(core::Result<Reply>)> done)
+    {
+        if (!done) {
+            return core::Status::InvalidArgument("service call callback must not be empty");
+        }
+        auto encoded = detail::EncodeMessage(request);
+        if (!encoded.ok()) {
+            return encoded.status();
+        }
+        return client_->CallAsync(transport::ByteView(encoded.value()), timeout,
+                                  [done = std::move(done)](core::Result<transport::ByteBuffer> reply) {
+                                      if (!reply.ok()) {
+                                          done(core::Result<Reply>::FromStatus(reply.status()));
+                                          return;
+                                      }
+                                      done(transport::Codec<Reply>::Decode(transport::ByteView(reply.value())));
+                                  });
     }
 
     Client& raw() noexcept { return *client_; }

@@ -1,13 +1,16 @@
 #include <puppet_master/service/service.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <random>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <puppet_master/runtime/context.h>
 
@@ -523,20 +526,24 @@ struct Client::Impl {
     transport::ReaderPtr replies;
     transport::ReaderPtr presence;
 
+    // One outstanding call. Completed exactly once, by the dispatcher (reply,
+    // deadline, server gone) or by Close, which invokes `done` outside the
+    // mutex.
     struct Pending {
-        bool done {false};
-        core::StatusCode code {core::StatusCode::kOk};
-        ByteBuffer payload;
+        core::TimePoint deadline;
+        core::Nanoseconds timeout;
+        ReplyCallback done;
     };
 
     mutable std::mutex mutex;
-    std::condition_variable replied;  // a pending call completed, or close
-    std::condition_variable arrived;  // the dispatcher has data to read
+    std::condition_variable changed;  // presence or pending calls changed, or close
+    std::condition_variable arrived;  // the dispatcher has work
     bool data {false};
     bool closed {false};
     std::uint64_t next_request {0};
-    std::map<std::uint64_t, Pending*> pending;
+    std::map<std::uint64_t, Pending> pending;
     std::thread dispatcher;
+    std::atomic<std::thread::id> dispatcher_id {};
 
     // Newest heartbeat seen. Guarded by mutex. heartbeat_at is when this
     // process received a new one, on its own clock: source timestamps are
@@ -547,6 +554,8 @@ struct Client::Impl {
     bool server_withdrew {false};
     std::uint64_t heartbeat_sequence {0};
     core::TimePoint heartbeat_at {};
+
+    using Completion = std::pair<ReplyCallback, core::Result<ByteBuffer>>;
 
     core::Nanoseconds Liveness() const { return 3 * spec.heartbeat_interval; }
 
@@ -572,7 +581,7 @@ struct Client::Impl {
                     heartbeat_sequence = 0;
                     heartbeat_at = {};
                     server_withdrew = true;
-                    replied.notify_all();  // wake calls waiting on this server
+                    changed.notify_all();
                 }
                 continue;
             }
@@ -580,6 +589,7 @@ struct Client::Impl {
             heartbeat_sequence = sequence;
             heartbeat_at = Now();
             server_withdrew = false;
+            changed.notify_all();
         }
     }
 
@@ -601,13 +611,69 @@ struct Client::Impl {
         return core::Result<ServerInfo>(ServerInfo {server_instance, age});
     }
 
-    // Routes replies to their calls. Replies for other clients or for calls
-    // that already gave up are dropped.
+    // Caller holds mutex. Removes a call and returns its completion, to be
+    // invoked once the mutex is released.
+    Completion TakeLocked(std::map<std::uint64_t, Pending>::iterator call, core::Result<ByteBuffer> result)
+    {
+        Completion completion {std::move(call->second.done), std::move(result)};
+        pending.erase(call);
+        changed.notify_all();
+        return completion;
+    }
+
+    static void Run(std::vector<Completion>& completions)
+    {
+        for (auto& [done, result] : completions) {
+            try {
+                done(std::move(result));
+            } catch (...) {
+                // A throwing callback must not stop the dispatcher.
+            }
+        }
+        completions.clear();
+    }
+
+    // Caller holds mutex. Fails calls whose deadline passed, and every call
+    // once the server is gone: a dead server will not reply.
+    void ExpireLocked(std::vector<Completion>& completions)
+    {
+        if (pending.empty()) {
+            return;
+        }
+        const auto now = Now();
+        const bool server_alive = LiveServerLocked().ok();
+        for (auto call = pending.begin(); call != pending.end();) {
+            auto next = std::next(call);
+            if (!server_alive) {
+                completions.push_back(TakeLocked(call, core::Result<ByteBuffer>::FromStatus(core::Status::Unavailable(
+                    Describe(spec) + ": server stopped responding during the call"))));
+            } else if (now >= call->second.deadline) {
+                const auto ms = std::to_string(call->second.timeout.count() / 1000000);
+                completions.push_back(TakeLocked(call, core::Result<ByteBuffer>::FromStatus(
+                    core::Status::DeadlineExceeded(Describe(spec) + ": no reply within " + ms + " ms"))));
+            }
+            call = next;
+        }
+    }
+
+    // Routes replies to their calls, and expires calls. Replies for other
+    // clients or for calls that already completed are dropped.
     void Dispatch()
     {
+        std::vector<Completion> completions;
         std::unique_lock<std::mutex> lock(mutex);
         while (!closed) {
-            arrived.wait_for(lock, kPollInterval, [this] { return data || closed; });
+            // Wake at the earliest of: data, the next deadline, and one
+            // heartbeat interval, to notice a dead server.
+            auto wake = Now() + std::min<core::Nanoseconds>(kPollInterval, spec.heartbeat_interval);
+            for (const auto& call : pending) {
+                wake = std::min(wake, call.second.deadline);
+            }
+            const auto wait = std::max<core::Nanoseconds>(wake - Now(), core::Nanoseconds::zero());
+            arrived.wait_for(lock, wait, [this] { return data || closed; });
+            if (closed) {
+                break;
+            }
             data = false;
             // Keep heartbeat receive times current between calls.
             PollPresenceLocked();
@@ -620,16 +686,113 @@ struct Client::Impl {
                 }
                 std::lock_guard<std::mutex> guard(mutex);
                 const auto found = pending.find(header.request_id);
-                if (found == pending.end() || found->second->done) {
+                if (found == pending.end()) {
                     continue;
                 }
-                found->second->done = true;
-                found->second->code = header.status;
-                found->second->payload.assign(payload.begin(), payload.end());
-                replied.notify_all();
+                auto result = header.status == core::StatusCode::kOk
+                    ? core::Result<ByteBuffer>(ByteBuffer(payload.begin(), payload.end()))
+                    : core::Result<ByteBuffer>::FromStatus(
+                          core::Status::Error(header.status, std::string(payload.begin(), payload.end())));
+                completions.push_back(TakeLocked(found, std::move(result)));
             }
             lock.lock();
+            ExpireLocked(completions);
+            if (!completions.empty()) {
+                lock.unlock();
+                Run(completions);
+                lock.lock();
+            }
         }
+    }
+
+    // Waits, within `deadline`, until a live server is seen and our request
+    // writer reaches it. Returns Ok, or the status the call fails with.
+    // Caller holds `lock`.
+    core::Status AwaitServerLocked(std::unique_lock<std::mutex>& lock, core::TimePoint deadline, bool may_wait)
+    {
+        // A client that has not seen a heartbeat yet, such as one created a
+        // moment ago, waits up to one liveness window for it before deciding
+        // there is no server. A server that said goodbye fails the call at
+        // once.
+        const auto give_up = std::min(deadline, Now() + Liveness());
+        while (true) {
+            if (closed) {
+                return core::Status::Cancelled(Describe(spec) + ": client is closed");
+            }
+            auto server = LiveServerLocked();  // polls presence first
+            if (server.ok()) {
+                break;
+            }
+            const auto now = Now();
+            if (!may_wait || server_withdrew || now >= give_up) {
+                return server.status();
+            }
+            changed.wait_for(lock, std::min<core::Nanoseconds>(give_up - now, kPollInterval));
+        }
+        // Seeing the heartbeat proves the server's presence writer reached
+        // us, not that our request writer has reached the server's reader.
+        // On backends that discover peers asynchronously, wait for that too,
+        // or the request is dropped and the call looks like a slow server.
+        while (true) {
+            const auto matched = requests->MatchedReaderCount();
+            if (!matched.ok() || matched.value() > 0) {
+                return core::Status::Ok();  // Unsupported: delivery does not depend on matching
+            }
+            if (closed) {
+                return core::Status::Cancelled(Describe(spec) + ": client is closed");
+            }
+            const auto now = Now();
+            if (!may_wait || now >= deadline) {
+                return core::Status::Unavailable(
+                    Describe(spec) + ": the server is alive but its request reader was not matched in time");
+            }
+            changed.wait_for(lock, std::min<core::Nanoseconds>(deadline - now, std::chrono::milliseconds(5)));
+        }
+    }
+
+    // Registers and sends one call. `may_wait`: whether the caller may block
+    // for a server to appear (Call may; CallAsync from the dispatcher's own
+    // callback may not, as nothing would wake it).
+    void Start(transport::ByteView request, core::Nanoseconds timeout, ReplyCallback done, bool may_wait)
+    {
+        const auto deadline = Now() + timeout;
+        std::uint64_t request_id = 0;
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            auto status = AwaitServerLocked(lock, deadline, may_wait);
+            if (!status.ok()) {
+                lock.unlock();
+                done(core::Result<ByteBuffer>::FromStatus(std::move(status)));
+                return;
+            }
+            request_id = ++next_request;
+            pending.emplace(request_id, Pending {deadline, timeout, std::move(done)});
+        }
+
+        Header header;
+        header.magic = kRequestMagic;
+        header.client_id = client_id;
+        header.request_id = request_id;
+        header.budget_ns = timeout.count();
+        const auto message = Encode(header, request);
+        auto status = requests->Write(ByteView(message));
+        if (status.ok()) {
+            // Let the dispatcher pick up the new deadline.
+            arrived.notify_one();
+            return;
+        }
+        ReplyCallback failed;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            const auto found = pending.find(request_id);
+            if (found == pending.end()) {
+                return;  // already completed, by Close
+            }
+            failed = std::move(found->second.done);
+            pending.erase(found);
+        }
+        failed(core::Result<ByteBuffer>::FromStatus(core::Status::Error(
+            status.code(), Describe(spec) + ": sending request failed: " + status.message())));
     }
 };
 
@@ -671,6 +834,7 @@ core::Result<std::unique_ptr<Client>> Client::Create(runtime::RuntimeContext& ru
         return ResultType::FromStatus(status);
     }
     impl->dispatcher = std::thread([impl = impl.get()] { impl->Dispatch(); });
+    impl->dispatcher_id.store(impl->dispatcher.get_id());
     return ResultType(std::unique_ptr<Client>(new Client(std::move(impl))));
 }
 
@@ -681,106 +845,55 @@ Client::~Client()
     Close();
 }
 
+core::Status Client::CallAsync(transport::ByteView request, core::Nanoseconds timeout, ReplyCallback done)
+{
+    if (timeout <= core::Nanoseconds::zero()) {
+        return core::Status::InvalidArgument("service call timeout must be positive");
+    }
+    if (!done) {
+        return core::Status::InvalidArgument("service call callback must not be empty");
+    }
+    // From the dispatcher itself (a callback chaining the next call), waiting
+    // for a server would stall the only thread that could notice one.
+    const bool on_dispatcher = impl_->dispatcher_id.load() == std::this_thread::get_id();
+    impl_->Start(request, timeout, std::move(done), !on_dispatcher);
+    return core::Status::Ok();
+}
+
 core::Result<transport::ByteBuffer> Client::Call(transport::ByteView request, core::Nanoseconds timeout)
 {
     using ResultType = core::Result<ByteBuffer>;
-    auto& impl = *impl_;
     if (timeout <= core::Nanoseconds::zero()) {
         return ResultType::FromStatus(core::Status::InvalidArgument("service call timeout must be positive"));
     }
-    const auto deadline = Now() + timeout;
-
-    Impl::Pending call;
-    std::uint64_t request_id = 0;
-    {
-        // A client that has not seen a heartbeat yet, such as one created a
-        // moment ago, waits up to one liveness window for it before deciding
-        // there is no server. A server that said goodbye fails the call at
-        // once.
-        std::unique_lock<std::mutex> lock(impl.mutex);
-        const auto give_up = std::min(deadline, Now() + impl.Liveness());
-        while (true) {
-            if (impl.closed) {
-                return ResultType::FromStatus(core::Status::Cancelled(Describe(impl.spec) + ": client is closed"));
-            }
-            auto server = impl.LiveServerLocked();  // polls presence first
-            if (server.ok()) {
-                break;
-            }
-            const auto now = Now();
-            if (impl.server_withdrew || now >= give_up) {
-                return ResultType::FromStatus(server.status());
-            }
-            impl.replied.wait_for(lock, std::min<core::Nanoseconds>(give_up - now, kPollInterval));
-        }
-        // Seeing the heartbeat proves the server's presence writer reached
-        // us, not that our request writer has reached the server's reader.
-        // On backends that discover peers asynchronously, wait for that too,
-        // or the request is dropped and the call looks like a slow server.
-        while (true) {
-            const auto matched = impl.requests->MatchedReaderCount();
-            if (!matched.ok() || matched.value() > 0) {
-                break;  // Unsupported: delivery does not depend on matching
-            }
-            if (impl.closed) {
-                return ResultType::FromStatus(core::Status::Cancelled(Describe(impl.spec) + ": client is closed"));
-            }
-            const auto now = Now();
-            if (now >= deadline) {
-                return ResultType::FromStatus(core::Status::Unavailable(
-                    Describe(impl.spec) + ": the server is alive but its request reader was not matched in time"));
-            }
-            impl.replied.wait_for(lock, std::min<core::Nanoseconds>(deadline - now, std::chrono::milliseconds(5)));
-        }
-        request_id = ++impl.next_request;
-        impl.pending.emplace(request_id, &call);
+    if (std::this_thread::get_id() == impl_->dispatcher_id.load()) {
+        return ResultType::FromStatus(core::Status::FailedPrecondition(
+            Describe(impl_->spec) + ": Call from a reply callback would wait on itself; use CallAsync"));
     }
-    const auto forget = [&impl, request_id] {
-        std::lock_guard<std::mutex> lock(impl.mutex);
-        impl.pending.erase(request_id);
+    // One completion, handed over under the mutex the dispatcher completes
+    // calls under, so this thread can wait on the same condition variable.
+    struct Slot {
+        std::mutex mutex;
+        std::condition_variable ready;
+        bool done {false};
+        ResultType result {ResultType::FromStatus(core::Status::Internal("no result"))};
     };
+    auto slot = std::make_shared<Slot>();
+    impl_->Start(request, timeout, [slot](ResultType result) {
+        std::lock_guard<std::mutex> lock(slot->mutex);
+        slot->result = std::move(result);
+        slot->done = true;
+        slot->ready.notify_all();
+    }, true);
+    std::unique_lock<std::mutex> lock(slot->mutex);
+    slot->ready.wait(lock, [&slot] { return slot->done; });
+    return std::move(slot->result);
+}
 
-    Header header;
-    header.magic = kRequestMagic;
-    header.client_id = impl.client_id;
-    header.request_id = request_id;
-    header.budget_ns = timeout.count();
-    const auto message = Encode(header, request);
-    auto status = impl.requests->Write(ByteView(message));
-    if (!status.ok()) {
-        forget();
-        return ResultType::FromStatus(core::Status::Error(
-            status.code(), Describe(impl.spec) + ": sending request failed: " + status.message()));
-    }
-
-    std::unique_lock<std::mutex> lock(impl.mutex);
-    while (true) {
-        const auto now = Now();
-        if (call.done || impl.closed || now >= deadline) {
-            break;
-        }
-        // Wake at least once per heartbeat window to notice a dead server.
-        const auto step = std::min<core::Nanoseconds>(deadline - now, impl.spec.heartbeat_interval);
-        impl.replied.wait_for(lock, step, [&] { return call.done || impl.closed; });
-        if (!call.done && !impl.closed && !impl.LiveServerLocked().ok()) {
-            impl.pending.erase(request_id);
-            return ResultType::FromStatus(core::Status::Unavailable(
-                Describe(impl.spec) + ": server stopped responding during the call"));
-        }
-    }
-    impl.pending.erase(request_id);
-    if (call.done) {
-        if (call.code == core::StatusCode::kOk) {
-            return ResultType(std::move(call.payload));
-        }
-        return ResultType::FromStatus(core::Status::Error(
-            call.code, std::string(call.payload.begin(), call.payload.end())));
-    }
-    if (impl.closed) {
-        return ResultType::FromStatus(core::Status::Cancelled(Describe(impl.spec) + ": client closed during the call"));
-    }
-    return ResultType::FromStatus(core::Status::DeadlineExceeded(
-        Describe(impl.spec) + ": no reply within " + std::to_string(timeout.count() / 1000000) + " ms"));
+std::size_t Client::PendingCalls() const
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->pending.size();
 }
 
 core::Result<ServerInfo> Client::WaitForService(core::Nanoseconds timeout)
@@ -797,7 +910,7 @@ core::Result<ServerInfo> Client::WaitForService(core::Nanoseconds timeout)
         if (server.ok() || Now() >= deadline) {
             return server;
         }
-        impl.replied.wait_for(lock, kPollInterval);
+        impl.changed.wait_for(lock, kPollInterval);
     }
 }
 
@@ -819,6 +932,7 @@ const ServiceSpec& Client::spec() const noexcept
 
 void Client::Close() noexcept
 {
+    std::vector<Impl::Completion> cancelled;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->closed) {
@@ -826,11 +940,27 @@ void Client::Close() noexcept
         }
         impl_->closed = true;
     }
-    impl_->replied.notify_all();
+    impl_->changed.notify_all();
     impl_->arrived.notify_all();
+    // Closing from a reply callback must not join the thread it runs on;
+    // that dispatcher exits by itself after the callback returns.
     if (impl_->dispatcher.joinable()) {
-        impl_->dispatcher.join();
+        if (impl_->dispatcher.get_id() == std::this_thread::get_id()) {
+            impl_->dispatcher.detach();
+        } else {
+            impl_->dispatcher.join();
+        }
     }
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        for (auto call = impl_->pending.begin(); call != impl_->pending.end();) {
+            auto next = std::next(call);
+            cancelled.push_back(impl_->TakeLocked(call, core::Result<ByteBuffer>::FromStatus(
+                core::Status::Cancelled(Describe(impl_->spec) + ": client closed during the call"))));
+            call = next;
+        }
+    }
+    Impl::Run(cancelled);
     impl_->replies->SetDataAvailableCallback({});
 }
 

@@ -355,6 +355,113 @@ void ServicePriorityOrdersDispatch()
     assert(sched.Stop().ok());
 }
 
+// Calls the upper-casing service from its own Execute(). With `async`, it
+// sends with CallAsync, and the reply callback triggers it again to consume
+// the result; without, it blocks the worker in Call.
+class Caller final : public runtime::Component {
+public:
+    Caller(std::string name, service::ServiceSpec spec, bool async)
+        : name_(std::move(name)), spec_(std::move(spec)), async_(async)
+    {
+    }
+
+    runtime::ComponentSpec Describe() const override
+    {
+        runtime::ComponentSpec spec {core::ComponentName::Unsafe(name_), "calls upper-casing", {}, {}, {Manual()}};
+        spec.clients = {spec_};
+        return spec;
+    }
+
+    core::Status Initialize(runtime::ComponentContext& context) override
+    {
+        auto client = service::Client::Create(context.runtime(), spec_);
+        if (!client.ok()) {
+            return client.status();
+        }
+        client_ = std::move(client).value();
+        return core::Status::Ok();
+    }
+
+    core::Status Execute(runtime::ComponentContext&) override
+    {
+        if (!async_) {
+            blocking_result = client_->Call(Bytes("blocked"), 200ms).status();
+            done.store(true);
+            return core::Status::Ok();
+        }
+        if (reply_ready.load()) {
+            consumed.store(true);  // second execution: the reply is here
+            return core::Status::Ok();
+        }
+        return client_->CallAsync(Bytes("async"), 2s, [this](core::Result<transport::ByteBuffer> reply) {
+            reply_text = reply.ok() ? Text(reply.value()) : reply.status().ToString();
+            reply_ready.store(true);
+            // Hand the result back to the scheduler instead of working here.
+            scheduler->Trigger(core::ComponentName::Unsafe(name_));
+        });
+    }
+
+    core::Status Shutdown(runtime::ComponentContext&) override
+    {
+        client_.reset();
+        return core::Status::Ok();
+    }
+
+    scheduler::Scheduler* scheduler {nullptr};
+    std::string reply_text;  // written before reply_ready, read after it
+    std::atomic<bool> reply_ready {false};
+    std::atomic<bool> consumed {false};
+    core::Status blocking_result {core::Status::Ok()};
+    std::atomic<bool> done {false};
+
+private:
+    std::string name_;
+    service::ServiceSpec spec_;
+    bool async_;
+    std::unique_ptr<service::Client> client_;
+};
+
+// One worker, a caller and a scheduled server: a blocking Call from Execute
+// holds the only worker, so the server never runs; CallAsync frees it.
+void AsyncCallBetweenScheduledComponents()
+{
+    for (const bool async : {false, true}) {
+        auto runtime = MakeRuntime();
+        const auto spec = Spec(async ? "/sched/async-call" : "/sched/blocking-call");
+        auto server = std::make_shared<UpperServer>("upper", spec, std::vector<core::TriggerSpec> {ServiceTrigger(spec)});
+        auto caller = std::make_shared<Caller>("caller", spec, async);
+        assert(runtime->RegisterComponent(server).ok());
+        assert(runtime->RegisterComponent(caller).ok());
+        BringUp(*runtime, core::ComponentName::Unsafe("upper"));
+        BringUp(*runtime, core::ComponentName::Unsafe("caller"));
+
+        scheduler::Scheduler sched(*runtime);  // one worker
+        caller->scheduler = &sched;
+        assert(sched.RegisterAllComponents().ok());
+        assert(sched.Start().ok());
+        assert(sched.Trigger(core::ComponentName::Unsafe("caller")).ok());
+
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        if (async) {
+            while (!caller->consumed.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(1ms);
+            }
+            assert(caller->consumed.load());
+            assert(caller->reply_text == "ASYNC");
+            assert(server->served_total.load() == 1);
+        } else {
+            while (!caller->done.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(1ms);
+            }
+            assert(caller->done.load());
+            // The server is alive (heartbeats) but could not run in time.
+            assert(caller->blocking_result.code() == core::StatusCode::kDeadlineExceeded);
+        }
+        assert(sched.WaitIdle(1s).ok());
+        assert(sched.Stop().ok());
+    }
+}
+
 void TriggerValidation()
 {
     auto runtime = MakeRuntime();
@@ -446,6 +553,7 @@ int main()
     BurstCoalescesIntoOneExecution();
     ServiceAndManualTriggersSerialize();
     ServicePriorityOrdersDispatch();
+    AsyncCallBetweenScheduledComponents();
     TriggerValidation();
     ServePendingContract();
     std::cout << "scheduled service tests passed\n";
