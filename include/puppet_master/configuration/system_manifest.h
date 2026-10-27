@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,27 @@ struct NodeManifest {
     std::vector<std::string> arguments;  // passed after the launcher options
     // How long to wait after starting this node before starting the next.
     std::chrono::milliseconds start_delay {0};
+
+    // Supervision, for puppet_master_launch.
+    enum class Restart : std::uint8_t {
+        kNever = 0,   // an exit is final
+        kOnFailure,   // restart after a non-zero exit or a signal
+        kAlways,      // restart after any exit
+    };
+    Restart restart {Restart::kNever};
+    // Restarts allowed before giving up on the node; 0 means no limit.
+    std::uint32_t max_restarts {5};
+    // Wait before a restart, doubling after each one that follows within
+    // a minute of the previous, up to 30 s.
+    std::chrono::milliseconds restart_delay {std::chrono::milliseconds(500)};
+    // A required node that exits for good (no restart left) stops the whole
+    // system; an optional one is left stopped.
+    bool required {true};
+    // After asking the node to stop, how long to wait before killing it.
+    std::chrono::milliseconds stop_timeout {std::chrono::milliseconds(5000)};
 };
+
+PUPPET_MASTER_API const char* ToString(NodeManifest::Restart restart) noexcept;
 
 struct SystemManifest {
     std::string name;

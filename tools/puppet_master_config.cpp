@@ -99,6 +99,12 @@ int RunSystem(const std::string& action, const std::string& path)
         for (std::size_t index = 0; index < system.nodes.size(); ++index) {
             const auto& node = system.nodes[index];
             std::cout << "\nnode " << node.name << " (" << node.executable << ", " << node.config << ")\n";
+            std::cout << "  restart " << config::ToString(node.restart);
+            if (node.restart != config::NodeManifest::Restart::kNever) {
+                std::cout << " (max " << node.max_restarts << ", delay " << node.restart_delay.count() << " ms)";
+            }
+            std::cout << ", " << (node.required ? "required" : "optional") << ", stop timeout "
+                      << node.stop_timeout.count() << " ms\n";
             std::cout << config::DescribeProject(nodes.value()[index].project);
         }
         return 0;
