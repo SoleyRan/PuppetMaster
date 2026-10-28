@@ -182,6 +182,41 @@ In C++, `configuration::Supervisor` in
 `puppet_master/configuration/supervisor.h` does the same. Its
 `ProcessLauncher` interface lets tests replace real processes.
 
+## Topic Tool
+
+`puppet_master_topic` looks at the shared-memory topics of a running system.
+It is built and installed with the JSON and shared-memory adapters.
+
+```bash
+puppet_master_topic list
+puppet_master_topic list --system system.json
+puppet_master_topic echo /vehicle/state --count 5
+puppet_master_topic hz /vehicle/state --window-ms 500
+```
+
+| Command | Effect |
+|---|---|
+| `list` | the topics with a segment on this host: type, ring size, state, messages written, attached pids (Linux) |
+| `list --system FILE` | the topics the manifest's nodes declare, with their ring size and which components write and read them |
+| `echo TOPIC` | each message's sequence, size, and latency, and its first `--bytes N` bytes in hex (32 by default), or `--text` |
+| `hz TOPIC` | every `--window-ms` (1000 by default): the rate, bytes per second, shortest and longest interval, and losses |
+
+`echo` and `hz` subscribe like any other reader and change nothing for the
+writer. They start after the newest message and queue up to one ring. A
+message they fall behind on is overwritten in the ring and shown as lost.
+Intervals are measured between publish times, so the tool's own delays do
+not show up as jitter.
+
+The topic's type and ring size come from its segment header, which needs
+Linux and a writer that has started. With `--system FILE` they come from
+the manifest's nodes and deployment instead, which also works on Windows
+and before the writer starts. `--domain N` picks a domain when a topic
+exists in several.
+
+`echo --count N` stops after N messages. With `--timeout-ms`, it exits with
+1 if fewer arrived, so scripts can wait for traffic. `hz --duration-ms N`
+stops after N ms. Ctrl+C stops either one.
+
 ## Library Helpers
 
 These are in the core library and need no JSON:
