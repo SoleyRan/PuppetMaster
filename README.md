@@ -57,7 +57,7 @@ include/puppet_master/   Public headers for downstream projects.
 src/                     Library and optional adapter implementations.
 demo/                    Small runnable examples and an example configuration.
 examples/                Standalone downstream projects built against an install.
-tools/                   Command-line tools such as puppet_master_config.
+tools/                   Command-line tools: puppet_master_config, _launch, _topic.
 test/                    Unit, integration, and smoke tests.
 bench/                   Transport benchmarks (PUPPETMASTER_BUILD_BENCHMARKS).
 cmake/                   Package configuration templates.
@@ -109,7 +109,11 @@ cmake --install build --prefix /opt/puppetmaster
 ```
 
 This installs headers under `include/`, the libraries, the CMake package under
-`lib/cmake/PuppetMaster`, and, with the JSON adapter, `bin/puppet_master_config`.
+`lib/cmake/PuppetMaster`, and, with the JSON adapter, the tools in `bin/`:
+`puppet_master_config` checks configurations, `puppet_master_launch` runs and
+supervises a system, and `puppet_master_topic` inspects, records, and replays
+shared-memory topics (with the shm adapter too). See
+[Launcher And Configuration Tools](docs/launcher.md).
 Add `-DBUILD_SHARED_LIBS=ON` for shared libraries.
 
 Before 1.0 each minor release may break the API and the ABI, so the shared
@@ -172,6 +176,10 @@ Follow-up phases, all complete:
 7. Services and release 0.2. Done: request/reply services on every
    transport, system manifests, a portable codec, shared-memory segment
    tools, benchmarks, and Windows JSON CI. See [CHANGELOG](CHANGELOG.md).
+8. Scheduled services. Done: service triggers, asynchronous calls, and a
+   demo.
+9. Operations tools. Done: a system launcher with restart policies, topic
+   list/echo/hz, and record/replay. See [Recordings](docs/recording.md).
 
 See [Architecture](docs/architecture.md) for the intended module boundaries.
 See [Core API](docs/core.md) for the current public core model.
@@ -191,7 +199,9 @@ server liveness.
 See [Configuration System](docs/configuration.md) for code-first project
 assembly.
 See [Launcher And Configuration Tools](docs/launcher.md) for running
-JSON-configured applications and checking configurations in CI.
+JSON-configured applications, checking configurations in CI, launching a
+system, and inspecting its topics.
+See [Recordings](docs/recording.md) for recording and replaying topics.
 See [itage_engine Compatibility Facade](docs/compatibility-facade.md) for the
 transitional node/reader/writer API.
 See [Observability](docs/observability.md) for runtime metrics, trace hooks,
