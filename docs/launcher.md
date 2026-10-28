@@ -27,7 +27,7 @@ resulting binary accepts:
 
 | Command | Effect | Exit code |
 |---|---|---|
-| `app config.json` | Run until SIGINT or SIGTERM, then shut down cleanly | 0, or 1 on error |
+| `app config.json` | Run until SIGINT or SIGTERM (or Ctrl+Break on Windows), then shut down cleanly | 0, or 1 on error |
 | `app --validate config.json` | Check the configuration and that every component type has a factory | 0 or 1 |
 | `app --describe config.json` | Print topics, components, and triggers | 0 or 1 |
 | `app --help` | Usage | 0 |
@@ -64,8 +64,9 @@ auto status = app.value()->Run();       // Start(), wait, Stop()
   destructor calls it.
 - `Run` is `Start`, then a wait for `RequestStop()`, then `Stop`.
   `RequestStop()` is safe from any thread, including component callbacks.
-- `InstallSignalHandlers` makes SIGINT and SIGTERM call `RequestStop()`. Only
-  one application per process can own the handlers.
+- `InstallSignalHandlers` makes SIGINT and SIGTERM call `RequestStop()`, and
+  SIGBREAK on Windows, which is how `puppet_master_launch` stops a node there.
+  Only one application per process can own the handlers.
 
 An application runs once; create a new one to run again.
 
@@ -131,6 +132,55 @@ launch scripts. See [System Manifests](configuration.md#system-manifests).
 `shm list` and `shm clean` show and remove leftover shared-memory segments
 (when the shared-memory adapter is built). See
 [Listing And Cleaning Up](shm-transport.md#listing-and-cleaning-up).
+
+## System Launcher
+
+`puppet_master_launch` runs every node of a
+[system manifest](configuration.md#system-manifests) and supervises them. It
+is built and installed with the JSON adapter, next to `puppet_master_config`.
+
+```bash
+puppet_master_launch system.json
+puppet_master_launch --log-dir logs system.json
+```
+
+| Option | Effect |
+|---|---|
+| `--log-dir DIR` | write each node's output to `DIR/<node>.log`, appended across restarts |
+| `--no-validate` | skip the check of the nodes together before starting |
+
+It runs as follows:
+
+1. Check the manifest like `puppet_master_config system validate`, and exit
+   with 1 on any error.
+2. Start the nodes in manifest order, waiting each node's `start_delay_ms`
+   before the next. Each node runs in a process group of its own.
+3. Supervise them. A node that exits is restarted by its `restart` policy
+   after `restart_delay_ms`. The delay doubles for each restart that follows
+   a run shorter than 10 s, up to 30 s. A longer run resets the delay and the
+   `max_restarts` count.
+4. On SIGINT or SIGTERM (Ctrl+C or Ctrl+Break on Windows), stop the running
+   nodes in reverse start order. Each node gets SIGTERM (Ctrl+Break on
+   Windows), then is killed if it is still running after `stop_timeout_ms`.
+
+The system also stops when a `required` node ends for good: it exited and
+its policy allows no restart, or it failed to start. A node with
+`"required": false` is left stopped and the others keep running. When every
+node has ended, the launcher exits too.
+
+The launcher prints one line per event to stderr: `started`, `start-failed`,
+`exited`, `restarting`, `gave-up`, `stopping`, `killed`, and `stopped`. It
+exits with 0 after a stop request or when every node ended successfully. It
+exits with 1 when a required node failed or any node ended with a failure.
+
+Component types are not checked here, because only each node's binary knows
+its factories. Run `node --validate` in CI for that, as
+`examples/vehicle_pipeline/integration/run_pipeline.sh` does before it
+starts the system.
+
+In C++, `configuration::Supervisor` in
+`puppet_master/configuration/supervisor.h` does the same. Its
+`ProcessLauncher` interface lets tests replace real processes.
 
 ## Library Helpers
 

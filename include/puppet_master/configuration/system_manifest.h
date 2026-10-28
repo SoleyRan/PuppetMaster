@@ -37,10 +37,12 @@ struct NodeManifest {
         kAlways,      // restart after any exit
     };
     Restart restart {Restart::kNever};
-    // Restarts allowed before giving up on the node; 0 means no limit.
+    // Restarts allowed before giving up on the node; 0 means no limit. A run
+    // longer than SupervisorOptions::stable_run resets the count.
     std::uint32_t max_restarts {5};
-    // Wait before a restart, doubling after each one that follows within
-    // a minute of the previous, up to 30 s.
+    // Wait before a restart. It doubles for each restart after a short run
+    // (SupervisorOptions::stable_run, 10 s by default), up to 30 s, and is
+    // reset by a long one.
     std::chrono::milliseconds restart_delay {std::chrono::milliseconds(500)};
     // A required node that exits for good (no restart left) stops the whole
     // system; an optional one is left stopped.

@@ -273,6 +273,19 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
         NAME puppet_master.system_manifest
         COMMAND puppet_master_system_manifest_test
     )
+
+    add_executable(puppet_master_supervisor_test
+        supervisor_test.cpp
+    )
+
+    target_link_libraries(puppet_master_supervisor_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.supervisor
+        COMMAND puppet_master_supervisor_test
+    )
 endif()
 
 if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)

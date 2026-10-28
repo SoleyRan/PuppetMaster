@@ -389,9 +389,13 @@ system manifest is the one list of a system's processes:
 | `system describe system.json` | Print every node's configuration |
 | `system commands system.json` | Print each node's start command, one per line |
 
-`system commands` prints `name`, then the command's words, then
-`#delay_ms=N`, separated by tabs. The command is the executable, the
-launcher's `--config-path` and `--deployment` options, the node's
+`puppet_master_launch system.json` starts and supervises the whole system
+with the manifest's restart and stop settings; see
+[System Launcher](launcher.md#system-launcher).
+
+For your own scripts, `system commands` prints `name`, then the command's
+words, then `#delay_ms=N`, separated by tabs. The command is the executable,
+the launcher's `--config-path` and `--deployment` options, the node's
 `arguments`, and its config, so a launch script needs no paths of its own:
 
 ```bash

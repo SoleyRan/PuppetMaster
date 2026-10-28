@@ -18,6 +18,7 @@ set(PUPPETMASTER_PUBLIC_HEADERS
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/configuration.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
+    "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/supervisor.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/system_manifest.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/message_policy.h"
     "${PROJECT_SOURCE_DIR}/include/puppet_master/core/result.h"
@@ -275,9 +276,11 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
     add_library(puppet_master_json_config_adapter
         configuration/json_launcher.cpp
         configuration/json_loader.cpp
+        configuration/supervisor.cpp
         configuration/system_manifest.cpp
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_launcher.h"
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/json_loader.h"
+        "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/supervisor.h"
         "${PROJECT_SOURCE_DIR}/include/puppet_master/configuration/system_manifest.h"
     )
 
