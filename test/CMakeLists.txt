@@ -74,6 +74,20 @@ add_test(
     COMMAND puppet_master_portable_codec_test
 )
 
+add_executable(puppet_master_recording_test
+    recording_test.cpp
+)
+
+target_link_libraries(puppet_master_recording_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.recording
+    COMMAND puppet_master_recording_test
+)
+
 add_executable(puppet_master_component_parameters_test
     component_parameters_test.cpp
 )

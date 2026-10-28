@@ -79,13 +79,30 @@ public:
         options.topics[topic_] = shm::TopicOptions {256, 8};
         transport_ = std::make_unique<shm::ShmTransport>(core::TransportName::Create("test").value(), options);
         assert(transport_->Open().ok());
-        const transport::EndpointConfig endpoint {
-            core::TopicSpec {core::TopicName::Create(topic_).value(), core::TransportKind::kIpc, {}},
-            transport::MessageDescriptor {"test.Text", "application/octet-stream", 0}};
-        auto writer = transport_->CreateWriter(endpoint);
+        auto writer = transport_->CreateWriter(Endpoint({}));
         assert(writer.ok());
         writer_ = writer.value();
     }
+
+    transport::EndpointConfig Endpoint(core::MessagePolicy policy) const
+    {
+        return transport::EndpointConfig {
+            core::TopicSpec {core::TopicName::Create(topic_).value(), core::TransportKind::kIpc, policy},
+            transport::MessageDescriptor {"test.Text", "application/octet-stream", 0}};
+    }
+
+    // A reader in this process that queues a whole ring.
+    transport::ReaderPtr Subscribe()
+    {
+        core::MessagePolicy policy;
+        policy.freshness = core::FreshnessPolicy::kQueued;
+        policy.queue_depth = 8;
+        auto reader = transport_->CreateReader(Endpoint(policy));
+        assert(reader.ok());
+        return reader.value();
+    }
+
+    std::string File(const std::string& name) const { return (root_ / name).string(); }
 
     ~Fixture()
     {
@@ -217,6 +234,77 @@ void TestErrors(Fixture& fixture, const std::string& tool)
     assert(run.exit.code == 2);
 }
 
+std::vector<std::string> Drain(const transport::ReaderPtr& reader)
+{
+    std::vector<std::string> payloads;
+    while (true) {
+        auto message = reader->Read();
+        if (!message.ok()) {
+            return payloads;
+        }
+        payloads.emplace_back(message.value().payload.begin(), message.value().payload.end());
+    }
+}
+
+void TestRecordInfoReplay(Fixture& fixture, const std::string& tool)
+{
+    const auto file = fixture.File("capture.pmrec");
+
+    // With no topic named, every topic of the system is recorded.
+    auto run = fixture.Run(
+        {tool, "record", "-o", file, "--system", fixture.system(), "--count", "5", "--duration-ms", "20000"}, 10ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "record " + fixture.topic() + ": 5 messages, 0 lost"));
+    assert(Contains(run.output, "record: 5 messages to "));
+
+    run = fixture.Run({tool, "info", file}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, ": 1 topics, 5 messages, "));
+    assert(Contains(run.output, fixture.topic() + "  test.Text (application/octet-stream)  5 messages, "));
+    assert(Contains(run.output, "shm domain 77, 256 B x 8 slots"));
+
+    // As fast as possible: the payloads come back in order.
+    {
+        auto reader = fixture.Subscribe();
+        run = fixture.Run({tool, "replay", file, "--rate", "0"}, 0ms);
+        assert(run.exit.success());
+        assert(Contains(run.output, "replay: 5 messages"));
+        const auto payloads = Drain(reader);
+        assert(payloads.size() == 5);
+        const int first = std::stoi(payloads.front().substr(6));
+        for (int index = 0; index < 5; ++index) {
+            assert(payloads[static_cast<std::size_t>(index)] == "hello " + std::to_string(first + index));
+        }
+    }
+
+    // At the recorded pace: about 10 ms between messages, so 40 ms or more.
+    {
+        auto reader = fixture.Subscribe();
+        const auto started = std::chrono::steady_clock::now();
+        run = fixture.Run({tool, "replay", file, fixture.topic()}, 0ms);
+        assert(run.exit.success());
+        assert(std::chrono::steady_clock::now() - started >= 35ms);
+        assert(Drain(reader).size() == 5);
+    }
+
+    // Topics left out are not replayed; one not in the recording is an error.
+    {
+        auto reader = fixture.Subscribe();
+        run = fixture.Run({tool, "replay", file, "/pm_topic_test/nobody", "--rate", "0"}, 0ms);
+        assert(run.exit.code == 1);
+        assert(Contains(run.output, "topic /pm_topic_test/nobody is not in"));
+        assert(Contains(run.output, "replay: 0 messages"));
+        assert(Drain(reader).empty());
+    }
+
+    run = fixture.Run({tool, "info", fixture.File("missing.pmrec")}, 0ms);
+    assert(run.exit.code == 1);
+    run = fixture.Run({tool, "record", fixture.topic()}, 0ms);  // no -o
+    assert(run.exit.code == 2);
+    run = fixture.Run({tool, "replay", file, "--rate", "fast"}, 0ms);
+    assert(run.exit.code == 2);
+}
+
 #if !defined(_WIN32)
 void TestListFromSegments(Fixture& fixture, const std::string& tool)
 {
@@ -252,6 +340,7 @@ int main(int argc, char** argv)
     TestEchoTimesOut(fixture, tool);
     TestHz(fixture, tool);
     TestErrors(fixture, tool);
+    TestRecordInfoReplay(fixture, tool);
 #if !defined(_WIN32)
     // Segment headers can only be read on Linux.
     TestListFromSegments(fixture, tool);

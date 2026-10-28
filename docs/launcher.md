@@ -217,6 +217,16 @@ exists in several.
 1 if fewer arrived, so scripts can wait for traffic. `hz --duration-ms N`
 stops after N ms. Ctrl+C stops either one.
 
+The tool also records and replays topics:
+
+| Command | Effect |
+|---|---|
+| `record [TOPIC...] -o FILE` | write the topics' messages to FILE; with no topic named, every shm topic found (or the system's, with `--system`); stops after `--count N` messages, `--duration-ms N`, or Ctrl+C |
+| `replay FILE [TOPIC...]` | publish the recording's messages again, all or the topics named, at the recorded pace times `--rate X` (`0`: at once) |
+| `info FILE` | the recording's topics, message counts, sizes, rates, and length |
+
+See [Recordings](recording.md).
+
 ## Library Helpers
 
 These are in the core library and need no JSON:

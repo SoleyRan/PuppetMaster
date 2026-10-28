@@ -15,20 +15,24 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <puppet_master/configuration/configuration.h>
 #include <puppet_master/configuration/system_manifest.h>
+#include <puppet_master/transport/recording.h>
 #include <puppet_master/transport/shm/shm_transport.h>
 
 namespace config = puppet_master::configuration;
@@ -69,14 +73,27 @@ int Usage(std::ostream& out)
         << "  --bytes N       echo: show at most N bytes of each message in hex (default 32)\n"
         << "  --text          echo: print the payload as text instead\n"
         << "  --window-ms N   hz: report every N ms (default 1000)\n"
-        << "  --duration-ms N hz: stop after N ms\n"
-        << "Ctrl+C stops echo and hz.\n";
+        << "  --duration-ms N hz, record: stop after N ms\n"
+        << "       puppet_master_topic record [<topic>...] -o FILE [--system FILE] [--domain N]\n"
+        << "                                  [--count N] [--duration-ms N]\n"
+        << "       puppet_master_topic replay FILE [<topic>...] [--domain N] [--rate X]\n"
+        << "       puppet_master_topic info FILE\n"
+        << "  record          write the topics' messages to FILE; with no topic, every\n"
+        << "                  shm topic found (or the system's, with --system)\n"
+        << "  -o FILE         record: the recording to write, replacing it\n"
+        << "  --count N       record: stop after N messages in total\n"
+        << "  replay          publish a recording's messages again (all, or the topics\n"
+        << "                  named) at their recorded pace\n"
+        << "  --rate X        replay: X times the recorded pace; 0 publishes at once\n"
+        << "  info            the topics, message counts, and length of a recording\n"
+        << "Ctrl+C stops echo, hz, record, and replay.\n";
     return 2;
 }
 
 struct Arguments {
     std::string command;
-    std::string topic;
+    std::vector<std::string> topics;
+    std::string file;  // record: -o; replay, info: the first operand
     std::string system;
     std::optional<core::DomainId> domain;
     std::uint64_t count {0};
@@ -85,7 +102,18 @@ struct Arguments {
     milliseconds duration {0};
     std::uint64_t bytes {32};
     bool text {false};
+    double rate {1.0};
 };
+
+bool ParseRate(const std::string& text, double& value)
+{
+    if (text.empty() || text.size() > 12 || text.find_first_not_of("0123456789.") != std::string::npos ||
+        text.find('.') != text.rfind('.') || text == ".") {
+        return false;
+    }
+    value = std::stod(text);
+    return value <= 1000.0;
+}
 
 bool ParseNumber(const std::string& text, std::uint64_t& value)
 {
@@ -107,9 +135,12 @@ int Parse(int argc, char** argv, Arguments& args)
         Usage(std::cout);
         return -1;
     }
-    if (args.command != "list" && args.command != "echo" && args.command != "hz") {
+    const std::set<std::string> commands {"list", "echo", "hz", "record", "replay", "info"};
+    if (commands.count(args.command) == 0) {
         return Usage(std::cerr);
     }
+    const bool echo = args.command == "echo";
+    const bool record = args.command == "record";
     for (int index = 2; index < argc; ++index) {
         const std::string argument = argv[index];
         const bool has_value = index + 1 < argc;
@@ -129,7 +160,7 @@ int Parse(int argc, char** argv, Arguments& args)
                 return 2;
             }
             args.domain = static_cast<core::DomainId>(number);
-        } else if (argument == "--count" && args.command == "echo") {
+        } else if (argument == "--count" && (echo || record)) {
             if (!numeric("--count")) {
                 return 2;
             }
@@ -151,18 +182,35 @@ int Parse(int argc, char** argv, Arguments& args)
                 return 2;
             }
             args.window = milliseconds(number);
-        } else if (argument == "--duration-ms" && args.command == "hz") {
+        } else if (argument == "--duration-ms" && (args.command == "hz" || record)) {
             if (!numeric("--duration-ms")) {
                 return 2;
             }
             args.duration = milliseconds(number);
-        } else if (!argument.empty() && argument[0] != '-' && args.topic.empty() && args.command != "list") {
-            args.topic = argument;
+        } else if ((argument == "-o" || argument == "--output") && record && has_value) {
+            args.file = argv[++index];
+        } else if (argument == "--rate" && args.command == "replay") {
+            if (!has_value || !ParseRate(argv[index + 1], args.rate)) {
+                std::cerr << "--rate needs a number from 0 to 1000\n";
+                return 2;
+            }
+            ++index;
+        } else if (!argument.empty() && argument[0] != '-' && args.command != "list") {
+            const bool takes_file = args.command == "replay" || args.command == "info";
+            if (takes_file && args.file.empty()) {
+                args.file = argument;
+            } else if (args.command == "info") {
+                return Usage(std::cerr);
+            } else {
+                args.topics.push_back(argument);
+            }
         } else {
             return Usage(std::cerr);
         }
     }
-    if (args.command != "list" && args.topic.empty()) {
+    const bool one_topic = echo || args.command == "hz";
+    if ((one_topic && args.topics.size() != 1) ||
+        ((record || args.command == "replay" || args.command == "info") && args.file.empty())) {
         return Usage(std::cerr);
     }
     return 0;
@@ -289,40 +337,51 @@ Topics TopicsFromSystem(const std::string& path, std::optional<core::DomainId> d
     return Topics(std::move(topics));
 }
 
-core::Result<TopicInfo> FindTopic(const Arguments& args)
+Topics LoadTopics(const Arguments& args)
+{
+    return args.system.empty() ? TopicsFromSegments(args.domain) : TopicsFromSystem(args.system, args.domain);
+}
+
+// The one shared-memory topic called `name` among `topics`.
+core::Result<TopicInfo> FindTopic(const Arguments& args, const std::vector<TopicInfo>& topics, const std::string& name)
 {
     using ResultType = core::Result<TopicInfo>;
-    auto topics = args.system.empty() ? TopicsFromSegments(args.domain) : TopicsFromSystem(args.system, args.domain);
-    if (!topics.ok()) {
-        return ResultType::FromStatus(topics.status());
-    }
-    std::vector<TopicInfo> matches;
-    for (auto& topic : topics.value()) {
-        if (topic.name == args.topic) {
-            matches.push_back(std::move(topic));
+    std::vector<const TopicInfo*> matches;
+    for (const auto& topic : topics) {
+        if (topic.name == name) {
+            matches.push_back(&topic);
         }
     }
     if (matches.empty()) {
         return ResultType::FromStatus(core::Status::NotFound(
-            args.system.empty() ? "no shm segment for topic " + args.topic +
+            args.system.empty() ? "no shm segment for topic " + name +
                                       " on this host; is its writer running? (--system FILE finds it from the "
                                       "manifest instead)"
-                                : "no node of " + args.system + " declares topic " + args.topic));
+                                : "no node of " + args.system + " declares topic " + name));
     }
     if (matches.size() > 1) {
         std::string domains;
-        for (const auto& match : matches) {
-            domains += (domains.empty() ? "" : ", ") + std::to_string(match.domain);
+        for (const auto* match : matches) {
+            domains += (domains.empty() ? "" : ", ") + std::to_string(match->domain);
         }
         return ResultType::FromStatus(core::Status::InvalidArgument(
-            "topic " + args.topic + " exists in domains " + domains + "; pick one with --domain"));
+            "topic " + name + " exists in domains " + domains + "; pick one with --domain"));
     }
-    if (matches.front().transport != core::TransportKind::kIpc) {
+    if (matches.front()->transport != core::TransportKind::kIpc) {
         return ResultType::FromStatus(core::Status::Unsupported(
-            "topic " + args.topic + " uses the " + core::ToString(matches.front().transport) +
+            "topic " + name + " uses the " + core::ToString(matches.front()->transport) +
             " transport; puppet_master_topic reads shared-memory topics only"));
     }
-    return ResultType(std::move(matches.front()));
+    return ResultType(*matches.front());
+}
+
+core::Result<TopicInfo> FindTopic(const Arguments& args, const std::string& name)
+{
+    auto topics = LoadTopics(args);
+    if (!topics.ok()) {
+        return core::Result<TopicInfo>::FromStatus(topics.status());
+    }
+    return FindTopic(args, topics.value(), name);
 }
 
 // --- reading ------------------------------------------------------------
@@ -466,7 +525,7 @@ void PrintPayload(const transport::ByteBuffer& payload, const Arguments& args)
 
 int Echo(const Arguments& args)
 {
-    auto topic = FindTopic(args);
+    auto topic = FindTopic(args, args.topics.front());
     if (!topic.ok()) {
         std::cerr << topic.status().ToString() << '\n';
         return 1;
@@ -535,7 +594,7 @@ void Report(const Window& window, Clock::duration elapsed)
 
 int Hz(const Arguments& args)
 {
-    auto topic = FindTopic(args);
+    auto topic = FindTopic(args, args.topics.front());
     if (!topic.ok()) {
         std::cerr << topic.status().ToString() << '\n';
         return 1;
@@ -588,6 +647,401 @@ int Hz(const Arguments& args)
     return 0;
 }
 
+// --- record -------------------------------------------------------------
+
+// Wakes the recording loop when any of its readers has data.
+struct Wakeup {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool pending {false};
+
+    void Notify()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            pending = true;
+        }
+        cv.notify_one();
+    }
+
+    void Wait(milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait_for(lock, timeout, [this] { return pending; });
+        pending = false;
+    }
+};
+
+struct RecordedChannel {
+    TopicInfo topic;
+    std::uint32_t id {0};
+    std::optional<core::SequenceNumber> last;
+    std::uint64_t received {0};
+    std::uint64_t lost {0};
+    Subscription subscription;  // last: its reader's callback uses the wakeup
+};
+
+std::map<std::string, std::string> RecordedParameters(const TopicInfo& topic)
+{
+    return {
+        {"transport", "shm"},
+        {"domain_id", std::to_string(topic.domain)},
+        {"slot_payload_size", std::to_string(topic.geometry.slot_payload_size)},
+        {"slot_count", std::to_string(topic.geometry.slot_count)},
+    };
+}
+
+core::Result<std::vector<TopicInfo>> TopicsToRecord(const Arguments& args)
+{
+    using ResultType = core::Result<std::vector<TopicInfo>>;
+    auto topics = LoadTopics(args);
+    if (!topics.ok()) {
+        return ResultType::FromStatus(topics.status());
+    }
+    std::vector<TopicInfo> chosen;
+    if (args.topics.empty()) {
+        for (const auto& topic : topics.value()) {
+            if (topic.transport == core::TransportKind::kIpc) {
+                chosen.push_back(topic);
+            }
+        }
+        if (chosen.empty()) {
+            return ResultType::FromStatus(core::Status::NotFound("no shm topics to record"));
+        }
+        return ResultType(std::move(chosen));
+    }
+    for (const auto& name : args.topics) {
+        auto topic = FindTopic(args, topics.value(), name);
+        if (!topic.ok()) {
+            return ResultType::FromStatus(topic.status());
+        }
+        chosen.push_back(std::move(topic).value());
+    }
+    return ResultType(std::move(chosen));
+}
+
+int Record(const Arguments& args)
+{
+    auto topics = TopicsToRecord(args);
+    if (!topics.ok()) {
+        std::cerr << topics.status().ToString() << '\n';
+        return 1;
+    }
+    auto recording = transport::RecordingWriter::Create(args.file);
+    if (!recording.ok()) {
+        std::cerr << recording.status().ToString() << '\n';
+        return 1;
+    }
+    auto& writer = *recording.value();
+
+    Wakeup wakeup;
+    std::vector<std::unique_ptr<RecordedChannel>> channels;
+    for (auto& topic : topics.value()) {
+        auto channel = std::make_unique<RecordedChannel>();
+        transport::RecordedTopic recorded;
+        recorded.name = topic.name;
+        recorded.descriptor = topic.descriptor;
+        recorded.parameters = RecordedParameters(topic);
+        auto id = writer.AddTopic(recorded);
+        if (!id.ok()) {
+            std::cerr << id.status().ToString() << '\n';
+            return 1;
+        }
+        channel->id = id.value();
+        auto subscription = Subscribe(topic);
+        if (!subscription.ok()) {
+            std::cerr << subscription.status().ToString() << '\n';
+            return 1;
+        }
+        channel->subscription = std::move(subscription).value();
+        auto status = channel->subscription.reader->SetDataAvailableCallback([&wakeup] { wakeup.Notify(); });
+        if (!status.ok()) {
+            std::cerr << status.ToString() << '\n';
+            return 1;
+        }
+        channel->topic = std::move(topic);
+        std::cerr << "record " << channel->topic.name << ": " << channel->topic.descriptor.ToString() << std::endl;
+        channels.push_back(std::move(channel));
+    }
+
+    // Times are publish times relative to the start, so the replay keeps the
+    // writers' pace rather than this reader's.
+    const auto started = core::TimePoint(std::chrono::duration_cast<core::Nanoseconds>(
+        core::SteadyClock::now().time_since_epoch()));
+    const auto deadline = args.duration.count() == 0 ? Clock::time_point::max() : Clock::now() + args.duration;
+    auto next_flush = Clock::now() + milliseconds(200);
+    std::uint64_t total = 0;
+    const auto done = [&] { return g_stop.load() || (args.count != 0 && total >= args.count); };
+    while (!done() && Clock::now() < deadline) {
+        bool any = false;
+        for (auto& channel : channels) {
+            while (!done()) {
+                auto pending = channel->subscription.reader->PendingMessageCount();
+                if (!pending.ok()) {
+                    std::cerr << channel->topic.name << ": " << pending.status().ToString() << '\n';
+                    return 1;
+                }
+                if (pending.value() == 0) {
+                    break;
+                }
+                auto message = channel->subscription.reader->Read();
+                if (!message.ok()) {
+                    break;  // raced with the ring: try again next round
+                }
+                any = true;
+                const auto& metadata = message.value().metadata;
+                channel->lost += Gap(channel->last, metadata.sequence);
+                channel->last = metadata.sequence;
+                ++channel->received;
+                ++total;
+                const auto time = std::max(core::Nanoseconds(0), metadata.source_timestamp - started);
+                auto status = writer.Write(channel->id, time, metadata.sequence, transport::ByteView(message.value().payload));
+                if (!status.ok()) {
+                    std::cerr << status.ToString() << '\n';
+                    return 1;
+                }
+            }
+        }
+        if (Clock::now() >= next_flush) {
+            auto status = writer.Flush();
+            if (!status.ok()) {
+                std::cerr << status.ToString() << '\n';
+                return 1;
+            }
+            next_flush = Clock::now() + milliseconds(200);
+        }
+        if (!any) {
+            const auto left = std::max(deadline - Clock::now(), Clock::duration::zero());
+            wakeup.Wait(left < kReadSlice ? std::chrono::duration_cast<milliseconds>(left) : kReadSlice);
+        }
+    }
+    for (const auto& channel : channels) {
+        std::cerr << "record " << channel->topic.name << ": " << channel->received << " messages, "
+                  << channel->lost << " lost" << std::endl;
+    }
+    channels.clear();  // stop the callbacks before the wakeup goes away
+    auto status = writer.Close();
+    if (!status.ok()) {
+        std::cerr << status.ToString() << '\n';
+        return 1;
+    }
+    std::cerr << "record: " << total << " messages to " << args.file << std::endl;
+    return 0;
+}
+
+// --- replay and info ----------------------------------------------------
+
+std::uint64_t ParameterOr(const transport::RecordedTopic& topic, const std::string& key, std::uint64_t fallback)
+{
+    const auto found = topic.parameters.find(key);
+    std::uint64_t value = 0;
+    return found != topic.parameters.end() && ParseNumber(found->second, value) ? value : fallback;
+}
+
+struct ReplayChannel {
+    std::unique_ptr<shm::ShmTransport> shm_transport;
+    transport::WriterPtr writer;  // declared last: released first
+    std::uint64_t sent {0};
+};
+
+// A writer for a recorded topic, with the ring size and domain it was
+// recorded with (or --domain).
+core::Result<std::unique_ptr<ReplayChannel>> OpenReplayChannel(
+    const transport::RecordedTopic& topic, const Arguments& args)
+{
+    using ResultType = core::Result<std::unique_ptr<ReplayChannel>>;
+    const auto failed = [&topic](const core::Status& status) {
+        return ResultType::FromStatus(
+            core::Status::Error(status.code(), "replaying to " + topic.name + ": " + status.message()));
+    };
+    const shm::TopicOptions defaults;
+    const auto domain = ParameterOr(topic, "domain_id", 0);
+    if (domain > 0xffffffffULL) {
+        return failed(core::Status::InvalidArgument("recorded domain_id is out of range"));
+    }
+    shm::Options options;
+    options.domain_id = args.domain ? *args.domain : static_cast<core::DomainId>(domain);
+    options.topics[topic.name] = shm::TopicOptions {
+        static_cast<std::size_t>(ParameterOr(topic, "slot_payload_size", defaults.slot_payload_size)),
+        static_cast<std::size_t>(ParameterOr(topic, "slot_count", defaults.slot_count))};
+    auto status = options.Validate();
+    if (!status.ok()) {
+        return failed(status);
+    }
+    auto topic_name = core::TopicName::Create(topic.name);
+    if (!topic_name.ok()) {
+        return failed(topic_name.status());
+    }
+
+    auto channel = std::make_unique<ReplayChannel>();
+    channel->shm_transport = std::make_unique<shm::ShmTransport>(
+        core::TransportName::Create("puppet_master_topic").value(), options);
+    status = channel->shm_transport->Open();
+    if (!status.ok()) {
+        return failed(status);
+    }
+    const transport::EndpointConfig endpoint {
+        core::TopicSpec {topic_name.value(), core::TransportKind::kIpc, core::MessagePolicy {}}, topic.descriptor};
+    auto writer = channel->shm_transport->CreateWriter(endpoint);
+    if (!writer.ok()) {
+        return failed(writer.status());
+    }
+    channel->writer = writer.value();
+    return ResultType(std::move(channel));
+}
+
+int Replay(const Arguments& args)
+{
+    auto opened = transport::RecordingReader::Open(args.file);
+    if (!opened.ok()) {
+        std::cerr << opened.status().ToString() << '\n';
+        return 1;
+    }
+    auto& recording = *opened.value();
+    const std::set<std::string> wanted(args.topics.begin(), args.topics.end());
+
+    // By recorded topic id; null for a topic left out.
+    std::map<std::uint32_t, std::unique_ptr<ReplayChannel>> channels;
+    // Paced from the first replayed message, so a quiet start is skipped.
+    std::optional<core::Nanoseconds> first_time;
+    auto started = Clock::now();
+    std::uint64_t total = 0;
+    while (!g_stop.load()) {
+        auto next = recording.Next();
+        if (!next.ok()) {
+            std::cerr << next.status().ToString() << '\n';
+            return 1;
+        }
+        if (!next.value()) {
+            break;
+        }
+        const auto& message = *next.value();
+        auto found = channels.find(message.topic);
+        if (found == channels.end()) {
+            const auto* topic = recording.FindTopic(message.topic);
+            std::unique_ptr<ReplayChannel> channel;
+            if (wanted.empty() || wanted.count(topic->name) != 0) {
+                auto created = OpenReplayChannel(*topic, args);
+                if (!created.ok()) {
+                    std::cerr << created.status().ToString() << '\n';
+                    return 1;
+                }
+                channel = std::move(created).value();
+                std::cerr << "replay " << topic->name << ": " << topic->descriptor.ToString() << std::endl;
+            }
+            found = channels.emplace(message.topic, std::move(channel)).first;
+        }
+        if (!found->second) {
+            continue;
+        }
+        if (!first_time) {
+            first_time = message.time;
+            started = Clock::now();
+        }
+        if (args.rate > 0) {
+            const auto offset = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::nano>(
+                static_cast<double>((message.time - *first_time).count()) / args.rate));
+            const auto target = started + offset;
+            // In slices, so Ctrl+C is noticed during a long gap.
+            for (auto now = Clock::now(); now < target && !g_stop.load(); now = Clock::now()) {
+                std::this_thread::sleep_for(std::min<Clock::duration>(target - now, kReadSlice));
+            }
+            if (g_stop.load()) {
+                break;
+            }
+        }
+        auto status = found->second->writer->Write(transport::ByteView(message.payload));
+        if (!status.ok()) {
+            std::cerr << "replaying to " << recording.FindTopic(message.topic)->name << ": " << status.ToString()
+                      << '\n';
+            return 1;
+        }
+        ++found->second->sent;
+        ++total;
+    }
+
+    int exit_code = 0;
+    for (const auto& name : wanted) {
+        const auto& topics = recording.topics();
+        const bool known = std::any_of(
+            topics.begin(), topics.end(), [&name](const transport::RecordedTopic& topic) { return topic.name == name; });
+        if (!known && !g_stop.load()) {
+            std::cerr << "replay: topic " << name << " is not in " << args.file << '\n';
+            exit_code = 1;
+        }
+    }
+    std::cerr << "replay: " << total << " messages" << (recording.truncated() ? " (the recording was cut off)" : "")
+              << std::endl;
+    return exit_code;
+}
+
+int Info(const Arguments& args)
+{
+    auto opened = transport::RecordingReader::Open(args.file);
+    if (!opened.ok()) {
+        std::cerr << opened.status().ToString() << '\n';
+        return 1;
+    }
+    auto& recording = *opened.value();
+    struct Stats {
+        std::uint64_t messages {0};
+        std::uint64_t bytes {0};
+        core::Nanoseconds first {0};
+        core::Nanoseconds last {0};
+    };
+    std::map<std::uint32_t, Stats> stats;
+    std::uint64_t total = 0;
+    std::optional<core::Nanoseconds> first;
+    core::Nanoseconds last {0};
+    while (true) {
+        auto next = recording.Next();
+        if (!next.ok()) {
+            std::cerr << next.status().ToString() << '\n';
+            return 1;
+        }
+        if (!next.value()) {
+            break;
+        }
+        const auto& message = *next.value();
+        auto& topic = stats[message.topic];
+        if (topic.messages == 0) {
+            topic.first = message.time;
+        }
+        ++topic.messages;
+        topic.bytes += message.payload.size();
+        topic.last = message.time;
+        if (!first) {
+            first = message.time;
+        }
+        last = std::max(last, message.time);
+        ++total;
+    }
+
+    const auto seconds = [](core::Nanoseconds value) { return std::chrono::duration<double>(value).count(); };
+    std::cout << std::fixed << std::setprecision(3) << args.file << ": " << recording.topics().size() << " topics, "
+              << total << " messages, " << (first ? seconds(last - *first) : 0.0) << " s"
+              << (recording.truncated() ? ", cut off at the end" : "") << '\n';
+    for (const auto& topic : recording.topics()) {
+        const auto& topic_stats = stats[topic.id];
+        std::cout << "  " << topic.name << "  " << topic.descriptor.ToString() << "  " << topic_stats.messages
+                  << " messages, " << topic_stats.bytes << " B";
+        const auto span = seconds(topic_stats.last - topic_stats.first);
+        if (topic_stats.messages >= 2 && span > 0) {
+            std::cout << std::setprecision(2) << ", " << static_cast<double>(topic_stats.messages - 1) / span
+                      << " Hz" << std::setprecision(3);
+        }
+        const auto transport_name = topic.parameters.find("transport");
+        if (transport_name != topic.parameters.end() && transport_name->second == "shm") {
+            std::cout << "  shm domain " << ParameterOr(topic, "domain_id", 0) << ", "
+                      << ParameterOr(topic, "slot_payload_size", 0) << " B x " << ParameterOr(topic, "slot_count", 0)
+                      << " slots";
+        }
+        std::cout << '\n';
+    }
+    std::cout.unsetf(std::ios::floatfield);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -605,5 +1059,14 @@ int main(int argc, char** argv)
     if (args.command == "list") {
         return List(args);
     }
-    return args.command == "echo" ? Echo(args) : Hz(args);
+    if (args.command == "echo") {
+        return Echo(args);
+    }
+    if (args.command == "hz") {
+        return Hz(args);
+    }
+    if (args.command == "record") {
+        return Record(args);
+    }
+    return args.command == "replay" ? Replay(args) : Info(args);
 }
