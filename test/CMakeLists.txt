@@ -74,6 +74,20 @@ add_test(
     COMMAND puppet_master_portable_codec_test
 )
 
+add_executable(puppet_master_recording_test
+    recording_test.cpp
+)
+
+target_link_libraries(puppet_master_recording_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.recording
+    COMMAND puppet_master_recording_test
+)
+
 add_executable(puppet_master_component_parameters_test
     component_parameters_test.cpp
 )
@@ -207,6 +221,18 @@ if(TARGET puppet_master_service_demo)
     )
 endif()
 
+if(TARGET puppet_master_scheduled_service_demo)
+    add_test(
+        NAME puppet_master.scheduled_service_demo
+        COMMAND puppet_master_scheduled_service_demo
+    )
+    set_tests_properties(puppet_master.scheduled_service_demo
+        PROPERTIES
+            PASS_REGULAR_EXPRESSION "scheduled service demo finished"
+            TIMEOUT 30
+    )
+endif()
+
 if(TARGET puppet_master_launcher_demo)
     set(PUPPETMASTER_DEMO_CONFIG "${PROJECT_SOURCE_DIR}/demo/config/speed_pipeline.json")
 
@@ -261,9 +287,37 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG)
         NAME puppet_master.system_manifest
         COMMAND puppet_master_system_manifest_test
     )
+
+    add_executable(puppet_master_supervisor_test
+        supervisor_test.cpp
+    )
+
+    target_link_libraries(puppet_master_supervisor_test
+        PRIVATE PuppetMaster::JsonConfigAdapter
+    )
+
+    add_test(
+        NAME puppet_master.supervisor
+        COMMAND puppet_master_supervisor_test
+    )
 endif()
 
 if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)
+    add_executable(puppet_master_topic_tool_test
+        topic_tool_test.cpp
+    )
+
+    target_link_libraries(puppet_master_topic_tool_test
+        PRIVATE
+            PuppetMaster::JsonConfigAdapter
+            PuppetMaster::ShmAdapter
+    )
+
+    add_test(
+        NAME puppet_master.topic_tool
+        COMMAND puppet_master_topic_tool_test $<TARGET_FILE:puppet_master_topic>
+    )
+
     add_executable(puppet_master_json_imports_test
         json_imports_test.cpp
     )

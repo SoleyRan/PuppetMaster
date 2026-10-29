@@ -161,6 +161,8 @@ puppet_master_config shm clean [--domain N] [--dry-run]
 
 `list` prints each segment's object name, state, topic, message descriptor,
 geometry, messages written, and the pids of running processes attached to it.
+To see the messages themselves, use `puppet_master_topic echo` and `hz`; see
+[Topic Tool](launcher.md#topic-tool).
 The states are:
 
 | State | Meaning | Removed by `clean` |

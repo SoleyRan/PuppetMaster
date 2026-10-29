@@ -20,6 +20,24 @@ the minor version in their soname (`libpuppet_master.so.0.2`), and
   send without blocking and report the result to a callback, so a component
   can call a service from `Execute()` without holding a scheduler worker.
   See [Asynchronous Calls](docs/services.md#asynchronous-calls).
+  `demo/scheduled_service_demo.cpp` shows both together.
+- **System launcher.** `puppet_master_launch system.json` checks a system
+  manifest, starts its nodes in order, restarts them by their new
+  `restart`, `max_restarts`, and `restart_delay_ms` settings, ends the
+  system when a `required` node ends for good, and stops the rest in
+  reverse order on Ctrl+C, killing a node after its `stop_timeout_ms`.
+  `--log-dir` writes one log per node. `configuration::Supervisor` does the
+  same in C++. See [System Launcher](docs/launcher.md#system-launcher).
+- **Topic tool.** `puppet_master_topic list|echo|hz` shows the shared-memory
+  topics of a running system, prints their messages, and measures their
+  rate and losses without slowing writers down. `--system FILE` takes the
+  topics from a manifest, which also works on Windows. See
+  [Topic Tool](docs/launcher.md#topic-tool).
+- **Recordings.** `puppet_master_topic record|replay|info` records
+  shared-memory topics to a file and publishes them again at the recorded
+  pace (`--rate`). `RecordingWriter` and `RecordingReader` in
+  `puppet_master/transport/recording.h` read and write the format from C++.
+  See [Recordings](docs/recording.md).
 
 ### Changed
 
@@ -27,6 +45,14 @@ the minor version in their soname (`libpuppet_master.so.0.2`), and
   `service_dependencies`, and `TriggerKind` a new value, `kService`; code
   that switches over `TriggerKind` needs a case for it.
 - `Server::Create` and `MakeTypedServer` take an optional `ServerOptions`.
+- `Server::ServePending()` counts only the requests it handled, not expired
+  or malformed ones it dropped.
+- `Application::InstallSignalHandlers()` also handles SIGBREAK on Windows,
+  which `puppet_master_launch` sends to stop a node.
+- Breaking ABI: `configuration::NodeManifest` has new fields for
+  supervision.
+- The vehicle pipeline example starts its system with
+  `puppet_master_launch`.
 
 ## 0.2.0
 

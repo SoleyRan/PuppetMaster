@@ -541,6 +541,16 @@ void ServePendingContract()
     assert(nested.code() == core::StatusCode::kFailedPrecondition);
     assert(nested.message().find("its own handler") != std::string::npos);
 
+    // A request whose client gave up is taken but not handled: it counts
+    // toward expired_count(), not toward what ServePending returns.
+    const auto handled_before = server.value()->handled_count();
+    assert(client.value()->Call(Bytes("late"), 30ms).status().code() == core::StatusCode::kDeadlineExceeded);
+    assert(server.value()->PendingCount().value() == 1);
+    assert(server.value()->ServePending().value() == 0);
+    assert(server.value()->expired_count() == 1);
+    assert(server.value()->handled_count() == handled_before);
+    assert(server.value()->PendingCount().value() == 0);
+
     server.value()->Close();
     assert(server.value()->ServePending().status().code() == core::StatusCode::kFailedPrecondition);
 }

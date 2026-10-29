@@ -52,6 +52,15 @@ void HandleStopSignal(int)
     g_signal_received.store(true);
 }
 
+void ResetStopSignals() noexcept
+{
+    std::signal(SIGINT, SIG_DFL);
+    std::signal(SIGTERM, SIG_DFL);
+#if defined(SIGBREAK)
+    std::signal(SIGBREAK, SIG_DFL);
+#endif
+}
+
 }  // namespace
 
 ValidationReport ValidateProject(const ProjectConfig& project, const ComponentFactoryRegistry* factories)
@@ -392,8 +401,7 @@ struct Application::Impl {
         }
         watcher_stop.store(true);
         signal_watcher.join();
-        std::signal(SIGINT, SIG_DFL);
-        std::signal(SIGTERM, SIG_DFL);
+        ResetStopSignals();
         g_signal_owner.store(nullptr);
     }
 };
@@ -568,11 +576,16 @@ core::Status Application::InstallSignalHandlers()
     }
     g_signal_received.store(false);
     impl_->watcher_stop.store(false);
-    if (std::signal(SIGINT, HandleStopSignal) == SIG_ERR || std::signal(SIGTERM, HandleStopSignal) == SIG_ERR) {
-        std::signal(SIGINT, SIG_DFL);
-        std::signal(SIGTERM, SIG_DFL);
+    bool installed = std::signal(SIGINT, HandleStopSignal) != SIG_ERR &&
+                     std::signal(SIGTERM, HandleStopSignal) != SIG_ERR;
+#if defined(SIGBREAK)
+    // Ctrl+Break, which puppet_master_launch sends to stop a node on Windows.
+    installed = installed && std::signal(SIGBREAK, HandleStopSignal) != SIG_ERR;
+#endif
+    if (!installed) {
+        ResetStopSignals();
         g_signal_owner.store(nullptr);
-        return core::Status::Internal("installing SIGINT/SIGTERM handlers failed");
+        return core::Status::Internal("installing stop signal handlers failed");
     }
     // A handler may only set a lock-free flag; this thread turns it into a
     // RequestStop() within one polling interval.

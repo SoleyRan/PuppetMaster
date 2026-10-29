@@ -359,6 +359,15 @@ system manifest is the one list of a system's processes:
 
 - `nodes` are in start order. Names must be unique and are used as labels in
   system reports.
+- Supervision fields, read by `puppet_master_launch`:
+
+  | Field | Default | Meaning |
+  |---|---|---|
+  | `restart` | `"never"` | `"never"`, `"on_failure"` (non-zero exit or signal), or `"always"` |
+  | `max_restarts` | 5 | restarts allowed before giving up; 0 means no limit |
+  | `restart_delay_ms` | 500 | wait before a restart; doubles for quick repeated failures, up to 30 s |
+  | `required` | `true` | a required node that exits for good stops the whole system |
+  | `stop_timeout_ms` | 5000 | after asking a node to stop, how long before it is killed |
 - `${NAME}` in any string is replaced with the environment variable `NAME`,
   so one manifest serves any install prefix. An unset variable is an error,
   not an empty string.
@@ -380,9 +389,13 @@ system manifest is the one list of a system's processes:
 | `system describe system.json` | Print every node's configuration |
 | `system commands system.json` | Print each node's start command, one per line |
 
-`system commands` prints `name`, then the command's words, then
-`#delay_ms=N`, separated by tabs. The command is the executable, the
-launcher's `--config-path` and `--deployment` options, the node's
+`puppet_master_launch system.json` starts and supervises the whole system
+with the manifest's restart and stop settings; see
+[System Launcher](launcher.md#system-launcher).
+
+For your own scripts, `system commands` prints `name`, then the command's
+words, then `#delay_ms=N`, separated by tabs. The command is the executable,
+the launcher's `--config-path` and `--deployment` options, the node's
 `arguments`, and its config, so a launch script needs no paths of its own:
 
 ```bash

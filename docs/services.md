@@ -331,6 +331,12 @@ typed get/set calls, handler errors, a slow handler that times out
 (`DeadlineExceeded`), an orderly server stop that fails calls at once
 (`Unavailable`), and a restart picked up through a new instance id.
 
+`demo/scheduled_service_demo.cpp` runs both sides on one scheduler worker: a
+map component serves segment costs from a service trigger, and a planner
+fetches them one by one with `CallAsync`, triggered again by each reply. Its
+second part shows the same call made with a blocking `Call`, which times out
+because the map cannot get the worker the planner holds.
+
 ## Limits
 
 - Requests and replies are bounded by the transport's message size; on

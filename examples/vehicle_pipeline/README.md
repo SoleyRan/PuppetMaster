@@ -60,19 +60,20 @@ cmake --install pm-build --prefix "$HOME/pm-install"
 # Each package in its own build tree, installed into one prefix.
 integration/build_all.sh "$HOME/pm-install" "$HOME/vehicle"
 
-# System check, then three processes over shared memory for 3 seconds.
+# Node checks, then puppet_master_launch runs the three processes over
+# shared memory for 3 seconds and stops them in reverse order.
 integration/run_pipeline.sh "$HOME/vehicle" "$HOME/pm-install/bin/puppet_master_config" 3
 ```
 
 `integration/system.json` is the system manifest: it lists the three nodes in
 start order with their binaries and config files, the import search path,
-and the deployment. `run_pipeline.sh` reads everything from it, so the
-system check, CI, and the launch use the same node list:
+and the deployment. `run_pipeline.sh` and the launcher read everything from
+it, so the system check, CI, and the launch use the same node list:
 
 ```bash
 export VEHICLE_PREFIX="$HOME/vehicle"   # the manifest's ${VEHICLE_PREFIX}
 puppet_master_config system validate integration/system.json
-puppet_master_config system commands integration/system.json   # start commands
+puppet_master_launch --log-dir logs integration/system.json   # Ctrl+C stops it
 ```
 
 To run a node by hand, point the import search path at the shared `share`

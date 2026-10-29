@@ -1,6 +1,7 @@
 #include <puppet_master/configuration/system_manifest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +36,22 @@ void CheckFields(const Json& value, const std::string& path, std::initializer_li
             Fail(path + "." + it.key() + " is unknown");
         }
     }
+}
+
+// A non-negative millisecond count, at most a day; leaves `output` alone if
+// the field is absent.
+void ReadMilliseconds(const Json& object, const char* key, const std::string& path,
+                      std::chrono::milliseconds& output)
+{
+    if (!object.contains(key)) {
+        return;
+    }
+    const auto& value = object.at(key);
+    constexpr std::int64_t kDay = 24LL * 60 * 60 * 1000;
+    if (!value.is_number_integer() || value.get<std::int64_t>() < 0 || value.get<std::int64_t>() > kDay) {
+        Fail(path + "." + key + " must be a non-negative integer of milliseconds, at most a day");
+    }
+    output = std::chrono::milliseconds(value.get<std::int64_t>());
 }
 
 std::string GetEnvironment(const std::string& name, bool& found)
@@ -212,7 +229,8 @@ SystemManifest Decode(const Json& root, const fs::path& file)
     std::size_t index = 0;
     for (const auto& value : *nodes) {
         const auto path = "$.nodes[" + std::to_string(index++) + "]";
-        CheckFields(value, path, {"name", "executable", "config", "arguments", "start_delay_ms"});
+        CheckFields(value, path, {"name", "executable", "config", "arguments", "start_delay_ms", "restart",
+                                  "max_restarts", "restart_delay_ms", "required", "stop_timeout_ms"});
         NodeManifest node;
         node.name = String(value, "name", path, true);
         auto status = core::ValidateName("node name", node.name);
@@ -231,12 +249,35 @@ SystemManifest Decode(const Json& root, const fs::path& file)
                 Fail(path + ".arguments: arguments must not contain tabs or line breaks");
             }
         }
-        if (value.contains("start_delay_ms")) {
-            const auto& delay = value.at("start_delay_ms");
-            if (!delay.is_number_integer() || delay.get<std::int64_t>() < 0) {
-                Fail(path + ".start_delay_ms must be a non-negative integer");
+        ReadMilliseconds(value, "start_delay_ms", path, node.start_delay);
+        ReadMilliseconds(value, "restart_delay_ms", path, node.restart_delay);
+        ReadMilliseconds(value, "stop_timeout_ms", path, node.stop_timeout);
+        if (value.contains("restart")) {
+            const auto& restart = value.at("restart");
+            const std::string text = restart.is_string() ? restart.get<std::string>() : std::string();
+            if (text == "never") {
+                node.restart = NodeManifest::Restart::kNever;
+            } else if (text == "on_failure") {
+                node.restart = NodeManifest::Restart::kOnFailure;
+            } else if (text == "always") {
+                node.restart = NodeManifest::Restart::kAlways;
+            } else {
+                Fail(path + ".restart must be \"never\", \"on_failure\", or \"always\"");
             }
-            node.start_delay = std::chrono::milliseconds(delay.get<std::int64_t>());
+        }
+        if (value.contains("max_restarts")) {
+            const auto& count = value.at("max_restarts");
+            if (!count.is_number_integer() || count.get<std::int64_t>() < 0
+                || count.get<std::int64_t>() > 1000000) {
+                Fail(path + ".max_restarts must be a non-negative integer");
+            }
+            node.max_restarts = static_cast<std::uint32_t>(count.get<std::int64_t>());
+        }
+        if (value.contains("required")) {
+            if (!value.at("required").is_boolean()) {
+                Fail(path + ".required must be true or false");
+            }
+            node.required = value.at("required").get<bool>();
         }
         node.executable = ResolveExecutable(manifest, base, node.executable);
         node.config = ResolveConfig(manifest, base, node, path);
@@ -271,6 +312,19 @@ std::vector<std::string> SystemManifest::CommandFor(const NodeManifest& node) co
     command.insert(command.end(), node.arguments.begin(), node.arguments.end());
     command.push_back(node.config);
     return command;
+}
+
+const char* ToString(NodeManifest::Restart restart) noexcept
+{
+    switch (restart) {
+        case NodeManifest::Restart::kNever:
+            return "never";
+        case NodeManifest::Restart::kOnFailure:
+            return "on_failure";
+        case NodeManifest::Restart::kAlways:
+            return "always";
+    }
+    return "unknown";
 }
 
 core::Result<SystemManifest> LoadSystemManifest(const std::string& path)

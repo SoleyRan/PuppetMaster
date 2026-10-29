@@ -111,3 +111,12 @@ target_link_libraries(puppet_master_service_demo
     PRIVATE
         PuppetMaster::PuppetMaster
 )
+
+add_executable(puppet_master_scheduled_service_demo
+    scheduled_service_demo.cpp
+)
+
+target_link_libraries(puppet_master_scheduled_service_demo
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)

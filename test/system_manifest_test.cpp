@@ -120,6 +120,12 @@ void LoadsAndResolves()
     const auto& producer = system.nodes[1];
     assert(producer.executable == tree.Path("bin/producer_node"));
 
+    // Supervision defaults: no restart, required, 5 s to stop.
+    assert(consumer.restart == config::NodeManifest::Restart::kNever);
+    assert(consumer.max_restarts == 5 && consumer.restart_delay == std::chrono::milliseconds(500));
+    assert(consumer.required && consumer.stop_timeout == std::chrono::milliseconds(5000));
+    assert(std::string(config::ToString(consumer.restart)) == "never");
+
     const auto command = system.CommandFor(producer);
     const std::vector<std::string> expected {tree.Path("bin/producer_node"), "--config-path", tree.Path("share"),
                                              "--deployment", tree.Path("etc/deploy.json"), "--describe",
@@ -197,9 +203,44 @@ void RejectsInvalidManifests()
     check(R"json({"nodes": [{"name": "a", "executable": "a", "config": "share/producer/producer.json",
                              "arguments": ["a\tb"]}]})json",
           "must not contain tabs");
+    const std::string base = R"json({"name": "a", "executable": "a", "config": "share/producer/producer.json", )json";
+    check(R"json({"nodes": [)json" + base + R"json("restart": "sometimes"}]})json",
+          "restart must be \"never\", \"on_failure\", or \"always\"");
+    check(R"json({"nodes": [)json" + base + R"json("restart": 1}]})json", "restart must be");
+    check(R"json({"nodes": [)json" + base + R"json("max_restarts": -1}]})json",
+          "max_restarts must be a non-negative integer");
+    check(R"json({"nodes": [)json" + base + R"json("required": "yes"}]})json", "required must be true or false");
+    check(R"json({"nodes": [)json" + base + R"json("stop_timeout_ms": 1.5}]})json",
+          "stop_timeout_ms must be a non-negative integer");
+    check(R"json({"nodes": [)json" + base + R"json("restart_delay_ms": 100000000}]})json", "at most a day");
     check("{not json", "parse");
 
     assert(config::LoadSystemManifest(tree.Path("absent.json")).status().code() == core::StatusCode::kUnavailable);
+}
+
+void ReadsSupervision()
+{
+    TempTree tree;
+    WriteSystem(tree);
+    const auto path = tree.Write("system.json", R"json({
+        "config_paths": ["share"],
+        "nodes": [
+            {"name": "producer", "executable": "p", "config": "producer/producer.json",
+             "restart": "on_failure", "max_restarts": 0, "restart_delay_ms": 250, "stop_timeout_ms": 1000},
+            {"name": "consumer", "executable": "c", "config": "consumer/consumer.json",
+             "restart": "always", "required": false}
+        ]})json");
+    auto manifest = config::LoadSystemManifest(path);
+    assert(manifest.ok());
+    const auto& producer = manifest.value().nodes[0];
+    assert(producer.restart == config::NodeManifest::Restart::kOnFailure);
+    assert(producer.max_restarts == 0);  // no limit
+    assert(producer.restart_delay == std::chrono::milliseconds(250));
+    assert(producer.stop_timeout == std::chrono::milliseconds(1000) && producer.required);
+    const auto& consumer = manifest.value().nodes[1];
+    assert(consumer.restart == config::NodeManifest::Restart::kAlways && !consumer.required);
+    assert(std::string(config::ToString(consumer.restart)) == "always");
+    assert(std::string(config::ToString(producer.restart)) == "on_failure");
 }
 
 }  // namespace
@@ -209,5 +250,6 @@ int main()
     LoadsAndResolves();
     SystemProblemsNameNodes();
     RejectsInvalidManifests();
+    ReadsSupervision();
     return 0;
 }
