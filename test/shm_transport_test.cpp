@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -513,6 +515,66 @@ int WaitChild(ChildHandle child)
 }
 #endif
 
+#ifndef _WIN32
+// Whether this process holds a participant entry in the topic's segment.
+bool Attached(const std::string& topic)
+{
+    auto segments = shm::ListSegments(kDomain);
+    assert(segments.ok());
+    for (const auto& segment : segments.value()) {
+        if (segment.topic == topic) {
+            const auto self = static_cast<std::uint32_t>(getpid());
+            return std::find(segment.live_pids.begin(), segment.live_pids.end(), self) != segment.live_pids.end();
+        }
+    }
+    return false;
+}
+#endif
+
+// A topic is released with its last endpoint in this process: the mapping
+// and the participant entry go. Linux keeps the segment for other processes;
+// Windows frees it with its last handle.
+void TopicIsReleasedWithItsLastEndpoint()
+{
+    auto shm_transport = MakeTransport();
+    const auto topic = UniqueTopic("released");
+    TopicCleanup cleanup {topic};
+    {
+        auto writer = shm_transport->CreateWriter(Endpoint(topic));
+        auto reader = shm_transport->CreateReader(Endpoint(topic));
+        assert(writer.ok() && reader.ok());
+        // A reader alone keeps the topic: a writer created later reaches it.
+        writer.value().reset();
+        auto later = shm_transport->CreateWriter(Endpoint(topic));
+        assert(later.ok());
+        Write(*later.value(), "still here");
+        auto message = ReadWait(*reader.value());
+        assert(message.ok() && Text(message.value()) == "still here");
+#ifndef _WIN32
+        assert(Attached(topic));
+#endif
+    }
+    // The reader's dispatcher may hold the topic for one more wait.
+#ifndef _WIN32
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (Attached(topic)) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(5ms);
+    }
+#else
+    // Freed with the last handle, so another geometry is accepted.
+    shm::Options options;
+    options.topics[topic] = shm::TopicOptions {128, 4};
+    auto other = MakeTransport(options);
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!other->CreateWriter(Endpoint(topic)).ok()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(5ms);
+    }
+#endif
+    assert(shm_transport->Close().ok());
+}
+
 constexpr int kCrossProcessMessages = 200;
 
 // Child: publish until the parent acknowledges every message.
@@ -644,6 +706,7 @@ int main(int argc, char** argv)
     ReleaseFromCallback();
     RuntimeRegistration();
     WriteWithFillsInPlace();
+    TopicIsReleasedWithItsLastEndpoint();
     CrossProcessDelivery(argv[0]);
     CrossProcessVersionMismatch(argv[0]);
     std::cout << "shm transport tests passed\n";

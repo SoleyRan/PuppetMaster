@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,6 +50,8 @@ std::size_t QueueCapacity(const core::MessagePolicy& policy)
 }
 
 }  // namespace
+
+class TopicChannel;
 
 class InMemoryReader final : public Reader {
 public:
@@ -205,8 +208,9 @@ public:
         bool closed_ {false};
     };
 
-    explicit InMemoryReader(std::shared_ptr<Mailbox> mailbox)
-        : mailbox_(std::move(mailbox))
+    // Holding the channel keeps the topic alive while this reader exists.
+    InMemoryReader(std::shared_ptr<Mailbox> mailbox, std::shared_ptr<TopicChannel> channel)
+        : mailbox_(std::move(mailbox)), channel_(std::move(channel))
     {
     }
 
@@ -244,6 +248,7 @@ public:
 
 private:
     std::shared_ptr<Mailbox> mailbox_;
+    std::shared_ptr<TopicChannel> channel_;
 };
 
 class TopicChannel final {
@@ -372,7 +377,10 @@ private:
 
 struct InMemoryTransport::State {
     mutable std::mutex mutex;
-    std::map<std::string, std::shared_ptr<TopicChannel>> channels;
+    // Readers and writers own their channel; the map only finds it, so a
+    // topic is freed with its last endpoint and many short-lived topics do
+    // not accumulate. Expired entries are swept on each new endpoint.
+    std::map<std::string, std::weak_ptr<TopicChannel>> channels;
     bool open {false};
 
     core::Status Open()
@@ -391,7 +399,9 @@ struct InMemoryTransport::State {
 
         open = false;
         for (const auto& entry : channels) {
-            entry.second->Close();
+            if (auto channel = entry.second.lock()) {
+                channel->Close();
+            }
         }
         channels.clear();
         return core::Status::Ok();
@@ -416,16 +426,24 @@ struct InMemoryTransport::State {
                 core::Status::FailedPrecondition("in-memory transport must be open before creating endpoints"));
         }
 
+        for (auto entry = channels.begin(); entry != channels.end();) {
+            entry = entry->second.expired() ? channels.erase(entry) : std::next(entry);
+        }
+
         const auto& key = endpoint.topic.name.str();
         auto found = channels.find(key);
         if (found != channels.end()) {
-            if (!found->second->MatchesDescriptor(endpoint.message)) {
-                return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(
-                    core::Status::InvalidArgument(
-                        "in-memory topic " + endpoint.topic.name.str() + " carries "
-                        + found->second->descriptor().ToString() + ", not " + endpoint.message.ToString()));
+            auto existing = found->second.lock();
+            if (existing) {
+                if (!existing->MatchesDescriptor(endpoint.message)) {
+                    return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(
+                        core::Status::InvalidArgument(
+                            "in-memory topic " + endpoint.topic.name.str() + " carries "
+                            + existing->descriptor().ToString() + ", not " + endpoint.message.ToString()));
+                }
+                return existing;
             }
-            return found->second;
+            channels.erase(found);  // its last endpoint went away since the sweep
         }
 
         auto channel = std::make_shared<TopicChannel>(endpoint.topic.name, endpoint.message);
@@ -503,7 +521,8 @@ core::Result<ReaderPtr> InMemoryTransport::CreateReader(const EndpointConfig& en
         return core::Result<ReaderPtr>::FromStatus(std::move(status));
     }
 
-    return std::static_pointer_cast<Reader>(std::make_shared<InMemoryReader>(std::move(mailbox)));
+    return std::static_pointer_cast<Reader>(
+        std::make_shared<InMemoryReader>(std::move(mailbox), std::move(channel).value()));
 }
 
 core::Result<WriterPtr> InMemoryTransport::CreateWriter(const EndpointConfig& endpoint)

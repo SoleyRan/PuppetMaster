@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -616,7 +617,10 @@ core::Result<std::vector<SegmentInfo>> RemoveUnusedSegments(std::optional<core::
 struct ShmTransport::Impl {
     mutable std::mutex mutex;
     bool open {false};
-    std::map<std::string, std::shared_ptr<TopicState>> topics;
+    // Readers and writers own their topic; the map only finds it, so a topic
+    // is unmapped, and its participant entry released, with its last
+    // endpoint in this process. Expired entries are swept on each new one.
+    std::map<std::string, std::weak_ptr<TopicState>> topics;
 };
 
 ShmTransport::ShmTransport(core::TransportName name, Options options)
@@ -664,14 +668,16 @@ core::Status ShmTransport::Open()
 
 core::Status ShmTransport::Close() noexcept
 {
-    std::map<std::string, std::shared_ptr<TopicState>> topics;
+    std::map<std::string, std::weak_ptr<TopicState>> topics;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->open = false;
         topics.swap(impl_->topics);
     }
     for (auto& entry : topics) {
-        entry.second->Close();
+        if (auto topic = entry.second.lock()) {
+            topic->Close();
+        }
     }
     return core::Status::Ok();
 }
@@ -710,7 +716,7 @@ core::Status ShmTransport::ValidateEndpoint(const EndpointConfig& endpoint) cons
 namespace {
 
 core::Result<std::shared_ptr<TopicState>> GetOrOpenTopic(
-    std::mutex& mutex, bool& open, std::map<std::string, std::shared_ptr<TopicState>>& topics,
+    std::mutex& mutex, bool& open, std::map<std::string, std::weak_ptr<TopicState>>& topics,
     const Options& options, const EndpointConfig& endpoint, const char* what)
 {
     using ResultType = core::Result<std::shared_ptr<TopicState>>;
@@ -719,15 +725,22 @@ core::Result<std::shared_ptr<TopicState>> GetOrOpenTopic(
         return ResultType::FromStatus(core::Status::FailedPrecondition(
             std::string("shm transport must be open before creating ") + what));
     }
+    for (auto entry = topics.begin(); entry != topics.end();) {
+        entry = entry->second.expired() ? topics.erase(entry) : std::next(entry);
+    }
     const auto& key = endpoint.topic.name.str();
     const auto found = topics.find(key);
     if (found != topics.end()) {
-        if (found->second->descriptor() != endpoint.message) {
-            return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm topic " + key + " carries " + found->second->descriptor().ToString() + ", not "
-                + endpoint.message.ToString()));
+        auto existing = found->second.lock();
+        if (existing) {
+            if (existing->descriptor() != endpoint.message) {
+                return ResultType::FromStatus(core::Status::InvalidArgument(
+                    "shm topic " + key + " carries " + existing->descriptor().ToString() + ", not "
+                    + endpoint.message.ToString()));
+            }
+            return ResultType(std::move(existing));
         }
-        return ResultType(found->second);
+        topics.erase(found);  // its last endpoint went away since the sweep
     }
     auto topic = TopicState::Open(options.domain_id, endpoint, options.ForTopic(key), options.wait_poll_interval);
     if (!topic.ok()) {

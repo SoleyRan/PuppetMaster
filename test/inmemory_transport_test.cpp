@@ -297,6 +297,36 @@ void UnboundedQueueKeepsAllMessages()
 }
 
 }  // namespace
+// A topic is freed with its last endpoint: afterwards the same name can carry
+// another type, which a live topic refuses.
+void TopicIsFreedWithItsLastEndpoint()
+{
+    auto transport = MakeOpenTransport();
+    const auto endpoint = MakeEndpoint("/inmemory/freed", {});
+    auto other = endpoint;
+    other.message.type_name = "test.Other";
+    {
+        auto writer = transport->CreateWriter(endpoint);
+        auto reader = transport->CreateReader(endpoint);
+        assert(writer.ok() && reader.ok());
+        assert(transport->CreateReader(other).status().code() == core::StatusCode::kInvalidArgument);
+        // A reader alone keeps the topic: a writer created later reaches it.
+        writer.value().reset();
+        auto later = transport->CreateWriter(endpoint);
+        assert(later.ok());
+        assert(WriteString(later.value(), "still here").ok());
+        assert(ReadString(reader.value()) == "still here");
+    }
+    auto reused = transport->CreateReader(other);
+    assert(reused.ok());
+
+    // Many short-lived topics, as per-client reply topics are.
+    for (int index = 0; index < 1000; ++index) {
+        auto writer = transport->CreateWriter(MakeEndpoint("/inmemory/many/" + std::to_string(index), {}));
+        assert(writer.ok());
+    }
+    assert(transport->Close().ok());
+}
 
 int main()
 {
@@ -309,5 +339,6 @@ int main()
     FullReaderDoesNotPreventDeliveryToOtherReaders();
     BoundedQueueDropsOldestMessage();
     UnboundedQueueKeepsAllMessages();
+    TopicIsFreedWithItsLastEndpoint();
     return 0;
 }

@@ -140,6 +140,8 @@ struct ReaderState {
     std::uint64_t generation {0};
     bool closed {false};
 
+    std::string topic;  // the wire name, for the transport's topic sweep
+
     std::mutex shutdown_mutex;
     std::mutex entity_mutex;
     dds::Subscriber* subscriber {nullptr};
@@ -176,6 +178,7 @@ struct ReaderState {
 };
 
 struct WriterState {
+    std::string topic;  // the wire name, for the transport's topic sweep
     std::mutex mutex;
     dds::Publisher* publisher {nullptr};
     dds::DataWriter* writer {nullptr};
@@ -395,12 +398,42 @@ struct FastDdsTransport::Impl {
     std::vector<std::weak_ptr<ReaderState>> readers;
     std::vector<std::weak_ptr<WriterState>> writers;
 
+    // Caller must hold mutex. Deletes the topics no live reader or writer
+    // uses, so many short-lived topics do not accumulate in the participant.
+    // A state still alive counts as a use even after its Shutdown, which is
+    // conservative: such a topic goes on the next sweep. delete_topic refuses
+    // a topic that still has DDS entities; that entry is kept.
+    void SweepTopics()
+    {
+        Prune(readers);
+        Prune(writers);
+        std::set<std::string> used;
+        for (const auto& weak : readers) {
+            if (auto state = weak.lock()) {
+                used.insert(state->topic);
+            }
+        }
+        for (const auto& weak : writers) {
+            if (auto state = weak.lock()) {
+                used.insert(state->topic);
+            }
+        }
+        for (auto entry = topics.begin(); entry != topics.end();) {
+            if (used.count(entry->first) == 0 && participant->delete_topic(entry->second.topic) == kRetOk) {
+                entry = topics.erase(entry);
+            } else {
+                ++entry;
+            }
+        }
+    }
+
     // Caller must hold mutex.
     core::Result<dds::Topic*> EnsureTopic(const EndpointConfig& endpoint)
     {
         const std::string topic_name = endpoint.topic.name.str();
         const std::string& type_name = endpoint.message.type_name;
 
+        SweepTopics();
         auto found = topics.find(topic_name);
         if (found != topics.end()) {
             if (found->second.message != endpoint.message) {
@@ -652,6 +685,7 @@ core::Result<ReaderPtr> FastDdsTransport::CreateReader(const EndpointConfig& end
     qos.endpoint().history_memory_policy = rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
 
     auto state = std::make_shared<ReaderState>();
+    state->topic = endpoint.topic.name.str();
     state->subscriber = impl_->subscriber;
     state->reader = impl_->subscriber->create_datareader(topic.value(), qos, &state->listener);
     if (state->reader == nullptr) {
@@ -694,6 +728,7 @@ core::Result<WriterPtr> FastDdsTransport::CreateWriter(const EndpointConfig& end
     }
 
     auto state = std::make_shared<WriterState>();
+    state->topic = endpoint.topic.name.str();
     state->publisher = impl_->publisher;
     state->writer = impl_->publisher->create_datawriter(topic.value(), qos);
     if (state->writer == nullptr) {
