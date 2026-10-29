@@ -83,7 +83,7 @@ long Futex(std::atomic<std::uint32_t>* word, int op, std::uint32_t value, const 
 }  // namespace
 
 core::Result<std::unique_ptr<SharedRegion>> SharedRegion::CreateOrOpen(
-    const std::string& name, std::size_t size, core::Nanoseconds timeout)
+    const std::string& name, std::size_t size, core::Nanoseconds timeout, bool create)
 {
     using ResultType = core::Result<std::unique_ptr<SharedRegion>>;
     if (size == 0) {
@@ -91,7 +91,7 @@ core::Result<std::unique_ptr<SharedRegion>> SharedRegion::CreateOrOpen(
     }
 
     bool created = true;
-    int fd = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+    int fd = create ? shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600) : -1;
     if (fd >= 0) {
         if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
             const int error = errno;
@@ -99,11 +99,15 @@ core::Result<std::unique_ptr<SharedRegion>> SharedRegion::CreateOrOpen(
             shm_unlink(name.c_str());
             return ResultType::FromStatus(core::Status::ResourceExhausted(ErrnoMessage("ftruncate", error)));
         }
-    } else if (errno == EEXIST) {
+    } else if (!create || errno == EEXIST) {
         created = false;
         fd = shm_open(name.c_str(), O_RDWR, 0600);
         if (fd < 0) {
-            return ResultType::FromStatus(core::Status::Unavailable(ErrnoMessage("shm_open", errno)));
+            const int error = errno;
+            if (!create && error == ENOENT) {
+                return ResultType::FromStatus(core::Status::NotFound("shared region " + name + " does not exist"));
+            }
+            return ResultType::FromStatus(core::Status::Unavailable(ErrnoMessage("shm_open", error)));
         }
         // The creator sizes the region right after creating it.
         const auto deadline = core::SteadyClock::now() + timeout;

@@ -53,6 +53,20 @@ enum class DependencyPolicy : std::uint8_t {
     kAny,
 };
 
+// Who a topic belongs to.
+enum class TopicLifetime : std::uint8_t {
+    // Any endpoint creates the topic; it outlives them all.
+    kShared = 0,
+    // The topic belongs to its one reader, such as a service client's reply
+    // topic: the reader creates it, writers only attach to it and fail with
+    // NotFound when the reader is gone, and what the topic leaves outside the
+    // process (a shared-memory segment) is removed when the reader closes.
+    // In memory and in shared memory. FastDDS leaves nothing behind and
+    // cannot tell a missing reader from an undiscovered one, so it treats
+    // the topic as shared; use Writer::MatchedReaderCount there.
+    kReaderOwned,
+};
+
 namespace detail {
 
 inline std::string CopyStringView(std::string_view value)
@@ -101,6 +115,17 @@ inline const char* ToString(TriggerKind kind) noexcept
             return "manual";
         case TriggerKind::kService:
             return "service";
+    }
+    return "unknown";
+}
+
+inline const char* ToString(TopicLifetime lifetime) noexcept
+{
+    switch (lifetime) {
+        case TopicLifetime::kShared:
+            return "shared";
+        case TopicLifetime::kReaderOwned:
+            return "reader_owned";
     }
     return "unknown";
 }
@@ -213,6 +238,7 @@ struct TopicSpec {
     TopicName name;
     TransportKind transport {TransportKind::kInMemory};
     MessagePolicy message_policy;
+    TopicLifetime lifetime {TopicLifetime::kShared};
 
     Status Validate() const
     {

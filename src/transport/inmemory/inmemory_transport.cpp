@@ -253,14 +253,26 @@ private:
 
 class TopicChannel final {
 public:
-    TopicChannel(core::TopicName topic, MessageDescriptor descriptor)
-        : topic_(std::move(topic)), descriptor_(std::move(descriptor))
+    TopicChannel(core::TopicName topic, MessageDescriptor descriptor, core::TopicLifetime lifetime)
+        : topic_(std::move(topic)), descriptor_(std::move(descriptor)), lifetime_(lifetime)
     {
     }
 
     const MessageDescriptor& descriptor() const noexcept
     {
         return descriptor_;
+    }
+
+    core::TopicLifetime lifetime() const noexcept
+    {
+        return lifetime_;
+    }
+
+    // A reader-owned topic whose readers have all gone: writers fail.
+    bool Gone()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return GoneLocked();
     }
 
     bool MatchesDescriptor(const MessageDescriptor& descriptor) const
@@ -276,6 +288,7 @@ public:
         }
 
         readers_.push_back(mailbox);
+        had_reader_ = true;
         return core::Status::Ok();
     }
 
@@ -293,6 +306,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (closed_) {
                 return core::Status::FailedPrecondition("in-memory topic channel is closed: " + topic_.str());
+            }
+            if (GoneLocked()) {
+                return core::Status::NotFound("in-memory topic " + topic_.str() + " was closed by its reader");
             }
 
             message.payload = CopyBytes(payload);
@@ -339,11 +355,23 @@ public:
     }
 
 private:
+    // Gone once it had a reader and every reader has closed. A channel whose
+    // creating reader has not registered its mailbox yet is not gone.
+    bool GoneLocked() const
+    {
+        if (lifetime_ != core::TopicLifetime::kReaderOwned || !had_reader_) {
+            return false;
+        }
+        return std::none_of(readers_.begin(), readers_.end(), [](const auto& reader) { return !reader.expired(); });
+    }
+
     core::TopicName topic_;
     MessageDescriptor descriptor_;
+    core::TopicLifetime lifetime_;
     std::mutex mutex_;
     std::vector<std::weak_ptr<InMemoryReader::Mailbox>> readers_;
     core::SequenceNumber next_sequence_ {1};
+    bool had_reader_ {false};
     bool closed_ {false};
 };
 
@@ -413,8 +441,11 @@ struct InMemoryTransport::State {
         return open;
     }
 
-    core::Result<std::shared_ptr<TopicChannel>> GetOrCreateChannel(const EndpointConfig& endpoint)
+    // Writers of a reader-owned topic only attach: they fail with NotFound
+    // when its reader has not created it, or has closed it.
+    core::Result<std::shared_ptr<TopicChannel>> GetOrCreateChannel(const EndpointConfig& endpoint, bool writer)
     {
+        const bool reader_owned = endpoint.topic.lifetime == core::TopicLifetime::kReaderOwned;
         auto status = ValidateInMemoryEndpoint(endpoint);
         if (!status.ok()) {
             return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(std::move(status));
@@ -435,18 +466,31 @@ struct InMemoryTransport::State {
         if (found != channels.end()) {
             auto existing = found->second.lock();
             if (existing) {
+                if (existing->lifetime() != endpoint.topic.lifetime) {
+                    return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(core::Status::InvalidArgument(
+                        "in-memory topic " + key + " is " + core::ToString(existing->lifetime()) + ", not "
+                        + core::ToString(endpoint.topic.lifetime)));
+                }
                 if (!existing->MatchesDescriptor(endpoint.message)) {
                     return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(
                         core::Status::InvalidArgument(
                             "in-memory topic " + endpoint.topic.name.str() + " carries "
                             + existing->descriptor().ToString() + ", not " + endpoint.message.ToString()));
                 }
-                return existing;
+                if (!existing->Gone()) {
+                    return existing;
+                }
+                // A new reader of a closed reader-owned topic starts a fresh
+                // one; writers still holding the old one keep failing.
             }
-            channels.erase(found);  // its last endpoint went away since the sweep
+            channels.erase(found);
         }
 
-        auto channel = std::make_shared<TopicChannel>(endpoint.topic.name, endpoint.message);
+        if (writer && reader_owned) {
+            return core::Result<std::shared_ptr<TopicChannel>>::FromStatus(
+                core::Status::NotFound("in-memory topic " + key + " has no reader"));
+        }
+        auto channel = std::make_shared<TopicChannel>(endpoint.topic.name, endpoint.message, endpoint.topic.lifetime);
         channels.emplace(key, channel);
         return channel;
     }
@@ -506,7 +550,7 @@ core::Status InMemoryTransport::ValidateEndpoint(const EndpointConfig& endpoint)
 
 core::Result<ReaderPtr> InMemoryTransport::CreateReader(const EndpointConfig& endpoint)
 {
-    auto channel = state_->GetOrCreateChannel(endpoint);
+    auto channel = state_->GetOrCreateChannel(endpoint, false);
     if (!channel.ok()) {
         return core::Result<ReaderPtr>::FromStatus(channel.status());
     }
@@ -527,7 +571,7 @@ core::Result<ReaderPtr> InMemoryTransport::CreateReader(const EndpointConfig& en
 
 core::Result<WriterPtr> InMemoryTransport::CreateWriter(const EndpointConfig& endpoint)
 {
-    auto channel = state_->GetOrCreateChannel(endpoint);
+    auto channel = state_->GetOrCreateChannel(endpoint, true);
     if (!channel.ok()) {
         return core::Result<WriterPtr>::FromStatus(channel.status());
     }
