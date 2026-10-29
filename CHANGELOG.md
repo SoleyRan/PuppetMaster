@@ -54,6 +54,14 @@ the minor version in their soname (`libpuppet_master.so.0.2`), and
 - The vehicle pipeline example starts its system with
   `puppet_master_launch`.
 
+### Fixed
+
+- With `-DBUILD_SHARED_LIBS=ON` on Linux and macOS, the installed tools
+  failed to start unless `LD_LIBRARY_PATH` pointed at the install's `lib`
+  directory (since 0.2.0). Installed tools and libraries now carry a
+  relative RPATH (`$ORIGIN/../lib` and `$ORIGIN`), so they work from any
+  prefix, including a moved one. Set `CMAKE_INSTALL_RPATH` to override.
+
 ## 0.2.0
 
 ### Added
