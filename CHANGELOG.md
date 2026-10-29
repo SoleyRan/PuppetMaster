@@ -2,10 +2,16 @@
 
 PuppetMaster follows [Semantic Versioning](https://semver.org/). Before 1.0,
 each minor release may break the API and the ABI: the shared libraries carry
-the minor version in their soname (`libpuppet_master.so.0.2`), and
-`find_package(PuppetMaster 0.2)` accepts only 0.2.x.
+the minor version in their soname (`libpuppet_master.so.0.3`), and
+`find_package(PuppetMaster 0.3)` accepts only 0.3.x.
 
-## Unreleased
+## 0.3.0
+
+Rebuild everything that links PuppetMaster: the soname is now
+`libpuppet_master.so.0.3`, and `find_package(PuppetMaster 0.2)` no longer
+finds this release. The shared-memory layout, the service wire protocol, and
+the JSON configuration of 0.2 are unchanged, so 0.2 and 0.3 processes still
+talk to each other, and 0.2 configurations still load.
 
 ### Added
 
