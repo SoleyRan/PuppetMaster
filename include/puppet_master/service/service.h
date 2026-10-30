@@ -19,8 +19,9 @@ class RuntimeContext;
 }
 
 // Request/reply services over pub/sub topics. A service `/a/b` uses the
-// topics `/a/b/request`, `/a/b/reply`, and `/a/b/presence`, so it works on
-// every transport. See docs/services.md.
+// topics `/a/b/request` and `/a/b/presence`, and one reply topic per client,
+// `/a/b/reply/<client id in 16 hex digits>`, so it works on every transport.
+// See docs/services.md.
 namespace puppet_master::service {
 
 struct ServiceSpec {
@@ -40,15 +41,22 @@ struct ServiceSpec {
     PUPPET_MASTER_API core::Status Validate() const;
 };
 
-// Endpoints of the three topics, for transports and configuration tools
+// Endpoints of the service's topics, for transports and configuration tools
 // that need to know them, such as a deployment file or ValidateSystem.
 struct ServiceEndpoints {
     transport::EndpointConfig request;
+    // The per-client reply topics share this endpoint, reader-owned, under
+    // names that append "/<client id>" to its name; see ReplyEndpointFor.
     transport::EndpointConfig reply;
     transport::EndpointConfig presence;
 };
 
 PUPPET_MASTER_API core::Result<ServiceEndpoints> EndpointsFor(const ServiceSpec& spec);
+
+// The reply topic of one client: `<service>/reply/<client_id in 16 hex
+// digits>`. The client's reader owns it; the server writes to it.
+PUPPET_MASTER_API core::Result<transport::EndpointConfig> ReplyEndpointFor(
+    const ServiceSpec& spec, std::uint64_t client_id);
 
 struct Request {
     transport::ByteView payload;
@@ -76,6 +84,10 @@ enum class ServeMode : std::uint8_t {
 
 struct ServerOptions {
     ServeMode mode {ServeMode::kOwnThread};
+    // The server opens a reply writer per client on its first reply and
+    // closes it after this long without one. Closing it lets the transport
+    // free the client's reply topic, also when the client crashed.
+    core::Nanoseconds reply_idle_timeout {std::chrono::seconds(30)};
 };
 
 class PUPPET_MASTER_API Server final {

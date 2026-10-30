@@ -82,12 +82,25 @@ int RunServer(const std::string& name)
     return 0;
 }
 
+// Child: call once, then wait to be killed, leaving its reply topic behind
+// as a crashed client would.
+int RunClient(const std::string& name)
+{
+    auto context = MakeRuntime();
+    auto client = service::Client::Create(*context, Spec(name));
+    if (!client.ok() || !client.value()->Call(transport::ByteView::From("hi", 2), 5s).ok()) {
+        return 2;
+    }
+    std::this_thread::sleep_for(30s);
+    return 0;
+}
+
 #ifdef _WIN32
 using ChildHandle = HANDLE;
 
-ChildHandle StartServer(const std::string& executable, const std::string& name)
+ChildHandle StartChild(const std::string& executable, const char* mode, const std::string& name)
 {
-    std::string command = "\"" + executable + "\" --server " + name;
+    std::string command = "\"" + executable + "\" " + mode + " " + name;
     STARTUPINFOA startup {};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process {};
@@ -107,12 +120,12 @@ void Kill(ChildHandle child)
 #else
 using ChildHandle = pid_t;
 
-ChildHandle StartServer(const std::string& executable, const std::string& name)
+ChildHandle StartChild(const std::string& executable, const char* mode, const std::string& name)
 {
     const pid_t pid = fork();
     assert(pid >= 0);
     if (pid == 0) {
-        execl(executable.c_str(), executable.c_str(), "--server", name.c_str(), nullptr);
+        execl(executable.c_str(), executable.c_str(), mode, name.c_str(), nullptr);
         std::_Exit(127);
     }
     return pid;
@@ -123,6 +136,64 @@ void Kill(ChildHandle child)
     kill(child, SIGKILL);
     int status = 0;
     waitpid(child, &status, 0);
+}
+#endif
+
+ChildHandle StartServer(const std::string& executable, const std::string& name)
+{
+    return StartChild(executable, "--server", name);
+}
+
+#ifndef _WIN32
+// Reply segments of `service` on this host, by topic name.
+std::vector<std::string> ReplySegments(const std::string& service)
+{
+    auto segments = shm::ListSegments(kDomain);
+    assert(segments.ok());
+    std::vector<std::string> topics;
+    for (const auto& segment : segments.value()) {
+        if (segment.topic.rfind(service + "/reply/", 0) == 0) {
+            topics.push_back(segment.topic);
+        }
+    }
+    return topics;
+}
+
+void WaitUntilNoReplySegments(const std::string& service)
+{
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!ReplySegments(service).empty()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(10ms);
+    }
+}
+
+// A crashed client cannot remove its reply topic. The server closes its
+// writer for that client after reply_idle_timeout and, being the last one
+// attached, removes the segment, so nothing is left in /dev/shm.
+void CrashedClientLeavesNoSegment(const std::string& executable)
+{
+    const auto name = "/pm/service-crash/" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    RemoveSegments(name);
+    auto context = MakeRuntime();
+    service::ServerOptions options;
+    options.reply_idle_timeout = 100ms;
+    auto server = service::Server::Create(*context, Spec(name), [](const service::Request& request) {
+        return core::Result<transport::ByteBuffer>(transport::ByteBuffer(request.payload.begin(), request.payload.end()));
+    }, options);
+    assert(server.ok());
+
+    auto child = StartChild(executable, "--client", name);
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (server.value()->handled_count() == 0) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(5ms);
+    }
+    assert(ReplySegments(name).size() == 1);
+    Kill(child);
+    WaitUntilNoReplySegments(name);
+    server.value()->Close();
+    RemoveSegments(name);
 }
 #endif
 
@@ -164,7 +235,14 @@ void CrossProcessCallsAndCrash(const std::string& executable)
     auto reply = c.Call(transport::ByteView::From("ok", 2), 2s);
     assert(reply.ok() && std::string(reply.value().begin(), reply.value().end()) == "ko");
     Kill(restarted);
+#ifndef _WIN32
+    // The client's own reply topic exists while it is open, and goes with it.
+    assert(ReplySegments(name).size() == 1);
+#endif
     c.Close();
+#ifndef _WIN32
+    WaitUntilNoReplySegments(name);
+#endif
     RemoveSegments(name);
 }
 
@@ -175,7 +253,13 @@ int main(int argc, char** argv)
     if (argc == 3 && std::string(argv[1]) == "--server") {
         return RunServer(argv[2]);
     }
+    if (argc == 3 && std::string(argv[1]) == "--client") {
+        return RunClient(argv[2]);
+    }
     CrossProcessCallsAndCrash(argv[0]);
+#ifndef _WIN32
+    CrashedClientLeavesNoSegment(argv[0]);
+#endif
     std::cout << "shm service tests passed\n";
     return 0;
 }

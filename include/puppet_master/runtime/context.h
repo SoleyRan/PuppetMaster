@@ -47,6 +47,8 @@ public:
 
     core::Status RegisterTransport(transport::TransportPtr transport);
     core::Result<transport::TransportPtr> FindTransport(const core::TransportName& name) const;
+    // The transport CreateReader and CreateWriter use for topics of `kind`.
+    core::Result<transport::TransportPtr> FindTransport(core::TransportKind kind) const;
     std::vector<core::TransportName> ListTransportNames() const;
 
     core::Status RegisterComponent(ComponentSpec spec);
