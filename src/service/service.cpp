@@ -7,6 +7,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <thread>
 #include <utility>
@@ -23,13 +24,24 @@ using transport::ByteView;
 
 constexpr std::uint32_t kRequestMagic = 0x51524d50;  // "PMRQ", little-endian
 constexpr std::uint32_t kReplyMagic = 0x50524d50;    // "PMRP"
-constexpr std::uint16_t kHeaderVersion = 1;
+// 2: replies go to each client's own topic, not one shared reply topic.
+constexpr std::uint16_t kHeaderVersion = 2;
 constexpr std::size_t kHeaderSize = 32;
 constexpr std::size_t kPresenceSize = 16;
+// The protocol version is also in the presence type name, so processes of
+// different protocol versions do not see each other at all: on FastDDS,
+// which matches types by name only, as on the other transports, where the
+// endpoint is refused. A call then fails with Unavailable instead of waiting
+// for a reply that goes to a topic the other side does not read.
+constexpr const char* kPresenceType = "service.Presence.v2";
+constexpr std::uint32_t kPresenceVersion = 2;
 // Heartbeat sequences start at 1; 0 announces that the server stopped.
 constexpr std::uint64_t kOfflineSequence = 0;
 // How often blocking loops wake to notice Close(), at most.
 constexpr auto kPollInterval = std::chrono::milliseconds(20);
+// How long a server waits for a new reply writer to reach its client's
+// reader, on transports that discover peers asynchronously.
+constexpr auto kReplyMatchTimeout = std::chrono::seconds(1);
 
 core::TimePoint Now()
 {
@@ -157,6 +169,27 @@ core::Result<core::TopicName> SubTopic(const core::TopicName& service, const cha
     return core::TopicName::Create(service.str() + "/" + suffix);
 }
 
+std::string Hex16(std::uint64_t value)
+{
+    static constexpr char kDigits[] = "0123456789abcdef";
+    std::string text(16, '0');
+    for (std::size_t index = 16; index-- > 0; value >>= 4) {
+        text[index] = kDigits[value & 0xf];
+    }
+    return text;
+}
+
+// One client's reply topic: the service's reply endpoint, renamed.
+core::Result<transport::EndpointConfig> ReplyEndpoint(transport::EndpointConfig base, std::uint64_t client_id)
+{
+    auto name = core::TopicName::Create(base.topic.name.str() + "/" + Hex16(client_id));
+    if (!name.ok()) {
+        return core::Result<transport::EndpointConfig>::FromStatus(name.status());
+    }
+    base.topic.name = std::move(name).value();
+    return core::Result<transport::EndpointConfig>(std::move(base));
+}
+
 std::string Describe(const ServiceSpec& spec)
 {
     return "service " + spec.name.str();
@@ -197,7 +230,10 @@ core::Result<ServiceEndpoints> EndpointsFor(const ServiceSpec& spec)
     auto request = SubTopic(spec.name, "request");
     auto reply = SubTopic(spec.name, "reply");
     auto presence = SubTopic(spec.name, "presence");
-    for (const auto* name : {&request, &reply, &presence}) {
+    // The longest name the service uses, so a name too long for its
+    // per-client reply topics fails here, not at the first client.
+    auto per_client = SubTopic(spec.name, "reply/0000000000000000");
+    for (const auto* name : {&request, &reply, &presence, &per_client}) {
         if (!name->ok()) {
             return ResultType::FromStatus(name->status());
         }
@@ -215,14 +251,28 @@ core::Result<ServiceEndpoints> EndpointsFor(const ServiceSpec& spec)
     // lost one, so best effort is enough.
     core::MessagePolicy latest;
 
+    // Replies: each client reads its own topic, which it owns, so it never
+    // receives other clients' replies, and a busy client cannot push them
+    // out of a shared queue.
     return ResultType(ServiceEndpoints {
         transport::EndpointConfig {core::TopicSpec {request.value(), spec.transport, queued},
                                    Prefixed("service.request:", spec.request)},
-        transport::EndpointConfig {core::TopicSpec {reply.value(), spec.transport, queued},
-                                   Prefixed("service.reply:", spec.reply)},
+        transport::EndpointConfig {
+            core::TopicSpec {reply.value(), spec.transport, queued, core::TopicLifetime::kReaderOwned},
+            Prefixed("service.reply:", spec.reply)},
         transport::EndpointConfig {core::TopicSpec {presence.value(), spec.transport, latest},
-                                   transport::MessageDescriptor {"service.Presence", "application/x-puppetmaster-presence", 1}},
+                                   transport::MessageDescriptor {kPresenceType, "application/x-puppetmaster-presence",
+                                                                 kPresenceVersion}},
     });
+}
+
+core::Result<transport::EndpointConfig> ReplyEndpointFor(const ServiceSpec& spec, std::uint64_t client_id)
+{
+    auto endpoints = EndpointsFor(spec);
+    if (!endpoints.ok()) {
+        return core::Result<transport::EndpointConfig>::FromStatus(endpoints.status());
+    }
+    return ReplyEndpoint(endpoints.value().reply, client_id);
 }
 
 // ---------------------------------------------------------------- Server
@@ -242,8 +292,20 @@ struct Server::Impl {
     std::atomic<std::thread::id> serving_thread {};
     std::uint64_t instance_id {RandomId()};
     transport::ReaderPtr requests;
-    transport::WriterPtr replies;
     transport::WriterPtr presence;
+
+    // Replies go to each client's own topic, through a writer opened on its
+    // first reply. They use the transport directly, not the runtime, so the
+    // server holds what it writes through for as long as it lives, and so
+    // per-client topics do not each add a metrics series.
+    struct ReplyWriter {
+        transport::WriterPtr writer;
+        core::TimePoint last_used;
+    };
+    transport::TransportPtr transport;
+    std::optional<transport::EndpointConfig> reply_base;
+    std::mutex reply_mutex;  // before `mutex` when both are held
+    std::map<std::uint64_t, ReplyWriter> reply_writers;
 
     std::mutex mutex;
     std::condition_variable wake;  // requests arrived, or close
@@ -265,7 +327,50 @@ struct Server::Impl {
         presence->Write(ByteView(message, sizeof(message)));
     }
 
-    void Reply(const Header& request, core::StatusCode code, ByteView payload)
+    bool IsClosed()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return closed;
+    }
+
+    // Caller holds reply_mutex. The writer for a client's reply topic, opened
+    // on first use, or null when the reply cannot reach the client: its topic
+    // is gone (it closed), or its reader was not matched by `give_up`.
+    transport::WriterPtr ReplyWriterLocked(std::uint64_t client_id, core::TimePoint give_up)
+    {
+        const auto now = Now();
+        const auto found = reply_writers.find(client_id);
+        if (found != reply_writers.end()) {
+            found->second.last_used = now;
+            return found->second.writer;
+        }
+        auto endpoint = ReplyEndpoint(*reply_base, client_id);
+        if (!endpoint.ok()) {
+            return nullptr;
+        }
+        auto writer = transport->CreateWriter(endpoint.value());
+        if (!writer.ok()) {
+            return nullptr;  // NotFound: the client is gone
+        }
+        // A new writer reaches the client's reader only once matched, on
+        // backends that discover peers asynchronously: wait, once per client.
+        while (true) {
+            const auto matched = writer.value()->MatchedReaderCount();
+            if (!matched.ok() || matched.value() > 0) {
+                break;  // Unsupported: delivery does not depend on matching
+            }
+            if (Now() >= give_up || IsClosed()) {
+                return nullptr;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        reply_writers.emplace(client_id, ReplyWriter {writer.value(), now});
+        return writer.value();
+    }
+
+    // Sends a reply to its client's topic. A reply that cannot reach the
+    // client is dropped, as a lost message would be; the client times out.
+    void Reply(const Header& request, core::TimePoint deadline, core::StatusCode code, ByteView payload)
     {
         Header header;
         header.magic = kReplyMagic;
@@ -273,7 +378,41 @@ struct Server::Impl {
         header.client_id = request.client_id;
         header.request_id = request.request_id;
         const auto message = Encode(header, payload);
-        replies->Write(ByteView(message));
+        auto give_up = Now() + kReplyMatchTimeout;
+        if (deadline != core::TimePoint {}) {
+            give_up = std::min(give_up, deadline);
+        }
+        std::lock_guard<std::mutex> lock(reply_mutex);
+        const auto writer = ReplyWriterLocked(request.client_id, give_up);
+        if (writer && !writer->Write(ByteView(message)).ok()) {
+            // The client closed its topic, or the writer broke: forget it,
+            // so a later request from the same client opens a fresh one.
+            reply_writers.erase(request.client_id);
+        }
+    }
+
+    // From the heartbeat thread: closes writers of clients that have not
+    // been replied to for reply_idle_timeout. Skips the round when a reply is
+    // being sent, so a heartbeat never waits for it.
+    void EvictIdleWriters()
+    {
+        std::vector<transport::WriterPtr> idle;
+        {
+            std::unique_lock<std::mutex> lock(reply_mutex, std::try_to_lock);
+            if (!lock.owns_lock()) {
+                return;
+            }
+            const auto cutoff = Now() - options.reply_idle_timeout;
+            for (auto entry = reply_writers.begin(); entry != reply_writers.end();) {
+                if (entry->second.last_used < cutoff) {
+                    idle.push_back(std::move(entry->second.writer));
+                    entry = reply_writers.erase(entry);
+                } else {
+                    ++entry;
+                }
+            }
+        }
+        // Closed here, outside the lock: closing may wait on the transport.
     }
 
     // True if the handler ran; false for a request that was dropped
@@ -308,10 +447,10 @@ struct Server::Impl {
         }
         ++handled;
         if (result.ok()) {
-            Reply(header, core::StatusCode::kOk, ByteView(result.value()));
+            Reply(header, deadline, core::StatusCode::kOk, ByteView(result.value()));
         } else {
             const auto& text = result.status().message();
-            Reply(header, result.status().code(),
+            Reply(header, deadline, result.status().code(),
                   ByteView(reinterpret_cast<const core::Byte*>(text.data()), text.size()));
         }
         return true;
@@ -349,6 +488,7 @@ struct Server::Impl {
         while (!beat.wait_for(lock, spec.heartbeat_interval, [this] { return closed; })) {
             lock.unlock();
             Announce();
+            EvictIdleWriters();
             lock.lock();
         }
     }
@@ -365,19 +505,36 @@ core::Result<std::unique_ptr<Server>> Server::Create(
     if (!endpoints.ok()) {
         return ResultType::FromStatus(endpoints.status());
     }
+    if (options.reply_idle_timeout <= core::Nanoseconds::zero()) {
+        return ResultType::FromStatus(core::Status::InvalidArgument("reply_idle_timeout must be greater than zero"));
+    }
     auto impl = std::make_shared<Impl>(std::move(spec), std::move(handler), options);
+    const auto failed = [&impl](const core::Status& status) {
+        return ResultType::FromStatus(
+            core::Status::Error(status.code(), Describe(impl->spec) + ": " + status.message()));
+    };
+
+    // Reply writers are opened per client later; check now that the
+    // transport takes the reply endpoint, so a bad setup fails here.
+    auto transport = runtime.FindTransport(impl->spec.transport);
+    if (!transport.ok()) {
+        return failed(transport.status());
+    }
+    auto valid = transport.value()->ValidateEndpoint(endpoints.value().reply);
+    if (!valid.ok()) {
+        return failed(valid);
+    }
+    impl->transport = transport.value();
+    impl->reply_base = endpoints.value().reply;
 
     auto requests = runtime.CreateReader(endpoints.value().request);
-    auto replies = runtime.CreateWriter(endpoints.value().reply);
     auto presence = runtime.CreateWriter(endpoints.value().presence);
-    for (const core::Status* status : {&requests.status(), &replies.status(), &presence.status()}) {
-        if (!status->ok()) {
-            return ResultType::FromStatus(core::Status::Error(
-                status->code(), Describe(impl->spec) + ": " + status->message()));
+    for (const core::Status* created : {&requests.status(), &presence.status()}) {
+        if (!created->ok()) {
+            return failed(*created);
         }
     }
     impl->requests = std::move(requests).value();
-    impl->replies = std::move(replies).value();
     impl->presence = std::move(presence).value();
 
     // kCaller: arrival is someone else's to notice (the scheduler's service
@@ -522,6 +679,12 @@ void Server::Close() noexcept
         std::lock_guard<std::mutex> serving(impl_->serve_mutex);
     }
     impl_->requests->SetDataAvailableCallback({});
+    // Release the per-client reply topics; closed outside the lock.
+    std::map<std::uint64_t, Impl::ReplyWriter> writers;
+    {
+        std::lock_guard<std::mutex> lock(impl_->reply_mutex);
+        writers.swap(impl_->reply_writers);
+    }
 }
 
 // ---------------------------------------------------------------- Client
@@ -815,8 +978,13 @@ core::Result<std::unique_ptr<Client>> Client::Create(runtime::RuntimeContext& ru
     auto impl = std::make_shared<Impl>(std::move(spec));
 
     // Reply and presence readers first, so nothing sent after a request is
-    // written can be missed by a volatile reader.
-    auto replies = runtime.CreateReader(endpoints.value().reply);
+    // written can be missed by a volatile reader. The reply reader creates
+    // this client's own reply topic, which it owns.
+    auto reply_endpoint = ReplyEndpoint(endpoints.value().reply, impl->client_id);
+    if (!reply_endpoint.ok()) {
+        return ResultType::FromStatus(reply_endpoint.status());
+    }
+    auto replies = runtime.CreateReader(reply_endpoint.value());
     auto presence = runtime.CreateReader(endpoints.value().presence);
     auto requests = runtime.CreateWriter(endpoints.value().request);
     for (const core::Status* status : {&replies.status(), &presence.status(), &requests.status()}) {
@@ -971,6 +1139,11 @@ void Client::Close() noexcept
     }
     Impl::Run(cancelled);
     impl_->replies->SetDataAvailableCallback({});
+    // Release the reply reader now, not with the object, so this client's
+    // reply topic (its segment, in shared memory) goes with Close. Only the
+    // dispatcher reads it, and it is done: joined above, or this thread,
+    // running a reply callback after its last read of the loop.
+    impl_->replies.reset();
 }
 
 }  // namespace puppet_master::service

@@ -31,10 +31,12 @@ std::string ObjectName(core::DomainId domain, std::string_view topic, std::strin
 class SharedRegion {
 public:
     // Creates the region with at least `size` bytes, or opens an existing one,
-    // which keeps its original size. Callers validate size() themselves. On
-    // Linux, waits up to `timeout` for a concurrent creator to size it.
+    // which keeps its original size. With `create` false it only opens an
+    // existing one, and is NotFound if there is none. Callers validate size()
+    // themselves. On Linux, waits up to `timeout` for a concurrent creator to
+    // size it.
     static core::Result<std::unique_ptr<SharedRegion>> CreateOrOpen(
-        const std::string& name, std::size_t size, core::Nanoseconds timeout);
+        const std::string& name, std::size_t size, core::Nanoseconds timeout, bool create = true);
 
     // Unlinks the name so the next CreateOrOpen creates a fresh region;
     // existing mappings stay valid. A missing name is not an error. No-op on

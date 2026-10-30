@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -218,7 +220,10 @@ void DescriptorConflicts()
 {
     const TopicCleanup cleanup {UniqueTopic("descriptor")};
     auto first = MakeTransport();
-    assert(first->CreateWriter(Endpoint(cleanup.topic)).ok());
+    // Held: a topic is released with its last endpoint, and on Windows the
+    // segment with its last handle, after which the name is free again.
+    auto writer = first->CreateWriter(Endpoint(cleanup.topic));
+    assert(writer.ok());
     auto same_process = first->CreateReader(Endpoint(cleanup.topic, {}, "test.Other"));
     assert(same_process.status().code() == core::StatusCode::kInvalidArgument);
 
@@ -242,7 +247,9 @@ void VersionConflicts()
     v3.message.version = 3;
 
     auto first = MakeTransport();
-    assert(first->CreateWriter(v2).ok());
+    // Held, so the v2 topic stays open; see DescriptorConflicts.
+    auto writer = first->CreateWriter(v2);
+    assert(writer.ok());
     assert(first->CreateReader(v2).ok());
     auto same_process = first->CreateReader(v3);
     assert(same_process.status().code() == core::StatusCode::kInvalidArgument);
@@ -513,6 +520,186 @@ int WaitChild(ChildHandle child)
 }
 #endif
 
+void KillChild(ChildHandle child)
+{
+#ifdef _WIN32
+    TerminateProcess(child, 1);
+    WaitForSingleObject(child, INFINITE);
+    CloseHandle(child);
+#else
+    int status = 0;
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);
+#endif
+}
+
+transport::EndpointConfig Owned(const std::string& topic, core::MessagePolicy policy = {})
+{
+    auto endpoint = Endpoint(topic, policy);
+    endpoint.topic.lifetime = core::TopicLifetime::kReaderOwned;
+    return endpoint;
+}
+
+// Prefix overrides size every topic under a name, such as a service's
+// per-client reply topics; an exact entry and a longer prefix win.
+void PrefixOptions()
+{
+    shm::Options options;
+    options.topic_prefixes["/svc/"] = shm::TopicOptions {64, 2};
+    options.topic_prefixes["/svc/reply/"] = shm::TopicOptions {128, 4};
+    options.topics["/svc/reply/special"] = shm::TopicOptions {256, 8};
+    assert(options.Validate().ok());
+    assert(options.ForTopic("/svc/reply/1").slot_count == 4);
+    assert(options.ForTopic("/svc/reply/special").slot_count == 8);
+    assert(options.ForTopic("/svc/request").slot_count == 2);
+    assert(options.ForTopic("/other").slot_count == options.default_topic.slot_count);
+    options.topic_prefixes["/bad/"] = shm::TopicOptions {64, 0};
+    assert(options.Validate().code() == core::StatusCode::kInvalidArgument);
+}
+
+// A reader-owned topic belongs to its reader: writers only attach to it, and
+// fail with NotFound once the reader has closed it, in this process and in
+// others (here a second transport, which maps the segment on its own).
+void ReaderOwnedTopicBelongsToItsReader()
+{
+    const auto topic = UniqueTopic("owned");
+    TopicCleanup cleanup {topic};
+    auto client = MakeTransport();
+    auto server = MakeTransport();
+
+    assert(server->CreateWriter(Owned(topic)).status().code() == core::StatusCode::kNotFound);
+    auto reader = client->CreateReader(Owned(topic, Queued(4)));
+    assert(reader.ok());
+    auto local = client->CreateWriter(Owned(topic));
+    auto remote = server->CreateWriter(Owned(topic));
+    assert(local.ok() && remote.ok());
+    Write(*remote.value(), "reply");
+    auto message = ReadWait(*reader.value());
+    assert(message.ok() && Text(message.value()) == "reply");
+
+    // The lifetime is part of the topic in a process.
+    assert(client->CreateWriter(Endpoint(topic)).status().code() == core::StatusCode::kInvalidArgument);
+
+    reader.value().reset();
+    const auto late = transport::ByteView::From("late", 4);
+    assert(remote.value()->Write(late).code() == core::StatusCode::kNotFound);
+    assert(local.value()->Write(late).code() == core::StatusCode::kNotFound);
+    assert(server->CreateWriter(Owned(topic)).status().code() == core::StatusCode::kNotFound);
+    assert(client->CreateWriter(Owned(topic)).status().code() == core::StatusCode::kNotFound);
+
+#ifndef _WIN32
+    // A new reader starts a fresh topic; writers of the old one stay out.
+    // Not on Windows, where the name stays taken until the old segment's
+    // last handle closes; service clients use a new name each time.
+    auto next = client->CreateReader(Owned(topic, Queued(4)));
+    assert(next.ok());
+    assert(remote.value()->Write(late).code() == core::StatusCode::kNotFound);
+    auto fresh = server->CreateWriter(Owned(topic));
+    assert(fresh.ok());
+    Write(*fresh.value(), "again");
+    message = ReadWait(*next.value());
+    assert(message.ok() && Text(message.value()) == "again");
+#endif
+}
+
+// Child: own a reader-owned topic until killed.
+int RunOwnedReader(const std::string& topic)
+{
+    auto shm_transport = MakeTransport();
+    auto reader = shm_transport->CreateReader(Owned(topic));
+    if (!reader.ok()) {
+        return 2;
+    }
+    std::this_thread::sleep_for(30s);
+    return 0;
+}
+
+// A reader that crashes cannot retire its topic. The last writer out, seeing
+// no live process attached, removes it, so no segment is left behind.
+void CrashedReaderTopicIsRemovedByLastWriter(const std::string& executable)
+{
+    const auto topic = UniqueTopic("crashed");
+    TopicCleanup cleanup {topic};
+    auto child = StartChild(executable, {"--owned-reader", topic});
+    auto shm_transport = MakeTransport();
+    transport::WriterPtr writer;
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!writer) {
+        auto created = shm_transport->CreateWriter(Owned(topic));
+        if (created.ok()) {
+            writer = created.value();
+        } else {
+            assert(created.status().code() == core::StatusCode::kNotFound);
+            assert(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(5ms);
+        }
+    }
+    KillChild(child);
+    Write(*writer, "to nobody");  // not retired: the reader never said goodbye
+    writer.reset();
+    assert(shm_transport->CreateWriter(Owned(topic)).status().code() == core::StatusCode::kNotFound);
+}
+
+#ifndef _WIN32
+// Whether this process holds a participant entry in the topic's segment.
+bool Attached(const std::string& topic)
+{
+    auto segments = shm::ListSegments(kDomain);
+    assert(segments.ok());
+    for (const auto& segment : segments.value()) {
+        if (segment.topic == topic) {
+            const auto self = static_cast<std::uint32_t>(getpid());
+            return std::find(segment.live_pids.begin(), segment.live_pids.end(), self) != segment.live_pids.end();
+        }
+    }
+    return false;
+}
+#endif
+
+// A topic is released with its last endpoint in this process: the mapping
+// and the participant entry go. Linux keeps the segment for other processes;
+// Windows frees it with its last handle.
+void TopicIsReleasedWithItsLastEndpoint()
+{
+    auto shm_transport = MakeTransport();
+    const auto topic = UniqueTopic("released");
+    TopicCleanup cleanup {topic};
+    {
+        auto writer = shm_transport->CreateWriter(Endpoint(topic));
+        auto reader = shm_transport->CreateReader(Endpoint(topic));
+        assert(writer.ok() && reader.ok());
+        // A reader alone keeps the topic: a writer created later reaches it.
+        writer.value().reset();
+        auto later = shm_transport->CreateWriter(Endpoint(topic));
+        assert(later.ok());
+        Write(*later.value(), "still here");
+        auto message = ReadWait(*reader.value());
+        assert(message.ok() && Text(message.value()) == "still here");
+#ifndef _WIN32
+        assert(Attached(topic));
+#endif
+    }
+    // The reader's dispatcher may hold the topic for one more wait.
+#ifndef _WIN32
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (Attached(topic)) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(5ms);
+    }
+#else
+    // Freed with the last handle, so another geometry is accepted.
+    shm::Options options;
+    options.topics[topic] = shm::TopicOptions {128, 4};
+    auto other = MakeTransport(options);
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!other->CreateWriter(Endpoint(topic)).ok()) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(5ms);
+    }
+#endif
+    assert(shm_transport->Close().ok());
+}
+
 constexpr int kCrossProcessMessages = 200;
 
 // Child: publish until the parent acknowledges every message.
@@ -631,6 +818,9 @@ int main(int argc, char** argv)
     if (argc == 3 && std::string(argv[1]) == "--publisher") {
         return RunPublisher(argv[2]);
     }
+    if (argc == 3 && std::string(argv[1]) == "--owned-reader") {
+        return RunOwnedReader(argv[2]);
+    }
     assert(argc == 1);
 
     OptionsAndCapabilities();
@@ -644,6 +834,10 @@ int main(int argc, char** argv)
     ReleaseFromCallback();
     RuntimeRegistration();
     WriteWithFillsInPlace();
+    TopicIsReleasedWithItsLastEndpoint();
+    PrefixOptions();
+    ReaderOwnedTopicBelongsToItsReader();
+    CrashedReaderTopicIsRemovedByLastWriter(argv[0]);
     CrossProcessDelivery(argv[0]);
     CrossProcessVersionMismatch(argv[0]);
     std::cout << "shm transport tests passed\n";

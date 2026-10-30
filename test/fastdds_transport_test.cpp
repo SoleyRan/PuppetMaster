@@ -391,8 +391,36 @@ void ReadWhileListenerRuns()
     assert(context.value()->Close().ok());
 }
 
+// A topic is deleted from the participant with its last endpoint: afterwards
+// the name can carry another type, which a live topic refuses.
+void TopicIsDeletedWithItsLastEndpoint()
+{
+    auto fastdds_transport = MakeTransport();
+    assert(fastdds_transport->Open().ok());
+    const auto first = MakeEndpoint("/fastdds/freed", "test.First");
+    const auto second = MakeEndpoint("/fastdds/freed", "test.Second");
+    {
+        auto writer = fastdds_transport->CreateWriter(first);
+        auto reader = fastdds_transport->CreateReader(first);
+        assert(writer.ok() && reader.ok());
+        assert(fastdds_transport->CreateWriter(second).status().code() == core::StatusCode::kInvalidArgument);
+    }
+    auto reused = fastdds_transport->CreateWriter(second);
+    assert(reused.ok());
+    reused.value().reset();
+
+    // Many short-lived topics, as per-client reply topics are.
+    for (int index = 0; index < 200; ++index) {
+        auto writer = fastdds_transport->CreateWriter(
+            MakeEndpoint("/fastdds/many/" + std::to_string(index), "test.First"));
+        assert(writer.ok());
+    }
+    assert(fastdds_transport->Close().ok());
+}
+
 int main()
 {
+    TopicIsDeletedWithItsLastEndpoint();
     RejectsEndpointsBeforeOpen();
     RejectsForeignTransportKind();
     RejectsUnsupportedOverflowPolicy();

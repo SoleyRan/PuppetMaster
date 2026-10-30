@@ -25,6 +25,9 @@ inline constexpr std::uint32_t kLayoutVersion = 1;
 inline constexpr std::size_t kNameCapacity = 256;
 inline constexpr std::uint64_t kWritingBit = 1ULL << 63;
 inline constexpr std::size_t kSlotAlignment = 64;
+// SegmentHeader::flags: the owning reader of a reader-owned topic closed, and
+// the segment's name is being removed; writers still attached stop writing.
+inline constexpr std::uint32_t kSegmentRetired = 1;
 
 struct SegmentGeometry {
     std::size_t slot_payload_size {0};
@@ -62,7 +65,9 @@ struct SegmentHeader {
     char encoding[kNameCapacity];
     alignas(kSlotAlignment) std::atomic<std::uint64_t> write_seq;
     std::atomic<std::uint32_t> notify_word;
-    std::uint32_t reserved1;
+    // kSegment* bits. Was reserved (always 0) before 0.4, so the layout
+    // version stays the same.
+    std::atomic<std::uint32_t> flags;
     alignas(WriterLock::kStorageAlignment) unsigned char lock_storage[WriterLock::kStorageSize];
     ParticipantEntry participants[kMaxParticipants];
 };
@@ -80,6 +85,8 @@ struct SlotHeader {
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free, "shared atomics must be lock-free");
 static_assert(sizeof(std::atomic<std::uint64_t>) == sizeof(std::uint64_t), "shared atomics must be plain words");
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "shared atomics must be lock-free");
+static_assert(sizeof(std::atomic<std::uint32_t>) == sizeof(std::uint32_t), "shared atomics must be plain words");
 
 std::size_t SlotStride(std::size_t slot_payload_size);
 std::size_t HeaderSize();
@@ -124,10 +131,11 @@ public:
     };
 
     // Creates the segment or attaches to an existing one, verifying that its
-    // layout, geometry, and identity match.
+    // layout, geometry, and identity match. With `create` false it only
+    // attaches, and is NotFound if the segment does not exist.
     static core::Result<std::shared_ptr<Segment>> Open(
         core::DomainId domain, const Identity& identity, const SegmentGeometry& geometry,
-        core::Nanoseconds init_timeout);
+        core::Nanoseconds init_timeout, bool create = true);
 
     ~Segment();
     Segment(const Segment&) = delete;
@@ -160,6 +168,14 @@ public:
     core::Result<std::uint32_t> ClaimParticipant();
     void ReleaseParticipant(std::uint32_t index) noexcept;
     std::vector<std::uint32_t> ActiveParticipants() const;
+    // Whether any process still running is attached, after reclaiming the
+    // entries of processes that exited.
+    bool HasLiveParticipant() noexcept;
+
+    // Reader-owned topics: the owner marks the segment retired before
+    // removing its name, so writers still attached learn it is gone.
+    void Retire() noexcept;
+    bool retired() const noexcept;
 
     // Test-only: called inside Publish after the payload copy, before the
     // commit, with the writer lock held. Crash tests use it to kill a writer

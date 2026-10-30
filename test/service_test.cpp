@@ -115,6 +115,15 @@ void SpecValidation()
     assert(endpoints.value().reply.message.type_name == "service.reply:test.Text");
     assert(endpoints.value().request.topic.message_policy.queue_depth == 16);
 
+    // Replies go to one topic per client, which the client's reader owns.
+    assert(endpoints.value().reply.topic.lifetime == core::TopicLifetime::kReaderOwned);
+    auto own = service::ReplyEndpointFor(spec, 0x2aULL);
+    assert(own.ok() && own.value().topic.name.str() == "/svc/valid/reply/000000000000002a");
+    assert(own.value().message == endpoints.value().reply.message);
+    // A name too long for its per-client reply topics fails up front.
+    auto long_spec = Spec("/" + std::string(240, 'n'));
+    assert(service::EndpointsFor(long_spec).status().code() == core::StatusCode::kInvalidArgument);
+
     auto bad = spec;
     bad.queue_depth = 0;
     assert(bad.Validate().code() == core::StatusCode::kInvalidArgument);
@@ -127,6 +136,44 @@ void SpecValidation()
 
     auto runtime = MakeRuntime();
     assert(service::Server::Create(*runtime, spec, {}).status().code() == core::StatusCode::kInvalidArgument);
+    service::ServerOptions no_idle;
+    no_idle.reply_idle_timeout = 0ms;
+    assert(service::Server::Create(*runtime, spec, Reverse, no_idle).status().code()
+           == core::StatusCode::kInvalidArgument);
+}
+
+// Each client reads only its own reply topic: another client's calls put
+// nothing there.
+void RepliesReachOnlyTheirClient()
+{
+    auto runtime = MakeRuntime();
+    auto spec = Spec("/svc/own-replies");
+    auto server = service::Server::Create(*runtime, spec, Reverse);
+    auto first = service::Client::Create(*runtime, spec);
+    auto second = service::Client::Create(*runtime, spec);
+    assert(server.ok() && first.ok() && second.ok());
+    assert(first.value()->client_id() != second.value()->client_id());
+
+    // A spy on the second client's reply topic sees what that client sees.
+    auto endpoint = service::ReplyEndpointFor(spec, second.value()->client_id());
+    assert(endpoint.ok());
+    auto spy = runtime->CreateReader(endpoint.value());
+    assert(spy.ok());
+
+    for (int call = 0; call < 20; ++call) {
+        auto reply = first.value()->Call(Bytes("abc"), 1s);
+        assert(reply.ok() && Text(reply.value()) == "cba");
+    }
+    assert(spy.value()->PendingMessageCount().value() == 0);
+    assert(second.value()->Call(Bytes("xy"), 1s).ok());
+    assert(spy.value()->PendingMessageCount().value() == 1);
+
+    // A closed client's topic is gone: a late reply to it is dropped, and
+    // the server keeps serving the others.
+    spy.value().reset();
+    first.value()->Close();
+    assert(second.value()->Call(Bytes("ok"), 1s).ok());
+    assert(server.value()->handled_count() == 22);
 }
 
 void CallsAndErrors()
@@ -206,7 +253,7 @@ void ManyClientsAndThreads()
     }
 
     // Each reply must reach the call that sent its request, across clients
-    // that all see every reply and threads that share one client.
+    // and across threads that share one client.
     std::atomic<int> correct {0};
     std::vector<std::thread> threads;
     for (int index = 0; index < 6; ++index) {
@@ -561,6 +608,7 @@ int main()
     AsyncServerStops();
     TypedServicesAndVersions();
     ServicesFromComponentSpec();
+    RepliesReachOnlyTheirClient();
     std::cout << "service tests passed\n";
     return 0;
 }

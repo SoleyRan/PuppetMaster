@@ -1,4 +1,5 @@
-# Command-line tools. They read JSON, so they need the JSON adapter.
+# Command-line tools. They read JSON, so they need the JSON adapter. Their
+# install RPATH is set in the top-level CMakeLists.txt.
 
 add_executable(puppet_master_config
     puppet_master_config.cpp

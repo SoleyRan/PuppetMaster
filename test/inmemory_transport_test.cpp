@@ -297,6 +297,71 @@ void UnboundedQueueKeepsAllMessages()
 }
 
 }  // namespace
+// A topic is freed with its last endpoint: afterwards the same name can carry
+// another type, which a live topic refuses.
+void TopicIsFreedWithItsLastEndpoint()
+{
+    auto transport = MakeOpenTransport();
+    const auto endpoint = MakeEndpoint("/inmemory/freed", {});
+    auto other = endpoint;
+    other.message.type_name = "test.Other";
+    {
+        auto writer = transport->CreateWriter(endpoint);
+        auto reader = transport->CreateReader(endpoint);
+        assert(writer.ok() && reader.ok());
+        assert(transport->CreateReader(other).status().code() == core::StatusCode::kInvalidArgument);
+        // A reader alone keeps the topic: a writer created later reaches it.
+        writer.value().reset();
+        auto later = transport->CreateWriter(endpoint);
+        assert(later.ok());
+        assert(WriteString(later.value(), "still here").ok());
+        assert(ReadString(reader.value()) == "still here");
+    }
+    auto reused = transport->CreateReader(other);
+    assert(reused.ok());
+
+    // Many short-lived topics, as per-client reply topics are.
+    for (int index = 0; index < 1000; ++index) {
+        auto writer = transport->CreateWriter(MakeEndpoint("/inmemory/many/" + std::to_string(index), {}));
+        assert(writer.ok());
+    }
+    assert(transport->Close().ok());
+}
+
+// A reader-owned topic belongs to its reader: writers only attach to it, and
+// fail with NotFound once the reader is gone.
+void ReaderOwnedTopicBelongsToItsReader()
+{
+    auto transport = MakeOpenTransport();
+    auto endpoint = MakeEndpoint("/inmemory/owned", {});
+    endpoint.topic.lifetime = core::TopicLifetime::kReaderOwned;
+
+    assert(transport->CreateWriter(endpoint).status().code() == core::StatusCode::kNotFound);
+    auto reader = transport->CreateReader(endpoint);
+    assert(reader.ok());
+    auto writer = transport->CreateWriter(endpoint);
+    assert(writer.ok());
+    assert(WriteString(writer.value(), "reply").ok());
+    assert(ReadString(reader.value()) == "reply");
+
+    // The lifetime is part of the topic: a shared endpoint is refused.
+    const auto shared = MakeEndpoint("/inmemory/owned", {});
+    assert(transport->CreateWriter(shared).status().code() == core::StatusCode::kInvalidArgument);
+
+    reader.value().reset();
+    assert(WriteString(writer.value(), "late").code() == core::StatusCode::kNotFound);
+    assert(transport->CreateWriter(endpoint).status().code() == core::StatusCode::kNotFound);
+
+    // A new reader starts a fresh topic; the old writer stays closed out.
+    auto next = transport->CreateReader(endpoint);
+    assert(next.ok());
+    assert(WriteString(writer.value(), "late").code() == core::StatusCode::kNotFound);
+    auto fresh = transport->CreateWriter(endpoint);
+    assert(fresh.ok());
+    assert(WriteString(fresh.value(), "again").ok());
+    assert(ReadString(next.value()) == "again");
+    assert(transport->Close().ok());
+}
 
 int main()
 {
@@ -309,5 +374,7 @@ int main()
     FullReaderDoesNotPreventDeliveryToOtherReaders();
     BoundedQueueDropsOldestMessage();
     UnboundedQueueKeepsAllMessages();
+    TopicIsFreedWithItsLastEndpoint();
+    ReaderOwnedTopicBelongsToItsReader();
     return 0;
 }

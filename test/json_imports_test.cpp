@@ -369,7 +369,9 @@ void ServicesThroughConfiguration()
     // The deployment sizes all three of the service's shm topics.
     auto shm_options = shm::OptionsFromProject(server.value());
     assert(shm_options.ok());
-    for (const char* topic : {"/map/query/request", "/map/query/reply", "/map/query/presence"}) {
+    // Per-client reply topics, `<service>/reply/<client>`, by prefix.
+    for (const char* topic : {"/map/query/request", "/map/query/reply", "/map/query/presence",
+                              "/map/query/reply/000000000000002a"}) {
         assert(shm_options.value().ForTopic(topic).slot_payload_size == 2048);
     }
 

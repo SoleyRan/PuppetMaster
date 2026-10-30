@@ -58,7 +58,7 @@ A service named `/map/query` uses:
 | Topic | Writer | Reader | Policy | Carries |
 |---|---|---|---|---|
 | `/map/query/request` | clients | server | queued | header + request payload |
-| `/map/query/reply` | server | clients | queued | header + reply payload |
+| `/map/query/reply/<client>` | server | that client | queued | header + reply payload |
 | `/map/query/presence` | server | clients | latest | server instance id, heartbeat |
 
 The request and reply descriptors are those of the payload types, with the
@@ -67,13 +67,35 @@ subscriber of the same type cannot read them by accident. Their versions
 carry over, so a client built against another version of the request type is
 refused when it is created.
 
+### Reply Topics
+
+Each client has its own reply topic, named after the service with
+`/reply/` and its client id in 16 hex digits, for example
+`/map/query/reply/3f2a9c0d11e4b706`. `service::ReplyEndpointFor(spec,
+client_id)` returns it. A client receives only its own replies, so the cost
+of a reply does not grow with the number of clients, and a busy client cannot
+push another client's replies out of a shared queue.
+
+The topic is reader-owned (`core::TopicLifetime::kReaderOwned`): the client
+creates it, and `Client::Close()` removes it. The server opens a writer for a
+client on its first reply to that client and keeps it, then closes it after
+`ServerOptions::reply_idle_timeout` (30 s) without a reply. On shared memory,
+that close also removes the segment of a client that crashed, so no reply
+segments are left in `/dev/shm`.
+
+On FastDDS, a new writer reaches the client's reader only once discovery has
+matched them. The server waits for that once per client, at most 1 s or
+until the request's deadline. A reply that cannot reach its client, because
+the client closed or was never matched, is dropped, and the client times out
+with `DeadlineExceeded`.
+
 ### Wire Header
 
 Every request and reply starts with a fixed 32-byte header, little-endian:
 
 ```text
 u32 magic            "PMRQ" / "PMRP"
-u16 header_version   1
+u16 header_version   2 (1 in 0.3 and earlier, with one shared reply topic)
 u16 status           reply only: core::StatusCode of the handler result
 u64 client_id        random per client instance
 u64 request_id       per-client counter, starting at 1
@@ -82,6 +104,13 @@ u64 budget_ns        request only: how long the client waits; 0 = no limit
 
 A reply with a non-OK status carries the handler's error message as its
 payload, so the client returns that status with its message.
+
+The presence topic's descriptor is `service.Presence.v2` version 2. A 0.3
+process uses `service.Presence` version 1, so processes of the two protocol
+versions never see each other's heartbeats: a call between them fails at once
+with `Unavailable`, and on shared memory the second endpoint on the presence
+topic is refused when it is created. Upgrade a service's server and clients
+together.
 
 ### Presence
 
@@ -291,8 +320,9 @@ returns `FailedPrecondition`.
 
 Interface files may declare `services` next to `topics`, so the team that
 serves a service publishes its contract once and every caller imports it.
-Deployment files place them by wire name; the settings apply to all three of
-the service's topics, and `shm::OptionsFromProject` sizes them:
+Deployment files place them by wire name; the settings apply to all of the
+service's topics, including every client's reply topic, and
+`shm::OptionsFromProject` sizes them:
 
 ```json
 {"services": [{"name": "/map/query", "transport": "shm",
@@ -341,9 +371,11 @@ because the map cannot get the worker the planner holds.
 
 - Requests and replies are bounded by the transport's message size; on
   shared memory, by the topic's `slot_payload_size`.
-- Every client receives every reply on the service and drops the ones that
-  are not its own, so very many concurrent clients cost extra copies. This is
-  the price of running on any pub/sub transport without changes.
+- Each client's reply topic costs one ring on shared memory (the service's
+  `slot_payload_size` x `slot_count`), and one DDS topic and writer per client
+  on FastDDS, while the client is in use and for `reply_idle_timeout` after.
+- The first reply to a new client on FastDDS waits for discovery, usually a
+  few tens of milliseconds.
 - A request queue that overflows drops the oldest requests, which their
   clients see as `DeadlineExceeded`. Size the request topic's queue depth
   for the expected burst.

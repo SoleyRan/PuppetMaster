@@ -6,7 +6,7 @@ project(SensorNode VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
-find_package(PuppetMaster 0.2 CONFIG REQUIRED)
+find_package(PuppetMaster 0.3 CONFIG REQUIRED)
 find_package(SensorInterfaces 2 CONFIG REQUIRED)
 
 add_executable(sensor_node src/main.cpp)

@@ -34,9 +34,13 @@ namespace shm = puppet_master::transport::shm;
 shm::Options options;
 options.domain_id = 3;                                       // isolates deployments
 options.topics["/lidar/points"] = shm::TopicOptions {4 << 20, 8};  // 4 MiB x 8 slots
+options.topic_prefixes["/camera/"] = shm::TopicOptions {8 << 20, 4};  // every topic under /camera/
 
 auto status = shm::RegisterTransport(*runtime, name, options);
 ```
+
+`ForTopic` takes an exact `topics` entry first, then the longest matching
+`topic_prefixes` key, then `default_topic`.
 
 Topics use `core::TransportKind::kIpc`. In configuration files the transport
 may be written as `"ipc"` or `"shm"`.
@@ -67,7 +71,9 @@ options.register_project_transports = [](runtime::RuntimeContext& context, const
 ```
 
 Because every process reads the same deployment file, they agree on the
-geometry of each topic.
+geometry of each topic. A service's settings size its request and presence
+topics by name and its per-client reply topics by the prefix
+`<service>/reply/`.
 
 ## Zero-Copy Writes
 
@@ -148,6 +154,19 @@ shm::RemoveSegment(domain_id, "/lidar/points");
 
 or remove `/dev/shm/pm.<domain>.<hash>` by hand. On Windows, a segment is freed
 when the last process closes it.
+
+Within a process, a topic's segment is unmapped and its participant entry
+released when the last reader or writer on it closes.
+
+A reader-owned topic (`core::TopicLifetime::kReaderOwned`, used for service
+reply topics) belongs to its reader. The reader creates the segment. Writers
+only attach to it, and get `NotFound` if it does not exist. When the reader
+closes, it marks the segment retired and removes its name. Writers still
+attached then get `NotFound` on every write, and a new reader under the same
+name starts a fresh segment. If the reader crashes, the last writer to
+close removes the name once no live process is attached, so no segment is
+left behind. The retired flag uses a header word that was reserved before,
+so the layout version is unchanged.
 
 ### Listing And Cleaning Up
 

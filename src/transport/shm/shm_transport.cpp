@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
@@ -61,16 +62,18 @@ struct ReaderState {
 // wakeups and callbacks.
 class TopicState final {
 public:
+    // `create`: whether this endpoint may create the segment. Writers of a
+    // reader-owned topic may not; they only attach to the reader's.
     static core::Result<std::shared_ptr<TopicState>> Open(
         core::DomainId domain, const EndpointConfig& endpoint, const TopicOptions& topic_options,
-        core::Nanoseconds poll_interval)
+        core::Nanoseconds poll_interval, bool create)
     {
         using ResultType = core::Result<std::shared_ptr<TopicState>>;
         auto segment = detail::Segment::Open(
             domain,
             detail::Segment::Identity {endpoint.topic.name.str(), endpoint.message},
             detail::SegmentGeometry {topic_options.slot_payload_size, topic_options.slot_count},
-            kSegmentInitTimeout);
+            kSegmentInitTimeout, create);
         if (!segment.ok()) {
             return ResultType::FromStatus(segment.status());
         }
@@ -85,8 +88,8 @@ public:
             return ResultType::FromStatus(notifier.status());
         }
         return ResultType(std::shared_ptr<TopicState>(new TopicState(
-            endpoint.message, std::move(segment).value(), participant.value(), std::move(notifier).value(),
-            poll_interval)));
+            endpoint.message, endpoint.topic.lifetime, std::move(segment).value(), participant.value(),
+            std::move(notifier).value(), poll_interval)));
     }
 
     ~TopicState()
@@ -98,8 +101,12 @@ public:
     TopicState& operator=(const TopicState&) = delete;
 
     const MessageDescriptor& descriptor() const noexcept { return descriptor_; }
+    core::TopicLifetime lifetime() const noexcept { return lifetime_; }
     detail::Segment& segment() const noexcept { return *segment_; }
     bool closed() const noexcept { return closed_.load(std::memory_order_acquire); }
+    bool reader_owned() const noexcept { return lifetime_ == core::TopicLifetime::kReaderOwned; }
+    // A reader-owned topic whose reader has gone; it takes no new endpoints.
+    bool gone() const noexcept { return reader_owned() && segment_->retired(); }
 
     core::Status AddReader(const std::shared_ptr<TopicState>& self, const std::shared_ptr<ReaderState>& reader)
     {
@@ -108,6 +115,7 @@ public:
             return core::Status::Unavailable("shm topic is closed");
         }
         readers_.push_back(reader);
+        had_reader_ = true;
         if (!dispatcher_.joinable()) {
             dispatcher_ = std::thread(&TopicState::DispatchLoop, std::weak_ptr<TopicState>(self),
                                       segment_->WriteSequence());
@@ -115,16 +123,28 @@ public:
         return core::Status::Ok();
     }
 
+    // The last reader of a reader-owned topic takes the topic with it, even
+    // while writers in this process still hold it: they fail from now on.
     void RemoveReader(const std::shared_ptr<ReaderState>& reader)
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        readers_.erase(std::remove(readers_.begin(), readers_.end(), reader), readers_.end());
+        bool last = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            readers_.erase(std::remove(readers_.begin(), readers_.end(), reader), readers_.end());
+            last = readers_.empty();
+        }
+        if (last && reader_owned()) {
+            RetireOnce();
+        }
     }
 
     core::Status Publish(ByteView payload, WriteOptions options)
     {
         if (closed()) {
             return core::Status::Unavailable("shm writer is closed");
+        }
+        if (gone()) {
+            return Gone();
         }
         auto status = payload.Validate();
         if (!status.ok()) {
@@ -138,6 +158,9 @@ public:
         if (closed()) {
             return core::Status::Unavailable("shm writer is closed");
         }
+        if (gone()) {
+            return Gone();
+        }
         if (!fill) {
             return core::Status::InvalidArgument("fill function must not be empty");
         }
@@ -148,6 +171,7 @@ public:
     {
         std::vector<std::shared_ptr<ReaderState>> readers;
         std::thread dispatcher;
+        bool had_reader = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (closed_.exchange(true, std::memory_order_acq_rel)) {
@@ -155,6 +179,7 @@ public:
             }
             readers.swap(readers_);
             dispatcher.swap(dispatcher_);
+            had_reader = had_reader_;
         }
         for (const auto& reader : readers) {
             reader->Close();
@@ -171,17 +196,47 @@ public:
             }
         }
         segment_->ReleaseParticipant(participant_);
+        if (!reader_owned()) {
+            return;
+        }
+        if (!readers.empty() || had_reader) {
+            RetireOnce();  // closed with the transport, not reader by reader
+        } else if (!segment_->retired() && !segment_->HasLiveParticipant()) {
+            // Only writers here, and every process that was attached has
+            // exited: the reader crashed without retiring its topic. The
+            // last one out removes the name, so nothing is left behind.
+            detail::SharedRegion::Remove(segment_->name());
+        }
     }
 
 private:
-    TopicState(MessageDescriptor descriptor, std::shared_ptr<detail::Segment> segment, std::uint32_t participant,
-               std::unique_ptr<detail::Notifier> notifier, core::Nanoseconds poll_interval) noexcept
+    TopicState(MessageDescriptor descriptor, core::TopicLifetime lifetime, std::shared_ptr<detail::Segment> segment,
+               std::uint32_t participant, std::unique_ptr<detail::Notifier> notifier,
+               core::Nanoseconds poll_interval) noexcept
         : descriptor_(std::move(descriptor)),
+          lifetime_(lifetime),
           segment_(std::move(segment)),
           participant_(participant),
           notifier_(std::move(notifier)),
           poll_interval_(poll_interval)
     {
+    }
+
+    core::Status Gone() const
+    {
+        return core::Status::NotFound("shm topic in segment " + segment_->name() + " was closed by its reader");
+    }
+
+    // Marks the segment retired, so writers attached in other processes stop,
+    // wakes them, and removes its name, so none can attach any more.
+    void RetireOnce() noexcept
+    {
+        if (retired_by_me_.exchange(true)) {
+            return;
+        }
+        segment_->Retire();
+        notifier_->NotifyAll(segment_->ActiveParticipants());
+        detail::SharedRegion::Remove(segment_->name());
     }
 
     static core::TimePoint Timestamp(const WriteOptions& options)
@@ -258,6 +313,7 @@ private:
     }
 
     MessageDescriptor descriptor_;
+    core::TopicLifetime lifetime_;
     std::shared_ptr<detail::Segment> segment_;
     std::uint32_t participant_;
     std::unique_ptr<detail::Notifier> notifier_;
@@ -265,8 +321,10 @@ private:
 
     std::mutex mutex_;
     std::vector<std::shared_ptr<ReaderState>> readers_;
+    bool had_reader_ {false};  // guarded by mutex_
     std::thread dispatcher_;
     std::atomic<bool> closed_ {false};
+    std::atomic<bool> retired_by_me_ {false};
 };
 
 class ShmReader final : public Reader {
@@ -403,6 +461,12 @@ core::Status Options::Validate() const
             return core::Status::InvalidArgument(status.message() + " (topic " + entry.first + ")");
         }
     }
+    for (const auto& entry : topic_prefixes) {
+        status = entry.second.Validate();
+        if (!status.ok()) {
+            return core::Status::InvalidArgument(status.message() + " (topics under " + entry.first + ")");
+        }
+    }
     if (wait_poll_interval <= core::Nanoseconds::zero()) {
         return core::Status::InvalidArgument("shm wait_poll_interval must be greater than zero");
     }
@@ -412,7 +476,18 @@ core::Status Options::Validate() const
 const TopicOptions& Options::ForTopic(const std::string& topic) const
 {
     const auto found = topics.find(topic);
-    return found == topics.end() ? default_topic : found->second;
+    if (found != topics.end()) {
+        return found->second;
+    }
+    const TopicOptions* best = &default_topic;
+    std::size_t best_length = 0;
+    for (const auto& [prefix, options] : topic_prefixes) {
+        if (prefix.size() > best_length && topic.compare(0, prefix.size(), prefix) == 0) {
+            best = &options;
+            best_length = prefix.size();
+        }
+    }
+    return *best;
 }
 
 core::Status RegisterTransport(runtime::RuntimeContext& runtime, core::TransportName name, Options options)
@@ -428,24 +503,26 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
 {
     using ResultType = core::Result<Options>;
 
-    // Each ipc topic with settings, plus the three topics of each ipc service
-    // with settings, which share the service's.
+    // Each ipc topic with settings, plus the topics of each ipc service with
+    // settings, which share the service's: request and presence by name, and
+    // the per-client reply topics by the prefix `<service>/reply/`.
     struct Entry {
         std::string label;
         std::vector<std::string> topics;
         const runtime::ParameterMap* parameters;
+        std::string prefix;
     };
     std::vector<Entry> entries;
     for (const auto& topic : project.topics) {
         if (topic.transport == core::TransportKind::kIpc && !topic.transport_parameters.empty()) {
-            entries.push_back(Entry {"topic " + topic.name, {topic.name}, &topic.transport_parameters});
+            entries.push_back(Entry {"topic " + topic.name, {topic.name}, &topic.transport_parameters, {}});
         }
     }
     for (const auto& service : project.services) {
         if (service.transport == core::TransportKind::kIpc && !service.transport_parameters.empty()) {
             entries.push_back(Entry {"service " + service.name,
                                      {service.name + "/request", service.name + "/reply", service.name + "/presence"},
-                                     &service.transport_parameters});
+                                     &service.transport_parameters, service.name + "/reply/"});
         }
     }
 
@@ -496,6 +573,9 @@ core::Result<Options> OptionsFromProject(const configuration::ProjectConfig& pro
         }
         for (const auto& topic : entry_info.topics) {
             base.topics[topic] = geometry;
+        }
+        if (!entry_info.prefix.empty()) {
+            base.topic_prefixes[entry_info.prefix] = geometry;
         }
     }
     auto status = base.Validate();
@@ -616,7 +696,10 @@ core::Result<std::vector<SegmentInfo>> RemoveUnusedSegments(std::optional<core::
 struct ShmTransport::Impl {
     mutable std::mutex mutex;
     bool open {false};
-    std::map<std::string, std::shared_ptr<TopicState>> topics;
+    // Readers and writers own their topic; the map only finds it, so a topic
+    // is unmapped, and its participant entry released, with its last
+    // endpoint in this process. Expired entries are swept on each new one.
+    std::map<std::string, std::weak_ptr<TopicState>> topics;
 };
 
 ShmTransport::ShmTransport(core::TransportName name, Options options)
@@ -664,14 +747,16 @@ core::Status ShmTransport::Open()
 
 core::Status ShmTransport::Close() noexcept
 {
-    std::map<std::string, std::shared_ptr<TopicState>> topics;
+    std::map<std::string, std::weak_ptr<TopicState>> topics;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->open = false;
         topics.swap(impl_->topics);
     }
     for (auto& entry : topics) {
-        entry.second->Close();
+        if (auto topic = entry.second.lock()) {
+            topic->Close();
+        }
     }
     return core::Status::Ok();
 }
@@ -709,27 +794,49 @@ core::Status ShmTransport::ValidateEndpoint(const EndpointConfig& endpoint) cons
 
 namespace {
 
+// Writers of a reader-owned topic only attach: they fail with NotFound when
+// its reader has not created it, or has closed it.
 core::Result<std::shared_ptr<TopicState>> GetOrOpenTopic(
-    std::mutex& mutex, bool& open, std::map<std::string, std::shared_ptr<TopicState>>& topics,
-    const Options& options, const EndpointConfig& endpoint, const char* what)
+    std::mutex& mutex, bool& open, std::map<std::string, std::weak_ptr<TopicState>>& topics,
+    const Options& options, const EndpointConfig& endpoint, bool writer)
 {
+    const char* what = writer ? "writers" : "readers";
+    const bool reader_owned = endpoint.topic.lifetime == core::TopicLifetime::kReaderOwned;
     using ResultType = core::Result<std::shared_ptr<TopicState>>;
     std::lock_guard<std::mutex> lock(mutex);
     if (!open) {
         return ResultType::FromStatus(core::Status::FailedPrecondition(
             std::string("shm transport must be open before creating ") + what));
     }
+    for (auto entry = topics.begin(); entry != topics.end();) {
+        entry = entry->second.expired() ? topics.erase(entry) : std::next(entry);
+    }
     const auto& key = endpoint.topic.name.str();
     const auto found = topics.find(key);
     if (found != topics.end()) {
-        if (found->second->descriptor() != endpoint.message) {
-            return ResultType::FromStatus(core::Status::InvalidArgument(
-                "shm topic " + key + " carries " + found->second->descriptor().ToString() + ", not "
-                + endpoint.message.ToString()));
+        auto existing = found->second.lock();
+        if (existing) {
+            if (existing->lifetime() != endpoint.topic.lifetime) {
+                return ResultType::FromStatus(core::Status::InvalidArgument(
+                    "shm topic " + key + " is " + core::ToString(existing->lifetime()) + " in this process, not "
+                    + core::ToString(endpoint.topic.lifetime)));
+            }
+            if (existing->descriptor() != endpoint.message) {
+                return ResultType::FromStatus(core::Status::InvalidArgument(
+                    "shm topic " + key + " carries " + existing->descriptor().ToString() + ", not "
+                    + endpoint.message.ToString()));
+            }
+            if (!existing->gone()) {
+                return ResultType(std::move(existing));
+            }
+            // Retired: the old topic stays with the endpoints that still hold
+            // it. A new reader starts a fresh one under the name, and a new
+            // writer attaches to that fresh one, or is NotFound.
         }
-        return ResultType(found->second);
+        topics.erase(found);
     }
-    auto topic = TopicState::Open(options.domain_id, endpoint, options.ForTopic(key), options.wait_poll_interval);
+    auto topic = TopicState::Open(options.domain_id, endpoint, options.ForTopic(key), options.wait_poll_interval,
+                                  !(writer && reader_owned));
     if (!topic.ok()) {
         return topic;
     }
@@ -745,7 +852,7 @@ core::Result<ReaderPtr> ShmTransport::CreateReader(const EndpointConfig& endpoin
     if (!status.ok()) {
         return core::Result<ReaderPtr>::FromStatus(std::move(status));
     }
-    auto topic = GetOrOpenTopic(impl_->mutex, impl_->open, impl_->topics, options_, endpoint, "readers");
+    auto topic = GetOrOpenTopic(impl_->mutex, impl_->open, impl_->topics, options_, endpoint, false);
     if (!topic.ok()) {
         return core::Result<ReaderPtr>::FromStatus(topic.status());
     }
@@ -770,7 +877,7 @@ core::Result<WriterPtr> ShmTransport::CreateWriter(const EndpointConfig& endpoin
     if (!status.ok()) {
         return core::Result<WriterPtr>::FromStatus(std::move(status));
     }
-    auto topic = GetOrOpenTopic(impl_->mutex, impl_->open, impl_->topics, options_, endpoint, "writers");
+    auto topic = GetOrOpenTopic(impl_->mutex, impl_->open, impl_->topics, options_, endpoint, true);
     if (!topic.ok()) {
         return core::Result<WriterPtr>::FromStatus(topic.status());
     }

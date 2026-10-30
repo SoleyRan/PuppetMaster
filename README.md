@@ -117,7 +117,7 @@ shared-memory topics (with the shm adapter too). See
 Add `-DBUILD_SHARED_LIBS=ON` for shared libraries.
 
 Before 1.0 each minor release may break the API and the ABI, so the shared
-libraries' soname includes the minor version (`libpuppet_master.so.0.2`) and
+libraries' soname includes the minor version (`libpuppet_master.so.0.3`) and
 the package accepts only the same minor version. Rebuild dependents when
 upgrading; see [CHANGELOG](CHANGELOG.md).
 
@@ -126,7 +126,7 @@ upgrading; see [CHANGELOG](CHANGELOG.md).
 After installation, another CMake project can consume PuppetMaster with:
 
 ```cmake
-find_package(PuppetMaster 0.2 CONFIG REQUIRED)
+find_package(PuppetMaster 0.3 CONFIG REQUIRED)
 target_link_libraries(my_component PRIVATE PuppetMaster::PuppetMaster)
 ```
 

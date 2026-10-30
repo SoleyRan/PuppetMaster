@@ -151,7 +151,7 @@ std::uint64_t ClampCursor(std::uint64_t cursor, std::uint64_t newest, std::uint6
 
 core::Result<std::shared_ptr<Segment>> Segment::Open(
     core::DomainId domain, const Identity& identity, const SegmentGeometry& geometry,
-    core::Nanoseconds init_timeout)
+    core::Nanoseconds init_timeout, bool create)
 {
     using ResultType = core::Result<std::shared_ptr<Segment>>;
     if (!FitsName(identity.topic) || !FitsName(identity.descriptor.type_name)
@@ -165,8 +165,11 @@ core::Result<std::shared_ptr<Segment>> Segment::Open(
     }
 
     const auto name = ObjectName(domain, identity.topic);
-    auto region = SharedRegion::CreateOrOpen(name, size, init_timeout);
+    auto region = SharedRegion::CreateOrOpen(name, size, init_timeout, create);
     if (!region.ok()) {
+        if (region.status().code() == core::StatusCode::kNotFound) {
+            return ResultType::FromStatus(core::Status::NotFound("shm topic " + identity.topic + " does not exist"));
+        }
         return ResultType::FromStatus(region.status());
     }
     auto* header = static_cast<SegmentHeader*>(region.value()->data());
@@ -188,6 +191,7 @@ core::Result<std::shared_ptr<Segment>> Segment::Open(
             return ResultType::FromStatus(std::move(status));
         }
         header->write_seq.store(0, std::memory_order_relaxed);
+        header->flags.store(0, std::memory_order_relaxed);
         // Publishing the magic last makes the header visible to openers.
         header->magic.store(kMagic, std::memory_order_release);
     } else {
@@ -229,6 +233,11 @@ core::Result<std::shared_ptr<Segment>> Segment::Open(
         if (region.value()->size() < size) {
             return ResultType::FromStatus(core::Status::FailedPrecondition(
                 "shm segment is smaller than its declared geometry" + RemoveHint(name)));
+        }
+        // On Windows a retired segment lives on while a writer still holds
+        // it; it is gone for anyone attaching now.
+        if ((header->flags.load(std::memory_order_acquire) & kSegmentRetired) != 0) {
+            return ResultType::FromStatus(core::Status::NotFound("shm topic " + identity.topic + " was closed by its reader"));
         }
     }
 
@@ -443,6 +452,22 @@ std::vector<std::uint32_t> Segment::ActiveParticipants() const
         }
     }
     return active;
+}
+
+bool Segment::HasLiveParticipant() noexcept
+{
+    ReclaimDeadParticipants();
+    return !ActiveParticipants().empty();
+}
+
+void Segment::Retire() noexcept
+{
+    header_->flags.fetch_or(kSegmentRetired, std::memory_order_acq_rel);
+}
+
+bool Segment::retired() const noexcept
+{
+    return (header_->flags.load(std::memory_order_acquire) & kSegmentRetired) != 0;
 }
 
 void Segment::ReclaimDeadParticipants() noexcept

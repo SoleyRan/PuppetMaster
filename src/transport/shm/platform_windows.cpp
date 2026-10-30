@@ -52,23 +52,35 @@ std::string EventName(const std::string& base, std::uint32_t index)
 }  // namespace
 
 core::Result<std::unique_ptr<SharedRegion>> SharedRegion::CreateOrOpen(
-    const std::string& name, std::size_t size, core::Nanoseconds /*timeout*/)
+    const std::string& name, std::size_t size, core::Nanoseconds /*timeout*/, bool create)
 {
     using ResultType = core::Result<std::unique_ptr<SharedRegion>>;
     if (size == 0) {
         return ResultType::FromStatus(core::Status::InvalidArgument("shared region size must be positive"));
     }
 
-    const auto size64 = static_cast<std::uint64_t>(size);
-    // Page-file backed mappings are created and sized atomically and start
-    // zero-filled, so there is no creation race to wait out.
-    HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-                                        static_cast<DWORD>(size64 >> 32), static_cast<DWORD>(size64),
-                                        Widen(name).c_str());
-    if (mapping == nullptr) {
-        return ResultType::FromStatus(core::Status::Unavailable(LastErrorMessage("CreateFileMappingW")));
+    HANDLE mapping = nullptr;
+    bool created = false;
+    if (create) {
+        const auto size64 = static_cast<std::uint64_t>(size);
+        // Page-file backed mappings are created and sized atomically and
+        // start zero-filled, so there is no creation race to wait out.
+        mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                                     static_cast<DWORD>(size64 >> 32), static_cast<DWORD>(size64),
+                                     Widen(name).c_str());
+        if (mapping == nullptr) {
+            return ResultType::FromStatus(core::Status::Unavailable(LastErrorMessage("CreateFileMappingW")));
+        }
+        created = GetLastError() != ERROR_ALREADY_EXISTS;
+    } else {
+        mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, Widen(name).c_str());
+        if (mapping == nullptr) {
+            if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+                return ResultType::FromStatus(core::Status::NotFound("shared region " + name + " does not exist"));
+            }
+            return ResultType::FromStatus(core::Status::Unavailable(LastErrorMessage("OpenFileMappingW")));
+        }
     }
-    const bool created = GetLastError() != ERROR_ALREADY_EXISTS;
 
     void* data = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0);
     if (data == nullptr) {

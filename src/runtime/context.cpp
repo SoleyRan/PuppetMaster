@@ -639,6 +639,11 @@ core::Result<transport::TransportPtr> RuntimeContext::FindTransport(
     return impl_->FindTransport(name);
 }
 
+core::Result<transport::TransportPtr> RuntimeContext::FindTransport(core::TransportKind kind) const
+{
+    return impl_->FindTransport(kind);
+}
+
 std::vector<core::TransportName> RuntimeContext::ListTransportNames() const
 {
     return impl_->ListTransportNames();

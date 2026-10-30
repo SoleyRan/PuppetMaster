@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(PuppetMaster
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "A C++ real-time middleware runtime for message-driven components and deterministic task scheduling."
     HOMEPAGE_URL "https://github.com/SoleyRan/PuppetMaster"
     LANGUAGES CXX
@@ -21,7 +21,8 @@ else()
 endif()
 
 # Before 1.0, every minor release may break the ABI and the API (0.2 added a
-# virtual function to transport::Writer, for example), so the shared library
+# virtual function to transport::Writer, 0.3 fields to TriggerSpec and
+# NodeManifest, for example), so the shared library
 # soname and the CMake package compatibility both include the minor version.
 # From 1.0 on, only a major release breaks them.
 if(PROJECT_VERSION_MAJOR EQUAL 0)
@@ -98,6 +99,21 @@ if(PUPPETMASTER_ENABLE_GOODLOG AND NOT TARGET GoodLog::good_log)
 
         puppetmaster_fetch_goodlog()
     endif()
+endif()
+
+# Installed shared libraries find each other, and installed tools find them,
+# without LD_LIBRARY_PATH, wherever the prefix is moved: libraries look next
+# to themselves, tools in the lib directory next to bin. Windows needs
+# nothing, because the DLLs are installed next to the tools in bin. Set
+# CMAKE_INSTALL_RPATH to override.
+if(PUPPETMASTER_IS_TOP_LEVEL AND NOT WIN32 AND NOT DEFINED CMAKE_INSTALL_RPATH)
+    if(APPLE)
+        set(PUPPETMASTER_RPATH_ORIGIN "@loader_path")
+    else()
+        set(PUPPETMASTER_RPATH_ORIGIN "$ORIGIN")
+    endif()
+    file(RELATIVE_PATH PUPPETMASTER_LIB_FROM_BIN "${CMAKE_INSTALL_FULL_BINDIR}" "${CMAKE_INSTALL_FULL_LIBDIR}")
+    set(CMAKE_INSTALL_RPATH "${PUPPETMASTER_RPATH_ORIGIN}" "${PUPPETMASTER_RPATH_ORIGIN}/${PUPPETMASTER_LIB_FROM_BIN}")
 endif()
 
 add_subdirectory(src)

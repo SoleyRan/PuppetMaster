@@ -39,6 +39,10 @@ struct PUPPET_MASTER_API Options {
     core::DomainId domain_id {0};
     TopicOptions default_topic;
     std::map<std::string, TopicOptions> topics;  // per-topic override by full name
+    // Override for every topic whose name starts with the key, used when
+    // `topics` has no entry; the longest matching key wins. A service's
+    // per-client reply topics, `<service>/reply/<client>`, are sized this way.
+    std::map<std::string, TopicOptions> topic_prefixes;
     // Upper bound for one notification wait, so a lost wakeup delays delivery
     // by at most this interval.
     core::Nanoseconds wait_poll_interval {std::chrono::milliseconds(50)};
