@@ -5,6 +5,50 @@ each minor release may break the API and the ABI: the shared libraries carry
 the minor version in their soname (`libpuppet_master.so.0.3`), and
 `find_package(PuppetMaster 0.3)` accepts only 0.3.x.
 
+## Unreleased
+
+Breaking wire change for services: upgrade a service's server and all its
+clients together. A 0.3 process and a newer one on the same service do not
+see each other's heartbeats, so calls between them fail at once with
+`Unavailable`. Topics and their data are unchanged; 0.3 and newer processes
+still exchange topic messages, and the shared-memory layout version is the
+same.
+
+### Added
+
+- **Per-client reply topics.** Each service client reads its own reply topic,
+  `<service>/reply/<client id in 16 hex digits>`, instead of every client
+  reading every reply. The server opens a writer per client on its first
+  reply and closes it after `ServerOptions::reply_idle_timeout` (30 s) idle.
+  `service::ReplyEndpointFor` names a client's topic. See
+  [Reply Topics](docs/services.md#reply-topics).
+- **Reader-owned topics.** `core::TopicSpec::lifetime` with
+  `TopicLifetime::kReaderOwned`: the reader creates the topic, writers only
+  attach and get `NotFound` once it is gone, and on shared memory the segment
+  is removed when the reader closes, or by the last writer after the reader
+  crashed. See [Endpoint Configuration](docs/transport.md#endpoint-configuration).
+- `shm::Options::topic_prefixes` sizes every topic under a name. A service's
+  deployment settings cover its per-client reply topics this way.
+- `RuntimeContext::FindTransport(core::TransportKind)`.
+
+### Changed
+
+- Breaking wire: service header version 2, and the presence descriptor is
+  `service.Presence.v2` version 2.
+- Breaking API: `core::TopicSpec` has a new last field, `lifetime`;
+  `ServerOptions` a new field, `reply_idle_timeout`.
+- `ServiceEndpoints::reply` is the base of the per-client reply topics; no
+  process reads or writes `<service>/reply` itself any more.
+- `Client::Close()` also releases the client's reply topic, not only its
+  destructor.
+
+### Fixed
+
+- Every transport now frees a topic in this process when its last reader and
+  writer close. Before, in-memory and shared-memory transports kept every
+  topic they had opened, and FastDDS every DDS topic, until the transport
+  closed, so a process opening many short-lived topics grew without bound.
+
 ## 0.3.0
 
 Rebuild everything that links PuppetMaster: the soname is now

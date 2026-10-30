@@ -45,6 +45,20 @@ identifies the payload contract used by a reader or writer: type name,
 encoding, and an optional version. Every backend rejects an endpoint whose
 descriptor differs from the one already open on that topic.
 
+`TopicSpec::lifetime` says who a topic belongs to:
+
+- `kShared` (default): any endpoint creates the topic.
+- `kReaderOwned`: the topic belongs to its one reader, such as a service
+  client's reply topic. The reader creates it. Writers only attach, and fail
+  with `NotFound` when the reader has not created it or has closed it. What
+  the topic leaves outside the process, a shared-memory segment, is removed
+  when the reader closes. In memory and in shared memory. FastDDS leaves
+  nothing behind and cannot tell a missing reader from an undiscovered one,
+  so it treats the topic as shared; check `MatchedReaderCount` there.
+
+Every backend frees a topic, in this process, when its last reader and writer
+close, so a process can open many short-lived topics.
+
 ## Reader And Writer
 
 `Reader` and `Writer` are pure interfaces:
