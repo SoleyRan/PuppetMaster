@@ -1,16 +1,20 @@
-// puppet_master_topic: looks at the shared-memory topics of a running system
-// without changing it.
+// puppet_master_topic: looks at the topics of a running system without
+// changing it, on shared memory and FastDDS.
 //
 //     puppet_master_topic list
 //     puppet_master_topic echo /vehicle/state --count 5
 //     puppet_master_topic hz /vehicle/state
 //     puppet_master_topic echo --system system.json /vehicle/state
 //
-// echo and hz subscribe like any other reader: they never slow a writer
-// down, and what they miss when they fall behind is overwritten in the ring
-// and reported as lost. A topic's type and ring size come from its segment
-// (Linux only), or with --system from the manifest's nodes and deployment,
-// which also works on Windows and before the writer starts.
+// echo and hz subscribe like any other reader. On shared memory they never
+// slow a writer down, and what they miss when they fall behind is
+// overwritten in the ring and reported as lost. A shared-memory topic's type
+// and ring size come from its segment (Linux only), or with --system from
+// the manifest's nodes and deployment, which also works on Windows and
+// before the writer starts. FastDDS topics come from --system only, and
+// their domain from --domain (default 0); FastDDS carries no writer sequence
+// or publish time, so losses and latency are not shown for them, and rates
+// and intervals are by arrival.
 
 #include <algorithm>
 #include <atomic>
@@ -34,11 +38,17 @@
 #include <puppet_master/configuration/system_manifest.h>
 #include <puppet_master/transport/recording.h>
 #include <puppet_master/transport/shm/shm_transport.h>
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+#include <puppet_master/transport/fastdds/fastdds_transport.h>
+#endif
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace shm = puppet_master::transport::shm;
 namespace transport = puppet_master::transport;
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+namespace fastdds = puppet_master::transport::fastdds;
+#endif
 
 namespace {
 
@@ -66,8 +76,9 @@ int Usage(std::ostream& out)
         << "                  with --system, the system's topics and who writes and reads them\n"
         << "  echo            print each message: sequence, size, latency, and its bytes\n"
         << "  hz              print the message rate, intervals, and losses every window\n"
-        << "  --system FILE   take topics from a system manifest instead of segment headers\n"
-        << "  --domain N      the shared-memory domain (default: any, or the deployment's)\n"
+        << "  --system FILE   take topics from a system manifest instead of segment headers;\n"
+        << "                  needed for FastDDS topics\n"
+        << "  --domain N      the domain (shm default: any, or the deployment's; FastDDS: 0)\n"
         << "  --count N       echo: stop after N messages\n"
         << "  --timeout-ms N  echo: stop after N ms; fails if --count was not reached\n"
         << "  --bytes N       echo: show at most N bytes of each message in hex (default 32)\n"
@@ -79,7 +90,7 @@ int Usage(std::ostream& out)
         << "       puppet_master_topic replay FILE [<topic>...] [--domain N] [--rate X]\n"
         << "       puppet_master_topic info FILE\n"
         << "  record          write the topics' messages to FILE; with no topic, every\n"
-        << "                  shm topic found (or the system's, with --system)\n"
+        << "                  shm topic found (or the system's shm and FastDDS ones, with --system)\n"
         << "  -o FILE         record: the recording to write, replacing it\n"
         << "  --count N       record: stop after N messages in total\n"
         << "  replay          publish a recording's messages again (all, or the topics\n"
@@ -222,7 +233,9 @@ struct TopicInfo {
     std::string name;
     core::TransportKind transport {core::TransportKind::kIpc};
     transport::MessageDescriptor descriptor;
-    shm::TopicOptions geometry;
+    shm::TopicOptions geometry;  // shm only
+    // FastDDS: the topic's delivery, which a reader must match to connect.
+    core::DeliveryGuarantee delivery {core::DeliveryGuarantee::kBestEffort};
     core::DomainId domain {0};
     // From a segment header.
     bool from_segment {false};
@@ -301,7 +314,11 @@ Topics TopicsFromSystem(const std::string& path, std::optional<core::DomainId> d
             info.transport = topic.transport;
             info.descriptor = transport::MessageDescriptor {topic.message_type, topic.encoding, topic.message_version};
             info.geometry = options.value().ForTopic(topic.name);
-            info.domain = domain ? *domain : options.value().domain_id;
+            info.delivery = topic.message_policy.delivery;
+            // A FastDDS domain is chosen in each application's code, not in
+            // configuration, so it comes from --domain (default 0).
+            info.domain = domain ? *domain
+                                 : topic.transport == core::TransportKind::kFastDds ? 0 : options.value().domain_id;
             const auto found = by_name.find(topic.name);
             if (found == by_name.end()) {
                 by_name.emplace(topic.name, std::move(info));
@@ -312,7 +329,8 @@ Topics TopicsFromSystem(const std::string& path, std::optional<core::DomainId> d
                                        known.geometry.slot_count == info.geometry.slot_count;
             if (known.descriptor != info.descriptor || known.transport != info.transport ||
                 known.domain != info.domain ||
-                (info.transport == core::TransportKind::kIpc && !same_geometry)) {
+                (info.transport == core::TransportKind::kIpc && !same_geometry) ||
+                (info.transport == core::TransportKind::kFastDds && known.delivery != info.delivery)) {
                 return Topics::FromStatus(Differs(topic.name, node.name));
             }
         }
@@ -337,12 +355,30 @@ Topics TopicsFromSystem(const std::string& path, std::optional<core::DomainId> d
     return Topics(std::move(topics));
 }
 
+// Transports this build can subscribe and publish on.
+bool Readable(core::TransportKind kind)
+{
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+    if (kind == core::TransportKind::kFastDds) {
+        return true;
+    }
+#endif
+    return kind == core::TransportKind::kIpc;
+}
+
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+constexpr const char* kReadableTransports = "puppet_master_topic reads shared-memory and FastDDS topics only";
+#else
+constexpr const char* kReadableTransports =
+    "this puppet_master_topic was built without FastDDS and reads shared-memory topics only";
+#endif
+
 Topics LoadTopics(const Arguments& args)
 {
     return args.system.empty() ? TopicsFromSegments(args.domain) : TopicsFromSystem(args.system, args.domain);
 }
 
-// The one shared-memory topic called `name` among `topics`.
+// The one readable topic called `name` among `topics`.
 core::Result<TopicInfo> FindTopic(const Arguments& args, const std::vector<TopicInfo>& topics, const std::string& name)
 {
     using ResultType = core::Result<TopicInfo>;
@@ -367,10 +403,10 @@ core::Result<TopicInfo> FindTopic(const Arguments& args, const std::vector<Topic
         return ResultType::FromStatus(core::Status::InvalidArgument(
             "topic " + name + " exists in domains " + domains + "; pick one with --domain"));
     }
-    if (matches.front()->transport != core::TransportKind::kIpc) {
+    if (!Readable(matches.front()->transport)) {
         return ResultType::FromStatus(core::Status::Unsupported(
-            "topic " + name + " uses the " + core::ToString(matches.front()->transport) +
-            " transport; puppet_master_topic reads shared-memory topics only"));
+            "topic " + name + " uses the " + core::ToString(matches.front()->transport) + " transport; " +
+            kReadableTransports));
     }
     return ResultType(*matches.front());
 }
@@ -386,47 +422,125 @@ core::Result<TopicInfo> FindTopic(const Arguments& args, const std::string& name
 
 // --- reading ------------------------------------------------------------
 
-// A plain reader on the topic. It starts after the newest message and keeps
-// up to a ring's worth queued; the ring overwrites what it falls behind on.
+// How deep a FastDDS reader of the tool queues: there is no ring to size it
+// by, so enough for a burst between two reads.
+constexpr std::size_t kFastDdsQueueDepth = 256;
+// How long replay waits for a FastDDS writer to reach a reader, before the
+// first message and before closing.
+constexpr auto kFastDdsMatchTimeout = std::chrono::seconds(2);
+
+// The transport a topic is read and written through: a private shm
+// transport per topic, sized to its ring, or one FastDDS participant per
+// domain, shared by every topic in it.
+class Transports {
+public:
+    core::Result<transport::TransportPtr> For(const TopicInfo& topic)
+    {
+        using ResultType = core::Result<transport::TransportPtr>;
+        transport::TransportPtr created;
+        if (topic.transport == core::TransportKind::kIpc) {
+            shm::Options options;
+            options.domain_id = topic.domain;
+            options.topics[topic.name] = topic.geometry;
+            created = std::make_shared<shm::ShmTransport>(Name(), options);
+        }
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+        else if (topic.transport == core::TransportKind::kFastDds) {
+            const auto found = fastdds_.find(topic.domain);
+            if (found != fastdds_.end()) {
+                return ResultType(found->second);
+            }
+            fastdds::Options options;
+            options.domain_id = topic.domain;
+            options.participant_name = "puppet_master_topic";
+            created = std::make_shared<fastdds::FastDdsTransport>(Name(), options);
+            fastdds_.emplace(topic.domain, created);
+        }
+#endif
+        else {
+            return ResultType::FromStatus(core::Status::Unsupported(kReadableTransports));
+        }
+        auto status = created->Open();
+        if (!status.ok()) {
+            return ResultType::FromStatus(status);
+        }
+        return ResultType(std::move(created));
+    }
+
+private:
+    static core::TransportName Name() { return core::TransportName::Create("puppet_master_topic").value(); }
+
+    std::map<core::DomainId, transport::TransportPtr> fastdds_;
+};
+
+// What a transport carries besides the payload.
+struct Carried {
+    // The writer's sequence numbers, so gaps are losses (shm). FastDDS
+    // readers number what they receive, so gaps cannot be seen.
+    bool sequence {false};
+    // The publish time on a clock this process shares, so latency and
+    // publish intervals can be measured (shm). Otherwise intervals are by
+    // arrival.
+    bool publish_time {false};
+};
+
+Carried CarriedBy(core::TransportKind kind)
+{
+    return kind == core::TransportKind::kIpc ? Carried {true, true} : Carried {false, false};
+}
+
+// A plain reader on the topic. On shm it starts after the newest message and
+// keeps up to a ring's worth queued; the ring overwrites what it falls behind
+// on. On FastDDS it asks for the topic's delivery, which a reader must match
+// to connect to the writers.
 struct Subscription {
-    std::unique_ptr<shm::ShmTransport> shm_transport;
+    transport::TransportPtr owner;
+    Carried carried;
     transport::ReaderPtr reader;  // declared last: released first
 };
 
-core::Result<Subscription> Subscribe(const TopicInfo& topic)
+core::Result<Subscription> Subscribe(Transports& transports, const TopicInfo& topic)
 {
     using ResultType = core::Result<Subscription>;
     const auto failed = [&topic](const core::Status& status) {
         return ResultType::FromStatus(
             core::Status::Error(status.code(), "subscribing to " + topic.name + ": " + status.message()));
     };
-    shm::Options options;
-    options.domain_id = topic.domain;
-    options.topics[topic.name] = topic.geometry;
-    auto transport_name = core::TransportName::Create("puppet_master_topic");
     auto topic_name = core::TopicName::Create(topic.name);
     if (!topic_name.ok()) {
         return failed(topic_name.status());
     }
+    auto owner = transports.For(topic);
+    if (!owner.ok()) {
+        return failed(owner.status());
+    }
 
     Subscription subscription;
-    subscription.shm_transport = std::make_unique<shm::ShmTransport>(transport_name.value(), options);
-    auto status = subscription.shm_transport->Open();
-    if (!status.ok()) {
-        return failed(status);
-    }
+    subscription.owner = owner.value();
+    subscription.carried = CarriedBy(topic.transport);
     core::MessagePolicy policy;
     policy.freshness = core::FreshnessPolicy::kQueued;
     policy.retention = core::RetentionPolicy::kKeepLast;
-    policy.queue_depth = topic.geometry.slot_count;
-    const transport::EndpointConfig endpoint {
-        core::TopicSpec {topic_name.value(), core::TransportKind::kIpc, policy}, topic.descriptor};
-    auto reader = subscription.shm_transport->CreateReader(endpoint);
+    if (topic.transport == core::TransportKind::kIpc) {
+        policy.queue_depth = topic.geometry.slot_count;
+    } else {
+        policy.queue_depth = kFastDdsQueueDepth;
+        policy.delivery = topic.delivery;
+    }
+    const transport::EndpointConfig endpoint {core::TopicSpec {topic_name.value(), topic.transport, policy},
+                                              topic.descriptor};
+    auto reader = subscription.owner->CreateReader(endpoint);
     if (!reader.ok()) {
         return failed(reader.status());
     }
     subscription.reader = reader.value();
     return ResultType(std::move(subscription));
+}
+
+core::Result<Subscription> Subscribe(const TopicInfo& topic)
+{
+    Transports transports;  // the subscription keeps its transport
+    return Subscribe(transports, topic);
 }
 
 // The next message, or none after a short wait.
@@ -478,7 +592,9 @@ int List(const Arguments& args)
     }
     for (const auto& topic : topics.value()) {
         std::cout << topic.name << "  " << topic.descriptor.ToString();
-        if (topic.transport != core::TransportKind::kIpc) {
+        if (topic.transport == core::TransportKind::kFastDds) {
+            std::cout << "  fastdds domain " << topic.domain << ", " << core::ToString(topic.delivery);
+        } else if (topic.transport != core::TransportKind::kIpc) {
             std::cout << "  " << core::ToString(topic.transport);
         } else {
             std::cout << "  domain " << topic.domain << ", " << topic.geometry.slot_payload_size << " B x "
@@ -551,21 +667,32 @@ int Echo(const Arguments& args)
             continue;
         }
         const auto& message = *next.value();
-        const auto gap = Gap(last, message.metadata.sequence);
-        if (gap != 0) {
-            std::cout << "(" << gap << " lost)\n";
-            lost += gap;
+        const auto& carried = subscription.value().carried;
+        if (carried.sequence) {
+            const auto gap = Gap(last, message.metadata.sequence);
+            if (gap != 0) {
+                std::cout << "(" << gap << " lost)\n";
+                lost += gap;
+            }
+            last = message.metadata.sequence;
         }
-        last = message.metadata.sequence;
         ++received;
-        std::cout << "#" << message.metadata.sequence << "  " << message.payload.size() << " B  latency "
-                  << std::fixed << std::setprecision(1)
-                  << Microseconds(message.metadata.reception_timestamp - message.metadata.source_timestamp) << " us";
-        std::cout.unsetf(std::ios::floatfield);
+        std::cout << "#" << message.metadata.sequence << "  " << message.payload.size() << " B";
+        if (carried.publish_time) {
+            std::cout << "  latency " << std::fixed << std::setprecision(1)
+                      << Microseconds(message.metadata.reception_timestamp - message.metadata.source_timestamp)
+                      << " us";
+            std::cout.unsetf(std::ios::floatfield);
+        }
         PrintPayload(message.payload, args);
         std::cout << std::endl;
     }
-    std::cerr << "echo: " << received << " received, " << lost << " lost" << std::endl;
+    if (subscription.value().carried.sequence) {
+        std::cerr << "echo: " << received << " received, " << lost << " lost" << std::endl;
+    } else {
+        std::cerr << "echo: " << received << " received (losses are not visible on "
+                  << core::ToString(topic.value().transport) << ")" << std::endl;
+    }
     // With --count, ending early (timeout) is a failure, so scripts can wait
     // for traffic; Ctrl+C is not.
     return args.count != 0 && received < args.count && !g_stop.load() ? 1 : 0;
@@ -579,16 +706,20 @@ struct Window {
     core::Nanoseconds max_interval {0};
 };
 
-void Report(const Window& window, Clock::duration elapsed)
+void Report(const Window& window, Clock::duration elapsed, const Carried& carried)
 {
     const double seconds = std::chrono::duration<double>(elapsed).count();
     std::cout << std::fixed << std::setprecision(2) << "rate " << (seconds > 0 ? window.received / seconds : 0.0)
               << " Hz  " << window.received << " msgs  " << (seconds > 0 ? window.bytes / seconds : 0.0) << " B/s";
     if (window.received >= 2) {
         std::cout << std::setprecision(3) << "  interval min " << Microseconds(window.min_interval) / 1000.0
-                  << " ms, max " << Microseconds(window.max_interval) / 1000.0 << " ms";
+                  << " ms, max " << Microseconds(window.max_interval) / 1000.0 << " ms"
+                  << (carried.publish_time ? "" : " (by arrival)");
     }
-    std::cout << "  lost " << window.lost << std::endl;
+    if (carried.sequence) {
+        std::cout << "  lost " << window.lost;
+    }
+    std::cout << std::endl;
     std::cout.unsetf(std::ios::floatfield);
 }
 
@@ -620,13 +751,17 @@ int Hz(const Arguments& args)
         }
         if (next.value()) {
             const auto& message = *next.value();
-            window.lost += Gap(last, message.metadata.sequence);
-            last = message.metadata.sequence;
+            const auto& carried = subscription.value().carried;
+            if (carried.sequence) {
+                window.lost += Gap(last, message.metadata.sequence);
+                last = message.metadata.sequence;
+            }
             ++window.received;
             window.bytes += message.payload.size();
-            // Intervals by publish time, so the reader's own delays do not
-            // show up as jitter.
-            const auto stamp = message.metadata.source_timestamp;
+            // Intervals by publish time where the transport carries it, so
+            // the reader's own delays do not show up as jitter.
+            const auto stamp = carried.publish_time ? message.metadata.source_timestamp
+                                                    : message.metadata.reception_timestamp;
             if (last_time) {
                 const auto interval = stamp - *last_time;
                 window.min_interval = std::min(window.min_interval, interval);
@@ -636,7 +771,7 @@ int Hz(const Arguments& args)
         }
         const auto now = Clock::now();
         if (now - window_start >= args.window || now >= deadline) {
-            Report(window, now - window_start);
+            Report(window, now - window_start, subscription.value().carried);
             window = Window {};
             window_start = now;
         }
@@ -681,8 +816,17 @@ struct RecordedChannel {
     Subscription subscription;  // last: its reader's callback uses the wakeup
 };
 
+// What a replay needs to recreate the topic: its transport and domain, plus
+// the ring size on shm or the delivery on FastDDS.
 std::map<std::string, std::string> RecordedParameters(const TopicInfo& topic)
 {
+    if (topic.transport == core::TransportKind::kFastDds) {
+        return {
+            {"transport", "fastdds"},
+            {"domain_id", std::to_string(topic.domain)},
+            {"delivery", core::ToString(topic.delivery)},
+        };
+    }
     return {
         {"transport", "shm"},
         {"domain_id", std::to_string(topic.domain)},
@@ -701,12 +845,12 @@ core::Result<std::vector<TopicInfo>> TopicsToRecord(const Arguments& args)
     std::vector<TopicInfo> chosen;
     if (args.topics.empty()) {
         for (const auto& topic : topics.value()) {
-            if (topic.transport == core::TransportKind::kIpc) {
+            if (Readable(topic.transport)) {
                 chosen.push_back(topic);
             }
         }
         if (chosen.empty()) {
-            return ResultType::FromStatus(core::Status::NotFound("no shm topics to record"));
+            return ResultType::FromStatus(core::Status::NotFound("no topics to record"));
         }
         return ResultType(std::move(chosen));
     }
@@ -735,6 +879,7 @@ int Record(const Arguments& args)
     auto& writer = *recording.value();
 
     Wakeup wakeup;
+    Transports transports;  // one FastDDS participant per domain for all topics
     std::vector<std::unique_ptr<RecordedChannel>> channels;
     for (auto& topic : topics.value()) {
         auto channel = std::make_unique<RecordedChannel>();
@@ -748,7 +893,7 @@ int Record(const Arguments& args)
             return 1;
         }
         channel->id = id.value();
-        auto subscription = Subscribe(topic);
+        auto subscription = Subscribe(transports, topic);
         if (!subscription.ok()) {
             std::cerr << subscription.status().ToString() << '\n';
             return 1;
@@ -765,7 +910,8 @@ int Record(const Arguments& args)
     }
 
     // Times are publish times relative to the start, so the replay keeps the
-    // writers' pace rather than this reader's.
+    // writers' pace rather than this reader's; arrival times on transports
+    // that carry no publish time.
     const auto started = core::TimePoint(std::chrono::duration_cast<core::Nanoseconds>(
         core::SteadyClock::now().time_since_epoch()));
     const auto deadline = args.duration.count() == 0 ? Clock::time_point::max() : Clock::now() + args.duration;
@@ -790,11 +936,16 @@ int Record(const Arguments& args)
                 }
                 any = true;
                 const auto& metadata = message.value().metadata;
-                channel->lost += Gap(channel->last, metadata.sequence);
-                channel->last = metadata.sequence;
+                const auto& carried = channel->subscription.carried;
+                if (carried.sequence) {
+                    channel->lost += Gap(channel->last, metadata.sequence);
+                    channel->last = metadata.sequence;
+                }
                 ++channel->received;
                 ++total;
-                const auto time = std::max(core::Nanoseconds(0), metadata.source_timestamp - started);
+                // Publish time where the transport carries it, else arrival.
+                const auto stamp = carried.publish_time ? metadata.source_timestamp : metadata.reception_timestamp;
+                const auto time = std::max(core::Nanoseconds(0), stamp - started);
                 auto status = writer.Write(channel->id, time, metadata.sequence, transport::ByteView(message.value().payload));
                 if (!status.ok()) {
                     std::cerr << status.ToString() << '\n';
@@ -816,8 +967,11 @@ int Record(const Arguments& args)
         }
     }
     for (const auto& channel : channels) {
-        std::cerr << "record " << channel->topic.name << ": " << channel->received << " messages, "
-                  << channel->lost << " lost" << std::endl;
+        std::cerr << "record " << channel->topic.name << ": " << channel->received << " messages";
+        if (channel->subscription.carried.sequence) {
+            std::cerr << ", " << channel->lost << " lost";
+        }
+        std::cerr << std::endl;
     }
     channels.clear();  // stop the callbacks before the wakeup goes away
     auto status = writer.Close();
@@ -839,54 +993,110 @@ std::uint64_t ParameterOr(const transport::RecordedTopic& topic, const std::stri
 }
 
 struct ReplayChannel {
-    std::unique_ptr<shm::ShmTransport> shm_transport;
+    std::string name;
+    core::TransportKind transport {core::TransportKind::kIpc};
+    transport::TransportPtr owner;
     transport::WriterPtr writer;  // declared last: released first
     std::uint64_t sent {0};
 };
 
-// A writer for a recorded topic, with the ring size and domain it was
-// recorded with (or --domain).
+// The recorded topic as the replay recreates it: its transport, the domain
+// it was recorded in (or --domain), and its ring size or delivery.
+core::Result<TopicInfo> ReplayedTopic(const transport::RecordedTopic& recorded, const Arguments& args)
+{
+    using ResultType = core::Result<TopicInfo>;
+    TopicInfo topic;
+    topic.name = recorded.name;
+    topic.descriptor = recorded.descriptor;
+    const auto domain = ParameterOr(recorded, "domain_id", 0);
+    if (domain > 0xffffffffULL) {
+        return ResultType::FromStatus(core::Status::InvalidArgument("recorded domain_id is out of range"));
+    }
+    topic.domain = args.domain ? *args.domain : static_cast<core::DomainId>(domain);
+    const auto kind = recorded.parameters.find("transport");
+    const std::string transport_name = kind == recorded.parameters.end() ? "shm" : kind->second;
+    if (transport_name == "fastdds") {
+        topic.transport = core::TransportKind::kFastDds;
+        const auto delivery = recorded.parameters.find("delivery");
+        topic.delivery = delivery != recorded.parameters.end() && delivery->second == "reliable"
+                             ? core::DeliveryGuarantee::kReliable
+                             : core::DeliveryGuarantee::kBestEffort;
+    } else if (transport_name == "shm") {
+        const shm::TopicOptions defaults;
+        topic.transport = core::TransportKind::kIpc;
+        topic.geometry = shm::TopicOptions {
+            static_cast<std::size_t>(ParameterOr(recorded, "slot_payload_size", defaults.slot_payload_size)),
+            static_cast<std::size_t>(ParameterOr(recorded, "slot_count", defaults.slot_count))};
+        auto status = topic.geometry.Validate();
+        if (!status.ok()) {
+            return ResultType::FromStatus(status);
+        }
+    } else {
+        return ResultType::FromStatus(
+            core::Status::Unsupported("recorded from the " + transport_name + " transport; " + kReadableTransports));
+    }
+    if (!Readable(topic.transport)) {
+        return ResultType::FromStatus(core::Status::Unsupported(kReadableTransports));
+    }
+    return ResultType(std::move(topic));
+}
+
+// A writer for a recorded topic. On FastDDS it waits until a reader is
+// matched, so the first messages are not sent to nobody.
 core::Result<std::unique_ptr<ReplayChannel>> OpenReplayChannel(
-    const transport::RecordedTopic& topic, const Arguments& args)
+    Transports& transports, const transport::RecordedTopic& recorded, const Arguments& args)
 {
     using ResultType = core::Result<std::unique_ptr<ReplayChannel>>;
-    const auto failed = [&topic](const core::Status& status) {
+    const auto failed = [&recorded](const core::Status& status) {
         return ResultType::FromStatus(
-            core::Status::Error(status.code(), "replaying to " + topic.name + ": " + status.message()));
+            core::Status::Error(status.code(), "replaying to " + recorded.name + ": " + status.message()));
     };
-    const shm::TopicOptions defaults;
-    const auto domain = ParameterOr(topic, "domain_id", 0);
-    if (domain > 0xffffffffULL) {
-        return failed(core::Status::InvalidArgument("recorded domain_id is out of range"));
+    auto topic = ReplayedTopic(recorded, args);
+    if (!topic.ok()) {
+        return failed(topic.status());
     }
-    shm::Options options;
-    options.domain_id = args.domain ? *args.domain : static_cast<core::DomainId>(domain);
-    options.topics[topic.name] = shm::TopicOptions {
-        static_cast<std::size_t>(ParameterOr(topic, "slot_payload_size", defaults.slot_payload_size)),
-        static_cast<std::size_t>(ParameterOr(topic, "slot_count", defaults.slot_count))};
-    auto status = options.Validate();
-    if (!status.ok()) {
-        return failed(status);
-    }
-    auto topic_name = core::TopicName::Create(topic.name);
+    auto topic_name = core::TopicName::Create(recorded.name);
     if (!topic_name.ok()) {
         return failed(topic_name.status());
     }
-
-    auto channel = std::make_unique<ReplayChannel>();
-    channel->shm_transport = std::make_unique<shm::ShmTransport>(
-        core::TransportName::Create("puppet_master_topic").value(), options);
-    status = channel->shm_transport->Open();
-    if (!status.ok()) {
-        return failed(status);
+    auto owner = transports.For(topic.value());
+    if (!owner.ok()) {
+        return failed(owner.status());
+    }
+    core::MessagePolicy policy;
+    if (topic.value().transport == core::TransportKind::kFastDds) {
+        policy.freshness = core::FreshnessPolicy::kQueued;
+        policy.queue_depth = kFastDdsQueueDepth;
+        policy.delivery = topic.value().delivery;
     }
     const transport::EndpointConfig endpoint {
-        core::TopicSpec {topic_name.value(), core::TransportKind::kIpc, core::MessagePolicy {}}, topic.descriptor};
-    auto writer = channel->shm_transport->CreateWriter(endpoint);
+        core::TopicSpec {topic_name.value(), topic.value().transport, policy}, recorded.descriptor};
+    auto writer = owner.value()->CreateWriter(endpoint);
     if (!writer.ok()) {
         return failed(writer.status());
     }
+
+    auto channel = std::make_unique<ReplayChannel>();
+    channel->name = recorded.name;
+    channel->transport = topic.value().transport;
+    channel->owner = owner.value();
     channel->writer = writer.value();
+    if (channel->transport == core::TransportKind::kFastDds) {
+        const auto deadline = Clock::now() + kFastDdsMatchTimeout;
+        while (!g_stop.load()) {
+            auto matched = channel->writer->MatchedReaderCount();
+            if (matched.ok() && matched.value() > 0) {
+                break;
+            }
+            if (Clock::now() >= deadline) {
+                std::cerr << "replay " << recorded.name << ": no reader matched within "
+                          << std::chrono::duration_cast<milliseconds>(kFastDdsMatchTimeout).count()
+                          << " ms; publishing anyway" << std::endl;
+                break;
+            }
+            std::this_thread::sleep_for(milliseconds(10));
+        }
+    }
     return ResultType(std::move(channel));
 }
 
@@ -900,6 +1110,7 @@ int Replay(const Arguments& args)
     auto& recording = *opened.value();
     const std::set<std::string> wanted(args.topics.begin(), args.topics.end());
 
+    Transports transports;  // one FastDDS participant per domain for all topics
     // By recorded topic id; null for a topic left out.
     std::map<std::uint32_t, std::unique_ptr<ReplayChannel>> channels;
     // Paced from the first replayed message, so a quiet start is skipped.
@@ -921,7 +1132,7 @@ int Replay(const Arguments& args)
             const auto* topic = recording.FindTopic(message.topic);
             std::unique_ptr<ReplayChannel> channel;
             if (wanted.empty() || wanted.count(topic->name) != 0) {
-                auto created = OpenReplayChannel(*topic, args);
+                auto created = OpenReplayChannel(transports, *topic, args);
                 if (!created.ok()) {
                     std::cerr << created.status().ToString() << '\n';
                     return 1;
@@ -958,6 +1169,18 @@ int Replay(const Arguments& args)
         }
         ++found->second->sent;
         ++total;
+    }
+
+    // FastDDS sends asynchronously: let reliable readers acknowledge the last
+    // messages before the writers close and drop them.
+    for (const auto& entry : channels) {
+        const auto& channel = entry.second;
+        if (channel && channel->transport == core::TransportKind::kFastDds && channel->sent != 0) {
+            auto delivered = channel->writer->WaitForDelivery(kFastDdsMatchTimeout);
+            if (!delivered.ok()) {
+                std::cerr << "replay " << channel->name << ": " << delivered.message() << std::endl;
+            }
+        }
     }
 
     int exit_code = 0;
@@ -1035,6 +1258,10 @@ int Info(const Arguments& args)
             std::cout << "  shm domain " << ParameterOr(topic, "domain_id", 0) << ", "
                       << ParameterOr(topic, "slot_payload_size", 0) << " B x " << ParameterOr(topic, "slot_count", 0)
                       << " slots";
+        } else if (transport_name != topic.parameters.end() && transport_name->second == "fastdds") {
+            const auto delivery = topic.parameters.find("delivery");
+            std::cout << "  fastdds domain " << ParameterOr(topic, "domain_id", 0) << ", "
+                      << (delivery == topic.parameters.end() ? "best_effort" : delivery->second);
         }
         std::cout << '\n';
     }

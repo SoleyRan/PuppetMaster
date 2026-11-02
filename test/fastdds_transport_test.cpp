@@ -418,9 +418,41 @@ void TopicIsDeletedWithItsLastEndpoint()
     assert(fastdds_transport->Close().ok());
 }
 
+// WaitForDelivery returns once reliable readers acknowledged what was
+// written, so a writer closed right after loses nothing.
+void WaitForDeliveryBeforeClose()
+{
+    auto fastdds_transport = MakeTransport();
+    assert(fastdds_transport->Open().ok());
+    auto endpoint = MakeEndpoint("/fastdds/delivered", "test.Delivered");
+    endpoint.topic.message_policy.freshness = core::FreshnessPolicy::kQueued;  // keep all 10
+    auto reader = fastdds_transport->CreateReader(endpoint);
+    auto writer = fastdds_transport->CreateWriter(endpoint);
+    assert(reader.ok() && writer.ok());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (writer.value()->MatchedReaderCount().value() == 0) {
+        assert(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    for (int index = 0; index < 10; ++index) {
+        const std::string text = "m" + std::to_string(index);
+        assert(writer.value()->Write(transport::ByteView::From(text.data(), text.size())).ok());
+    }
+    assert(writer.value()->WaitForDelivery(std::chrono::seconds(5)).ok());
+    writer.value().reset();
+    for (int index = 0; index < 10; ++index) {
+        auto message = reader.value()->Read(transport::ReadOptions {true, std::chrono::seconds(2)});
+        assert(message.ok());
+        const auto& bytes = message.value().payload;
+        assert(std::string(bytes.begin(), bytes.end()) == "m" + std::to_string(index));
+    }
+    assert(fastdds_transport->Close().ok());
+}
+
 int main()
 {
     TopicIsDeletedWithItsLastEndpoint();
+    WaitForDeliveryBeforeClose();
     RejectsEndpointsBeforeOpen();
     RejectsForeignTransportKind();
     RejectsUnsupportedOverflowPolicy();

@@ -184,7 +184,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasio-dev libtinyxml2-dev libssl-dev ninja-build
+          sudo apt-get install -y libasio-dev libtinyxml2-dev libssl-dev ninja-build nlohmann-json3-dev
 
       - name: Cache FastDDS
         id: cache-deps
@@ -219,6 +219,7 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DPUPPETMASTER_ENABLE_FASTDDS=ON \
+            -DPUPPETMASTER_ENABLE_JSON_CONFIG=ON \
             -DPUPPETMASTER_BUILD_FASTDDS_CROSS_PROCESS_SMOKE=ON \
             -DCMAKE_PREFIX_PATH="$DEPS_PREFIX"
 

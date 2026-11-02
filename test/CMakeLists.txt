@@ -318,6 +318,24 @@ if(PUPPETMASTER_ENABLE_JSON_CONFIG AND TARGET PuppetMaster::ShmAdapter)
         COMMAND puppet_master_topic_tool_test $<TARGET_FILE:puppet_master_topic>
     )
 
+    if(TARGET PuppetMaster::FastDdsAdapter)
+        add_executable(puppet_master_topic_fastdds_test
+            topic_tool_fastdds_test.cpp
+        )
+
+        target_link_libraries(puppet_master_topic_fastdds_test
+            PRIVATE
+                PuppetMaster::JsonConfigAdapter
+                PuppetMaster::FastDdsAdapter
+        )
+
+        add_test(
+            NAME puppet_master.topic_tool_fastdds
+            COMMAND puppet_master_topic_fastdds_test $<TARGET_FILE:puppet_master_topic>
+        )
+        set_tests_properties(puppet_master.topic_tool_fastdds PROPERTIES TIMEOUT 120)
+    endif()
+
     add_executable(puppet_master_json_imports_test
         json_imports_test.cpp
     )

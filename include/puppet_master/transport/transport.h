@@ -108,6 +108,16 @@ public:
             core::Status::Unsupported("writer does not track matched readers"));
     }
 
+    // Waits up to `timeout` until what this writer wrote has reached its
+    // matched readers, for backends that send asynchronously: closing the
+    // writer earlier can drop the last messages. DeadlineExceeded if they
+    // have not. Backends that deliver within Write return Ok at once. Only
+    // reliable readers acknowledge, so best-effort ones are not waited for.
+    virtual core::Status WaitForDelivery(core::Nanoseconds /*timeout*/)
+    {
+        return core::Status::Ok();
+    }
+
     // Publishes a message that `fill` writes in place, so producers can
     // serialize without building their own buffer first. `fill` receives
     // exactly `capacity` writable bytes and returns how many it used. It must

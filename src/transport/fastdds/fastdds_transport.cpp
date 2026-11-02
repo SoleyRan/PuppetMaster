@@ -30,6 +30,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -49,9 +50,11 @@ namespace {
 
 #if PUPPETMASTER_FASTDDS_V3
 constexpr dds::ReturnCode_t kRetOk = dds::RETCODE_OK;
+using FastDdsDuration = eprosima::fastdds::dds::Duration_t;
 #else
 const eprosima::fastrtps::types::ReturnCode_t kRetOk =
     eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK;
+using FastDdsDuration = eprosima::fastrtps::Duration_t;
 #endif
 
 core::TimePoint Now()
@@ -371,6 +374,29 @@ public:
                 core::Status::Unavailable("FastDDS publication matched status is unavailable"));
         }
         return core::Result<std::size_t>(static_cast<std::size_t>(status.current_count));
+    }
+
+    // Writes are sent asynchronously (Options::async_publish), so the last
+    // messages may still be on their way when the writer closes; reliable
+    // readers acknowledge them.
+    core::Status WaitForDelivery(core::Nanoseconds timeout) override
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->writer == nullptr) {
+            return core::Status::Unavailable("FastDDS writer is closed");
+        }
+        const auto clamped = std::max(timeout, core::Nanoseconds::zero());
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(clamped);
+        const auto nanoseconds = clamped - seconds;
+        if (seconds.count() > std::numeric_limits<std::int32_t>::max()) {
+            return core::Status::InvalidArgument("FastDDS delivery wait is too long");
+        }
+        const FastDdsDuration max_wait(static_cast<std::int32_t>(seconds.count()),
+                                       static_cast<std::uint32_t>(nanoseconds.count()));
+        if (state_->writer->wait_for_acknowledgments(max_wait) != kRetOk) {
+            return core::Status::DeadlineExceeded("FastDDS readers did not acknowledge every message in time");
+        }
+        return core::Status::Ok();
     }
 
 private:

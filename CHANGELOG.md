@@ -30,6 +30,15 @@ same.
 - `shm::Options::topic_prefixes` sizes every topic under a name. A service's
   deployment settings cover its per-client reply topics this way.
 - `RuntimeContext::FindTransport(core::TransportKind)`.
+- **Topic tool on FastDDS.** When built with the FastDDS adapter,
+  `puppet_master_topic echo|hz|record|replay` also work on FastDDS topics
+  found with `--system`, in the domain `--domain` picks (0 by default).
+  FastDDS carries no writer sequence or publish time, so losses and latency
+  are not shown and intervals are by arrival. Recordings store `transport`
+  `fastdds`, `domain_id`, and `delivery`. See [Topic Tool](docs/launcher.md#topic-tool).
+- `transport::Writer::WaitForDelivery(timeout)` waits until reliable readers
+  acknowledge every message written; FastDDS implements it, other transports
+  return at once.
 
 ### Changed
 

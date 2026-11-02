@@ -14,8 +14,9 @@ puppet_master_topic replay drive.pmrec /vehicle/imu /vehicle/wheel_speed --rate 
 ## Recording
 
 `record` subscribes to the topics named, or with none named, to every
-shared-memory topic found: those with a segment on this host, or with
-`--system FILE`, those the manifest's nodes declare. It stops after
+topic found that the tool can read: those with a segment on this host, or
+with `--system FILE`, those the manifest's nodes declare, FastDDS ones
+included when the tool is built with FastDDS. It stops after
 `--count N` messages in total, after `--duration-ms N`, or on Ctrl+C, and
 prints how many messages of each topic it recorded and lost.
 
@@ -28,6 +29,11 @@ Each message is stored with its payload, the writer's sequence number, and
 its publish time relative to the start of the recording. Each topic is
 stored with its name, its message descriptor (type, encoding, and version),
 and the shared-memory domain and ring size it was recorded from.
+
+A FastDDS topic is recorded through one participant per domain, with a
+reader that asks for the topic's delivery and queues 256 messages. FastDDS
+carries no writer sequence or publish time, so its losses are not counted,
+times are arrival times, and the stored sequence is the reader's own count.
 
 The recorder flushes the file every 200 ms. If it is killed, the file ends
 inside a record at worst; readers stop there and report the recording as cut
@@ -44,6 +50,10 @@ Messages keep their recorded spacing, measured from the first message
 replayed. `--rate 2` replays twice as fast, `--rate 0.5` at half speed, and
 `--rate 0` publishes everything at once. Readers see new sequence numbers and
 publish times, as from any other writer.
+
+On FastDDS, replay waits up to 2 s for a reader to match before a topic's
+first message, so the start is not sent to nobody, and up to 2 s at the end
+for reliable readers to acknowledge the last messages.
 
 Stop the system's own writers of a topic before replaying it, or readers
 receive both.
@@ -89,5 +99,6 @@ of unknown kinds, so later versions can add kinds without breaking them. A
 change to an existing record raises the format version, which older readers
 refuse.
 
-The recorder stores these topic parameters: `transport` (`shm`),
-`domain_id`, `slot_payload_size`, and `slot_count`.
+The recorder stores these topic parameters: `transport` (`shm` or
+`fastdds`), `domain_id`, and on shm `slot_payload_size` and `slot_count`, on
+FastDDS `delivery` (`best_effort` or `reliable`).
