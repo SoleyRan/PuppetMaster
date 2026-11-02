@@ -2,17 +2,21 @@
 
 PuppetMaster follows [Semantic Versioning](https://semver.org/). Before 1.0,
 each minor release may break the API and the ABI: the shared libraries carry
-the minor version in their soname (`libpuppet_master.so.0.3`), and
-`find_package(PuppetMaster 0.3)` accepts only 0.3.x.
+the minor version in their soname (`libpuppet_master.so.0.4`), and
+`find_package(PuppetMaster 0.4)` accepts only 0.4.x.
 
-## Unreleased
+## 0.4.0
+
+Rebuild everything that links PuppetMaster: the soname is now
+`libpuppet_master.so.0.4`, and `find_package(PuppetMaster 0.3)` no longer
+finds this release.
 
 Breaking wire change for services: upgrade a service's server and all its
-clients together. A 0.3 process and a newer one on the same service do not
+clients together. A 0.3 process and a 0.4 one on the same service do not
 see each other's heartbeats, so calls between them fail at once with
-`Unavailable`. Topics and their data are unchanged; 0.3 and newer processes
-still exchange topic messages, and the shared-memory layout version is the
-same.
+`Unavailable`. Topics and their data are unchanged; 0.3 and 0.4 processes
+still exchange topic messages, the shared-memory layout version is the
+same, and 0.3 JSON configurations still load.
 
 ### Added
 
@@ -46,6 +50,9 @@ same.
   `service.Presence.v2` version 2.
 - Breaking API: `core::TopicSpec` has a new last field, `lifetime`;
   `ServerOptions` a new field, `reply_idle_timeout`.
+- Breaking ABI: `transport::Writer` has a new virtual function,
+  `WaitForDelivery`, with a default implementation, so transports outside
+  PuppetMaster still compile but must be rebuilt.
 - `ServiceEndpoints::reply` is the base of the per-client reply topics; no
   process reads or writes `<service>/reply` itself any more.
 - `Client::Close()` also releases the client's reply topic, not only its
