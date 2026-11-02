@@ -184,8 +184,10 @@ In C++, `configuration::Supervisor` in
 
 ## Topic Tool
 
-`puppet_master_topic` looks at the shared-memory topics of a running system.
-It is built and installed with the JSON and shared-memory adapters.
+`puppet_master_topic` looks at the shared-memory topics of a running system,
+and its FastDDS topics when built with that adapter (see
+[FastDDS Topics](#fastdds-topics)). It is built and installed with the JSON
+and shared-memory adapters.
 
 ```bash
 puppet_master_topic list
@@ -216,6 +218,25 @@ exists in several.
 `echo --count N` stops after N messages. With `--timeout-ms`, it exits with
 1 if fewer arrived, so scripts can wait for traffic. `hz --duration-ms N`
 stops after N ms. Ctrl+C stops either one.
+
+### FastDDS Topics
+
+When PuppetMaster is built with the FastDDS adapter as well, the tool also
+reads and writes FastDDS topics. They are found only with `--system FILE`,
+since they have no segment to read, and are joined in domain `--domain N`
+(0 by default): the FastDDS domain is chosen in each application's code, not
+in its configuration. The tool's reader asks for the topic's `delivery`, so
+it matches the system's writers.
+
+```bash
+puppet_master_topic list --system system.json --domain 3
+puppet_master_topic echo /vehicle/objects --system system.json --domain 3 --text
+```
+
+FastDDS carries neither the writer's sequence numbers nor its publish times,
+so `echo` and `hz` show no losses and no latency, and intervals are measured
+by arrival. A tool built without FastDDS reports that it cannot read such a
+topic.
 
 The tool also records and replays topics:
 

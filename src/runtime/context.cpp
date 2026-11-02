@@ -310,6 +310,11 @@ public:
         return writer_->MatchedReaderCount();
     }
 
+    core::Status WaitForDelivery(core::Nanoseconds timeout) override
+    {
+        return writer_->WaitForDelivery(timeout);
+    }
+
     // Forwarded so zero-copy backends keep their in-place path; the default
     // implementation would route through Write() and copy.
     core::Status WriteWith(

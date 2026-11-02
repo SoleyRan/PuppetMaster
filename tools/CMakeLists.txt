@@ -42,7 +42,8 @@ install(
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
-# Topic inspection reads shared-memory topics.
+# Topic inspection reads shared-memory topics, and FastDDS ones when that
+# adapter is built.
 if(TARGET PuppetMaster::ShmAdapter)
     add_executable(puppet_master_topic
         puppet_master_topic.cpp
@@ -53,6 +54,11 @@ if(TARGET PuppetMaster::ShmAdapter)
             PuppetMaster::JsonConfigAdapter
             PuppetMaster::ShmAdapter
     )
+
+    if(TARGET PuppetMaster::FastDdsAdapter)
+        target_link_libraries(puppet_master_topic PRIVATE PuppetMaster::FastDdsAdapter)
+        target_compile_definitions(puppet_master_topic PRIVATE PUPPETMASTER_TOPIC_WITH_FASTDDS)
+    endif()
 
     if(MSVC)
         target_compile_options(puppet_master_topic PRIVATE /W4 /permissive-)
