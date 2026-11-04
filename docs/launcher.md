@@ -263,7 +263,7 @@ puppet_master_topic service call /map/query --system system.json --hex "01 00 2a
 | Command | Effect |
 |---|---|
 | `service list` | each service the manifest's nodes declare: request and reply types, transport, which components serve and call it, and whether a server is up, with its instance id and the age of its newest heartbeat |
-| `service call SERVICE` | send one request, the bytes of `--data TEXT`, of `--hex HEX`, or none, and print the reply's size, round trip, and bytes (in hex, or `--text`; all of them unless `--bytes N`) |
+| `service call SERVICE` | send one request, the bytes of `--data TEXT`, of `--hex HEX`, of `--field TYPE:VALUE`s (see [Typed Requests](#typed-requests)), or none, and print the reply's size, round trip, and bytes (in hex, or `--text`; all of them unless `--bytes N`), or its fields with `--reply-fields` |
 
 `service list` reads each service's presence topic only, so it creates no
 client and no reply topic. It listens for three heartbeat intervals (at
@@ -285,7 +285,53 @@ the service, not the processes running.
 request like any other. It waits up to `--timeout-ms N` (2000 by default)
 for a server and its reply, then exits with 1 and the call's status, such as
 `unavailable` (no live server), `deadline_exceeded`, or the handler's own
-error and message. Requests carry raw bytes: encode typed requests yourself.
+error and message.
+
+#### Typed Requests
+
+For a service whose messages use the [portable codec](typed-messages.md#portable-codec),
+`--field TYPE:VALUE` builds the request field by field, in the order of the
+type's `PortableFields`, and `--reply-fields TYPE,...` decodes the reply the
+same way. The tool has no C++ types of its own, so the field list is yours to
+match:
+
+```bash
+# struct PoseQuery { std::string frame; std::uint32_t id; std::vector<double> weights; };
+# struct Pose { double x, y; std::string frame; std::array<float, 2> covariance; bool valid; };
+puppet_master_topic service call /map/pose --system system.json \
+    --field string:map --field u32:7 --field "f64[]:1, 2.5" \
+    --reply-fields "f64,f64,string,f32[2],bool"
+```
+
+```text
+call /map/pose: server 7763ad3f9789659a, request 31 B
+reply 32 B in 0.6 ms
+  1 f64: 10.5
+  2 f64: 3.5
+  3 string: "map"
+  4 f32[2]: [0.25, -1]
+  5 bool: true
+```
+
+| Type | Value |
+|---|---|
+| `bool` | `true`, `false`, `1`, or `0` |
+| `i8` `i16` `i32` `i64`, `u8` `u16` `u32` `u64` | decimal or `0x` hex, within the type's range |
+| `f32`, `f64` | a decimal number, such as `1.5` or `-3e2` |
+| `string` | the rest of the argument, as it is |
+| `T[]` | a vector: elements separated by commas; empty for none |
+| `T[N]` | an array of exactly N elements |
+
+A field of a nested type is its own fields in order, so list those. Enums are
+their underlying integer type. String elements of a vector cannot contain a
+comma.
+
+A request missing a field comes back as the server's decode error
+(`data_loss: ...: message ends inside a field`). A reply that does not match
+`--reply-fields` exits with 1, names the first field that failed or the bytes
+left over, and prints the reply's bytes so the list can be corrected. A
+change to a message's fields also changes its version, so check the
+`request` and `reply` versions `service list` shows.
 
 ## Library Helpers
 

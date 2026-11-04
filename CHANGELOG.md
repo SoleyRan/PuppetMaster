@@ -22,6 +22,11 @@ the minor version in their soname (`libpuppet_master.so.0.4`), and
   (`stopped`) from one whose heartbeats stopped without one (`down`, with
   its last heartbeat's age), also when the server stopped before the tool
   started. See [Segment Lifetime](docs/shm-transport.md#segment-lifetime).
+- **Typed service calls.** `service call --field TYPE:VALUE` builds a
+  portable-codec request field by field (`bool`, `i8`-`i64`, `u8`-`u64`,
+  `f32`, `f64`, `string`, with `[]` for a vector or `[N]` for an array), and
+  `--reply-fields TYPE,...` decodes the reply into one line per field. See
+  [Typed Requests](docs/launcher.md#typed-requests).
 
 ## 0.4.0
 

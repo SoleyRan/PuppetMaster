@@ -49,6 +49,8 @@
 #include <puppet_master/service/service.h>
 #include <puppet_master/transport/recording.h>
 #include <puppet_master/transport/shm/shm_transport.h>
+
+#include "portable_fields.h"
 #ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
 #include <puppet_master/transport/fastdds/fastdds_transport.h>
 #endif
@@ -112,13 +114,18 @@ int Usage(std::ostream& out)
         << "  info            the topics, message counts, and length of a recording\n"
         << "       puppet_master_topic service list --system FILE [--domain N] [--timeout-ms N]\n"
         << "       puppet_master_topic service call <service> --system FILE [--domain N]\n"
-        << "                                        [--data TEXT | --hex HEX] [--timeout-ms N]\n"
+        << "                                        [--data TEXT | --hex HEX | --field TYPE:VALUE...]\n"
+        << "                                        [--reply-fields TYPE,...] [--timeout-ms N]\n"
         << "                                        [--bytes N] [--text]\n"
         << "  service list    the system's services, who serves and calls them, and whether a\n"
         << "                  server is up, from its heartbeats; listens --timeout-ms (default:\n"
         << "                  three heartbeat intervals, at least 1 s on FastDDS)\n"
         << "  service call    send one request, TEXT's bytes, HEX's (\"68 69\"), or none, and print\n"
         << "                  the reply; fails with the call's status (--timeout-ms, default 2000)\n"
+        << "  --field T:V     service call: a request field in PortableCodec's wire order, repeated;\n"
+        << "                  T is bool, i8-i64, u8-u64, f32, f64, or string, with [] for a\n"
+        << "                  vector or [N] for an array (elements separated by commas)\n"
+        << "  --reply-fields  service call: decode the reply as these types, one per field\n"
         << "Ctrl+C stops echo, hz, record, and replay.\n";
     return 2;
 }
@@ -134,6 +141,8 @@ struct Arguments {
     milliseconds timeout {0};
     bool timeout_set {false};
     transport::ByteBuffer data;  // service call: the request
+    bool typed_request {false};  // service call: data came from --field
+    std::vector<puppet_master::tools::FieldType> reply_fields;  // service call: --reply-fields
     milliseconds window {1000};
     milliseconds duration {0};
     std::uint64_t bytes {32};
@@ -250,9 +259,49 @@ int Parse(int argc, char** argv, Arguments& args)
             args.bytes_set = true;
         } else if (argument == "--text" && (echo || call)) {
             args.text = true;
+        } else if (argument == "--field" && call && has_value) {
+            if (has_data && !args.typed_request) {
+                std::cerr << "give --data, --hex, or --field, not several\n";
+                return 2;
+            }
+            has_data = true;
+            args.typed_request = true;
+            const std::string value = argv[++index];
+            const auto colon = value.find(':');
+            auto type = puppet_master::tools::ParseFieldType(
+                colon == std::string::npos ? std::string_view(value) : std::string_view(value).substr(0, colon));
+            if (colon == std::string::npos || !type.ok()) {
+                std::cerr << "--field needs TYPE:VALUE"
+                          << (type.ok() ? std::string() : "; " + type.status().message()) << '\n';
+                return 2;
+            }
+            auto status = puppet_master::tools::EncodeField(
+                type.value(), std::string_view(value).substr(colon + 1), args.data);
+            if (!status.ok()) {
+                std::cerr << "--field " << value << ": " << status.message() << '\n';
+                return 2;
+            }
+        } else if (argument == "--reply-fields" && call && has_value) {
+            const std::string value = argv[++index];
+            std::size_t start = 0;
+            while (true) {
+                const auto comma = value.find(',', start);
+                const auto part =
+                    value.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+                auto type = puppet_master::tools::ParseFieldType(part);
+                if (!type.ok()) {
+                    std::cerr << "--reply-fields: " << type.status().message() << '\n';
+                    return 2;
+                }
+                args.reply_fields.push_back(type.value());
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
         } else if ((argument == "--data" || argument == "--hex") && call && has_value) {
             if (has_data) {
-                std::cerr << "give --data or --hex once\n";
+                std::cerr << "give --data, --hex, or --field, not several\n";
                 return 2;
             }
             has_data = true;
@@ -1737,8 +1786,25 @@ int ServiceCall(const Arguments& args)
     std::cout << "reply " << reply.value().size() << " B in " << std::fixed << std::setprecision(1)
               << Microseconds(std::chrono::duration_cast<core::Nanoseconds>(took)) / 1000.0 << " ms";
     std::cout.unsetf(std::ios::floatfield);
-    PrintPayload(reply.value(), args);
+    if (args.reply_fields.empty()) {
+        PrintPayload(reply.value(), args);
+        std::cout << std::endl;
+        return 0;
+    }
     std::cout << std::endl;
+    auto fields = puppet_master::tools::DecodeFields(args.reply_fields, transport::ByteView(reply.value()));
+    if (!fields.ok()) {
+        // The reply arrived; show its bytes so the field list can be fixed.
+        std::cerr << "reply " << info.spec.reply.ToString() << ": " << fields.status().ToString() << '\n';
+        PrintPayload(reply.value(), args);
+        std::cout << std::endl;
+        return 1;
+    }
+    for (std::size_t index = 0; index < fields.value().size(); ++index) {
+        std::cout << "  " << index + 1 << " " << puppet_master::tools::ToString(args.reply_fields[index]) << ": "
+                  << fields.value()[index] << '\n';
+    }
+    std::cout << std::flush;
     return 0;
 }
 

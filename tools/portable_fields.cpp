@@ -383,6 +383,9 @@ core::Result<FieldType> ParseFieldType(std::string_view text)
     };
     FieldType type;
     auto name = Trim(text);
+    if (name.empty()) {
+        return ResultType::FromStatus(core::Status::InvalidArgument("empty field type"));
+    }
     const auto bracket = name.find('[');
     if (bracket != std::string_view::npos) {
         if (name.back() != ']') {
