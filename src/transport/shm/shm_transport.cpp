@@ -671,6 +671,43 @@ core::Result<std::vector<SegmentInfo>> ListSegments(std::optional<core::DomainId
     return ResultType(std::move(segments));
 }
 
+core::Result<std::optional<Message>> ReadNewestMessage(core::DomainId domain_id, const EndpointConfig& endpoint)
+{
+    using ResultType = core::Result<std::optional<Message>>;
+    auto status = endpoint.Validate();
+    if (!status.ok()) {
+        return ResultType::FromStatus(std::move(status));
+    }
+    const auto& topic = endpoint.topic.name.str();
+    auto newest = detail::ReadNewestInSegment(detail::ObjectName(domain_id, topic));
+    if (!newest.ok()) {
+        if (newest.status().code() == core::StatusCode::kNotFound) {
+            return ResultType::FromStatus(core::Status::NotFound("no shm segment for topic " + topic));
+        }
+        return ResultType::FromStatus(newest.status());
+    }
+    const auto& inspection = newest.value().inspection;
+    if (inspection.state != detail::SegmentInspection::State::kValid) {
+        return ResultType::FromStatus(
+            core::Status::FailedPrecondition("shm segment of topic " + topic + ": " + inspection.problem));
+    }
+    if (inspection.topic != topic) {
+        return ResultType::FromStatus(
+            core::Status::FailedPrecondition("shm segment of topic " + topic + " belongs to " + inspection.topic));
+    }
+    if (inspection.descriptor != endpoint.message) {
+        return ResultType::FromStatus(core::Status::InvalidArgument(
+            "shm topic " + topic + " carries " + inspection.descriptor.ToString() + ", not " +
+            endpoint.message.ToString()));
+    }
+    if (!newest.value().message) {
+        return ResultType(std::optional<Message>());
+    }
+    auto message = std::move(*newest.value().message);
+    message.metadata.reception_timestamp = Now();
+    return ResultType(std::optional<Message>(std::move(message)));
+}
+
 core::Result<std::vector<SegmentInfo>> RemoveUnusedSegments(std::optional<core::DomainId> domain_id)
 {
     using ResultType = core::Result<std::vector<SegmentInfo>>;

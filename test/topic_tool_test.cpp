@@ -401,15 +401,32 @@ void TestServices(Fixture& fixture, const std::string& tool)
     run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--hex", "6"}, 0ms);
     assert(run.exit.code == 2);
 
-    // Stopped: a call fails at once instead of timing out.
+    // Stopped in order before the tool started: its goodbye is still the
+    // newest presence message, which the tool reads from the segment. A
+    // presence writer kept open keeps the segment alive on Windows too.
+    const auto endpoints = service::EndpointsFor(fixture.Service());
+    assert(endpoints.ok());
+    auto presence = context.value()->CreateWriter(endpoints.value().presence);
+    assert(presence.ok());
     server.value()->Close();
     run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
     assert(run.exit.success());
-    assert(!Contains(run.output, "  server: up"));
+    assert(Contains(run.output, "  server: stopped (instance " + instance + " said goodbye "));
     run = fixture.Run(
         {tool, "service", "call", name, "--system", fixture.system(), "--data", "x", "--timeout-ms", "500"}, 0ms);
     assert(run.exit.code == 1);
     assert(Contains(run.output, "unavailable: "));
+
+    // Gone without a goodbye, as after a crash: its last heartbeat, a second
+    // old, is the newest presence message.
+    unsigned char heartbeat[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x08, 5};
+    transport::WriteOptions old;
+    old.source_timestamp = std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now() - 1s);
+    assert(presence.value()->Write(transport::ByteView::From(heartbeat, sizeof(heartbeat)), old).ok());
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output,
+        "  server: down (instance 0877665544332211 stopped without a goodbye; last heartbeat "));
 }
 
 #if !defined(_WIN32)

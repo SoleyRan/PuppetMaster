@@ -490,32 +490,29 @@ void Segment::ReclaimDeadParticipants() noexcept
     }
 }
 
-core::Result<SegmentInspection> InspectSegment(const std::string& name)
+namespace {
+
+SegmentInspection Inspect(const SharedRegion& region)
 {
-    using ResultType = core::Result<SegmentInspection>;
-    auto region = SharedRegion::OpenReadOnly(name);
-    if (!region.ok()) {
-        return ResultType::FromStatus(region.status());
-    }
     SegmentInspection inspection;
-    inspection.size = region.value()->size();
+    inspection.size = region.size();
     if (inspection.size < HeaderSize()) {
         inspection.state = inspection.size == 0 ? SegmentInspection::State::kUninitialized
                                                 : SegmentInspection::State::kIncompatible;
         inspection.problem = inspection.size == 0 ? "never sized" : "smaller than a segment header";
-        return ResultType(std::move(inspection));
+        return inspection;
     }
-    const auto& header = *static_cast<const SegmentHeader*>(region.value()->data());
+    const auto& header = *static_cast<const SegmentHeader*>(region.data());
     if (header.magic.load(std::memory_order_acquire) != kMagic) {
         inspection.state = SegmentInspection::State::kUninitialized;
         inspection.problem = "header never published";
-        return ResultType(std::move(inspection));
+        return inspection;
     }
     if (header.layout_version != kLayoutVersion || header.header_size != HeaderSize()) {
         inspection.state = SegmentInspection::State::kIncompatible;
         inspection.problem = "layout version " + std::to_string(header.layout_version) + ", expected "
             + std::to_string(kLayoutVersion);
-        return ResultType(std::move(inspection));
+        return inspection;
     }
     inspection.topic = LoadName(header.topic_name);
     inspection.descriptor = StoredDescriptor(header);
@@ -528,7 +525,74 @@ core::Result<SegmentInspection> InspectSegment(const std::string& name)
         inspection.participants.push_back(ProcessIdentity {
             entry.pid.load(std::memory_order_relaxed), entry.start_time.load(std::memory_order_relaxed)});
     }
-    return ResultType(std::move(inspection));
+    return inspection;
+}
+
+// The newest committed message, by the reader's seqlock protocol. A slot the
+// writers overwrite while it is copied is retried a few times, then given up.
+std::optional<Message> ReadNewest(const SharedRegion& region, const SegmentInspection& inspection)
+{
+    const auto& geometry = inspection.geometry;
+    const auto stride = SlotStride(geometry.slot_payload_size);
+    const auto size = SegmentSize(geometry);
+    if (stride == 0 || geometry.slot_count == 0 || size == 0 || region.size() < size) {
+        return std::nullopt;
+    }
+    const auto& header = *static_cast<const SegmentHeader*>(region.data());
+    const auto* slots = static_cast<const unsigned char*>(region.data()) + HeaderSize();
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const std::uint64_t newest = header.write_seq.load(std::memory_order_acquire);
+        if (newest == 0) {
+            return std::nullopt;
+        }
+        const unsigned char* slot = slots + static_cast<std::size_t>(newest % geometry.slot_count) * stride;
+        const auto* slot_header = reinterpret_cast<const SlotHeader*>(slot);
+        const std::uint64_t before = slot_header->seq.load(std::memory_order_acquire);
+        if (before != newest) {
+            continue;  // a writer moved on; take the new newest
+        }
+        const std::uint64_t payload_size = slot_header->payload_size.load(std::memory_order_relaxed);
+        const std::int64_t timestamp = slot_header->source_timestamp_ns.load(std::memory_order_relaxed);
+        if (payload_size > geometry.slot_payload_size) {
+            continue;
+        }
+        Message message;
+        message.payload.resize(static_cast<std::size_t>(payload_size));
+        CopyFromShared(message.payload.data(), slot + kSlotPayloadOffset, static_cast<std::size_t>(payload_size));
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (slot_header->seq.load(std::memory_order_relaxed) != before) {
+            continue;
+        }
+        message.metadata.sequence = newest;
+        message.metadata.source_timestamp = core::TimePoint(core::Nanoseconds(timestamp));
+        return message;
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+core::Result<SegmentInspection> InspectSegment(const std::string& name)
+{
+    auto region = SharedRegion::OpenReadOnly(name);
+    if (!region.ok()) {
+        return core::Result<SegmentInspection>::FromStatus(region.status());
+    }
+    return core::Result<SegmentInspection>(Inspect(*region.value()));
+}
+
+core::Result<NewestMessage> ReadNewestInSegment(const std::string& name)
+{
+    auto region = SharedRegion::OpenReadOnly(name);
+    if (!region.ok()) {
+        return core::Result<NewestMessage>::FromStatus(region.status());
+    }
+    NewestMessage newest;
+    newest.inspection = Inspect(*region.value());
+    if (newest.inspection.state == SegmentInspection::State::kValid) {
+        newest.message = ReadNewest(*region.value(), newest.inspection);
+    }
+    return core::Result<NewestMessage>(std::move(newest));
 }
 
 }  // namespace puppet_master::transport::shm::detail

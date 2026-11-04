@@ -44,7 +44,7 @@ public:
     static core::Status Remove(const std::string& name);
 
     // Maps an existing region read-only, for inspection. NotFound if it does
-    // not exist. Unsupported on Windows.
+    // not exist. On Windows a region exists only while a process has it open.
     static core::Result<std::unique_ptr<SharedRegion>> OpenReadOnly(const std::string& name);
 
     // Names of the regions this layer created in `domain` (every domain if

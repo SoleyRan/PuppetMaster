@@ -1509,26 +1509,76 @@ struct Presence {
     std::optional<Clock::time_point> heard;  // newest heartbeat or goodbye
 };
 
-// Reads the heartbeats that arrived; each is {u64 instance, u64 sequence},
-// little-endian, and sequence 0 is the server's goodbye.
+// A presence message is {u64 instance, u64 sequence}, little-endian, and
+// sequence 0 is the server's goodbye.
+struct Heartbeat {
+    std::uint64_t instance {0};
+    bool goodbye {false};
+};
+
+std::optional<Heartbeat> DecodeHeartbeat(const transport::ByteBuffer& payload)
+{
+    if (payload.size() != 16) {
+        return std::nullopt;
+    }
+    std::uint64_t instance = 0;
+    std::uint64_t sequence = 0;
+    for (int index = 7; index >= 0; --index) {
+        instance = (instance << 8) | payload[static_cast<std::size_t>(index)];
+        sequence = (sequence << 8) | payload[static_cast<std::size_t>(8 + index)];
+    }
+    return Heartbeat {instance, sequence == 0};
+}
+
+// Reads the heartbeats that arrived.
 void Poll(Presence& presence)
 {
     for (auto message = presence.subscription->reader->Read(); message.ok();
          message = presence.subscription->reader->Read()) {
-        const auto& payload = message.value().payload;
-        if (payload.size() != 16) {
+        const auto heartbeat = DecodeHeartbeat(message.value().payload);
+        if (!heartbeat) {
             continue;
         }
-        std::uint64_t instance = 0;
-        std::uint64_t sequence = 0;
-        for (int index = 7; index >= 0; --index) {
-            instance = (instance << 8) | payload[static_cast<std::size_t>(index)];
-            sequence = (sequence << 8) | payload[static_cast<std::size_t>(8 + index)];
-        }
-        presence.instance = instance;
-        presence.goodbye = sequence == 0;
+        presence.instance = heartbeat->instance;
+        presence.goodbye = heartbeat->goodbye;
         presence.heard = Clock::now();
     }
+}
+
+// For a shm service whose server was not heard: the last presence message
+// left in its segment, read without attaching. A goodbye means it stopped in
+// order; a heartbeat, that it stopped without one (a crash, a kill) or that
+// it is alive but slower than its interval. Empty if there is none to read.
+std::string LastWord(const ServiceInfo& info)
+{
+    if (info.spec.transport != core::TransportKind::kIpc) {
+        return {};
+    }
+    auto endpoints = service::EndpointsFor(info.spec);
+    if (!endpoints.ok()) {
+        return {};
+    }
+    auto newest = shm::ReadNewestMessage(info.domain, endpoints.value().presence);
+    if (!newest.ok() || !newest.value()) {
+        return {};
+    }
+    const auto& message = *newest.value();
+    const auto heartbeat = DecodeHeartbeat(message.payload);
+    if (!heartbeat) {
+        return {};
+    }
+    // Both stamps are on the steady clock every process on the host shares.
+    const auto age = std::chrono::duration_cast<milliseconds>(
+        message.metadata.reception_timestamp - message.metadata.source_timestamp);
+    const auto ago = std::to_string(std::max<std::int64_t>(age.count(), 0)) + " ms ago";
+    if (heartbeat->goodbye) {
+        return "stopped (instance " + Hex16(heartbeat->instance) + " said goodbye " + ago + ")";
+    }
+    if (age <= 3 * info.spec.heartbeat_interval) {
+        return "up, instance " + Hex16(heartbeat->instance) + ", heartbeat " + ago;
+    }
+    return "down (instance " + Hex16(heartbeat->instance) + " stopped without a goodbye; last heartbeat " + ago +
+           ")";
 }
 
 int ServiceList(const Arguments& args)
@@ -1591,8 +1641,13 @@ int ServiceList(const Arguments& args)
         if (!presence.subscription) {
             std::cout << "unknown (" << presence.problem << ")";
         } else if (!presence.heard) {
-            std::cout << "down (no heartbeat in " << std::chrono::duration_cast<milliseconds>(listen).count()
-                      << " ms)";
+            const auto last = LastWord(info);
+            if (!last.empty()) {
+                std::cout << last;
+            } else {
+                std::cout << "down (no heartbeat in " << std::chrono::duration_cast<milliseconds>(listen).count()
+                          << " ms)";
+            }
         } else if (presence.goodbye) {
             std::cout << "stopped (instance " << Hex16(presence.instance) << " said goodbye)";
         } else {

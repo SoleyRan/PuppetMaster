@@ -16,6 +16,12 @@ the minor version in their soname (`libpuppet_master.so.0.4`), and
   `--hex HEX`) through an ordinary client and prints the reply, or exits
   with 1 and the call's status. Both work on shared memory and, when built
   with it, FastDDS. See [Services](docs/launcher.md#services).
+- `shm::ReadNewestMessage(domain, endpoint)` reads the newest message of a
+  topic from its segment without attaching, so no writer or reader notices.
+  `service list` uses it on shared memory to tell a server that said goodbye
+  (`stopped`) from one whose heartbeats stopped without one (`down`, with
+  its last heartbeat's age), also when the server stopped before the tool
+  started. See [Segment Lifetime](docs/shm-transport.md#segment-lifetime).
 
 ## 0.4.0
 

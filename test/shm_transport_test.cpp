@@ -700,6 +700,48 @@ void TopicIsReleasedWithItsLastEndpoint()
     assert(shm_transport->Close().ok());
 }
 
+// The newest message is read from the segment without attaching: readers
+// created afterwards still start after it. Linux keeps the segment after its
+// last process closes it, so the last message stays readable there.
+void ReadNewestMessageWithoutAttaching()
+{
+    const TopicCleanup cleanup {UniqueTopic("newest")};
+    const auto endpoint = Endpoint(cleanup.topic);
+    assert(shm::ReadNewestMessage(kDomain, endpoint).status().code() == core::StatusCode::kNotFound);
+
+    auto shm_transport = MakeTransport();
+    auto writer = shm_transport->CreateWriter(endpoint);
+    assert(writer.ok());
+    auto empty = shm::ReadNewestMessage(kDomain, endpoint);
+    assert(empty.ok() && !empty.value());
+
+    // More than a ring, so the newest slot is not the first.
+    for (int index = 0; index < 20; ++index) {
+        Write(*writer.value(), "msg " + std::to_string(index));
+    }
+    auto newest = shm::ReadNewestMessage(kDomain, endpoint);
+    assert(newest.ok() && newest.value());
+    assert(Text(*newest.value()) == "msg 19");
+    assert(newest.value()->metadata.sequence == 20);
+    const auto age = newest.value()->metadata.reception_timestamp - newest.value()->metadata.source_timestamp;
+    assert(age >= core::Nanoseconds::zero() && age < 10s);
+
+    assert(shm::ReadNewestMessage(kDomain, Endpoint(cleanup.topic, {}, "test.Other")).status().code() ==
+           core::StatusCode::kInvalidArgument);
+
+    auto reader = shm_transport->CreateReader(endpoint);
+    assert(reader.ok());
+    assert(!reader.value()->Read().ok());
+
+#ifndef _WIN32
+    reader.value().reset();
+    writer.value().reset();
+    assert(shm_transport->Close().ok());
+    auto after = shm::ReadNewestMessage(kDomain, endpoint);
+    assert(after.ok() && after.value() && Text(*after.value()) == "msg 19");
+#endif
+}
+
 constexpr int kCrossProcessMessages = 200;
 
 // Child: publish until the parent acknowledges every message.
@@ -835,6 +877,7 @@ int main(int argc, char** argv)
     RuntimeRegistration();
     WriteWithFillsInPlace();
     TopicIsReleasedWithItsLastEndpoint();
+    ReadNewestMessageWithoutAttaching();
     PrefixOptions();
     ReaderOwnedTopicBelongsToItsReader();
     CrashedReaderTopicIsRemovedByLastWriter(argv[0]);

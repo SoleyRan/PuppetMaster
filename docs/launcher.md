@@ -267,9 +267,17 @@ puppet_master_topic service call /map/query --system system.json --hex "01 00 2a
 
 `service list` reads each service's presence topic only, so it creates no
 client and no reply topic. It listens for three heartbeat intervals (at
-least 1 s on FastDDS, for discovery), or `--timeout-ms N`. A server is
-`down` when no heartbeat arrived in that time, and `stopped` when it said
-goodbye while the tool listened; one that stopped earlier shows as `down`.
+least 1 s on FastDDS, for discovery), or `--timeout-ms N`. When no heartbeat
+arrives in that time, on shared memory it reads the last presence message
+left in the topic's segment (`shm::ReadNewestMessage`, without attaching):
+
+| `server:` | Meaning |
+|---|---|
+| `up, instance ID, heartbeat N ms ago` | a heartbeat within three intervals |
+| `stopped (instance ID said goodbye N ms ago)` | the server closed in order |
+| `down (instance ID stopped without a goodbye; last heartbeat N ms ago)` | its heartbeats stopped: a crash, a kill, or a server too busy to keep its interval |
+| `down (no heartbeat in N ms)` | nothing to read: never started, on FastDDS, or on Windows after its last process closed the topic |
+
 Clients send no heartbeats, so `clients` lists the components that declare
 the service, not the processes running.
 
