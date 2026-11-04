@@ -186,8 +186,9 @@ In C++, `configuration::Supervisor` in
 
 `puppet_master_topic` looks at the shared-memory topics of a running system,
 and its FastDDS topics when built with that adapter (see
-[FastDDS Topics](#fastdds-topics)). It is built and installed with the JSON
-and shared-memory adapters.
+[FastDDS Topics](#fastdds-topics)), and at its services (see
+[Services](#services)). It is built and installed with the JSON and
+shared-memory adapters.
 
 ```bash
 puppet_master_topic list
@@ -247,6 +248,36 @@ The tool also records and replays topics:
 | `info FILE` | the recording's topics, message counts, sizes, rates, and length |
 
 See [Recordings](recording.md).
+
+### Services
+
+The tool also looks at a system's services and calls them. Both commands
+need `--system FILE`; `--domain N` picks the domain as for topics.
+
+```bash
+puppet_master_topic service list --system system.json
+puppet_master_topic service call /map/query --system system.json --data "a b" --text
+puppet_master_topic service call /map/query --system system.json --hex "01 00 2a"
+```
+
+| Command | Effect |
+|---|---|
+| `service list` | each service the manifest's nodes declare: request and reply types, transport, which components serve and call it, and whether a server is up, with its instance id and the age of its newest heartbeat |
+| `service call SERVICE` | send one request, the bytes of `--data TEXT`, of `--hex HEX`, or none, and print the reply's size, round trip, and bytes (in hex, or `--text`; all of them unless `--bytes N`) |
+
+`service list` reads each service's presence topic only, so it creates no
+client and no reply topic. It listens for three heartbeat intervals (at
+least 1 s on FastDDS, for discovery), or `--timeout-ms N`. A server is
+`down` when no heartbeat arrived in that time, and `stopped` when it said
+goodbye while the tool listened; one that stopped earlier shows as `down`.
+Clients send no heartbeats, so `clients` lists the components that declare
+the service, not the processes running.
+
+`service call` uses an ordinary `service::Client`, so the server handles the
+request like any other. It waits up to `--timeout-ms N` (2000 by default)
+for a server and its reply, then exits with 1 and the call's status, such as
+`unavailable` (no live server), `deadline_exceeded`, or the handler's own
+error and message. Requests carry raw bytes: encode typed requests yourself.
 
 ## Library Helpers
 

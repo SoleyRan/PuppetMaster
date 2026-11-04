@@ -4,10 +4,13 @@
 //     puppet_master_topic_tool_test <path to puppet_master_topic>
 
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -15,11 +18,15 @@
 #include <vector>
 
 #include <puppet_master/configuration/supervisor.h>
+#include <puppet_master/runtime/context.h>
+#include <puppet_master/service/service.h>
 #include <puppet_master/transport/shm/shm_transport.h>
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace fs = std::filesystem;
+namespace runtime = puppet_master::runtime;
+namespace service = puppet_master::service;
 namespace shm = puppet_master::transport::shm;
 namespace transport = puppet_master::transport;
 
@@ -53,16 +60,20 @@ public:
     Fixture()
         : stamp_(std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())),
           root_(fs::temp_directory_path() / ("pm_topic_tool_" + stamp_)),
-          topic_("/pm_topic_test/text_" + stamp_)
+          topic_("/pm_topic_test/text_" + stamp_),
+          service_("/pm_topic_test/echo_" + stamp_)
     {
         WriteFile(root_ / "share/test_interfaces/topics.json",
-            R"({"topics": [{"id": "text", "name": ")" + topic_ + R"(", "message_type": "test.Text"}]})");
+            R"({"topics": [{"id": "text", "name": ")" + topic_ + R"(", "message_type": "test.Text"}],
+                "services": [{"id": "echo", "name": ")" + service_ +
+                R"(", "request_type": "test.EchoRequest", "reply_type": "test.EchoReply"}]})");
         WriteFile(root_ / "share/producer/producer.json", R"({
             "imports": ["test_interfaces/topics.json"],
-            "components": [{"name": "producer", "writers": ["text"], "triggers": [{"kind": "manual"}]}]})");
+            "components": [{"name": "producer", "writers": ["text"], "servers": ["echo"],
+                            "triggers": [{"kind": "manual"}]}]})");
         WriteFile(root_ / "share/consumer/consumer.json", R"({
             "imports": ["test_interfaces/topics.json"],
-            "components": [{"name": "consumer", "readers": ["text"],
+            "components": [{"name": "consumer", "readers": ["text"], "clients": ["echo"],
                             "triggers": [{"kind": "data", "data_topics": ["text"]}]}]})");
         WriteFile(root_ / "deploy.json",
             R"({"defaults": {"transport": "shm", "transport_parameters": {"domain_id": 77}},
@@ -104,11 +115,25 @@ public:
 
     std::string File(const std::string& name) const { return (root_ / name).string(); }
 
+    // The echo service as the system declares it.
+    service::ServiceSpec Service() const
+    {
+        service::ServiceSpec spec(core::TopicName::Create(service_).value());
+        spec.transport = core::TransportKind::kIpc;
+        spec.request = transport::MessageDescriptor {"test.EchoRequest", "application/octet-stream", 0};
+        spec.reply = transport::MessageDescriptor {"test.EchoReply", "application/octet-stream", 0};
+        return spec;
+    }
+
+    const std::string& service_name() const noexcept { return service_; }
+
     ~Fixture()
     {
         writer_.reset();
         transport_.reset();
         shm::RemoveSegment(kDomain, topic_);
+        shm::RemoveSegment(kDomain, service_ + "/request");
+        shm::RemoveSegment(kDomain, service_ + "/presence");
         std::error_code ignored;
         fs::remove_all(root_, ignored);
     }
@@ -164,6 +189,7 @@ private:
     std::string stamp_;
     fs::path root_;
     std::string topic_;
+    std::string service_;
     std::unique_ptr<shm::ShmTransport> transport_;
     transport::WriterPtr writer_;
     int runs_ {0};
@@ -305,6 +331,87 @@ void TestRecordInfoReplay(Fixture& fixture, const std::string& tool)
     assert(run.exit.code == 2);
 }
 
+std::string Hex16(std::uint64_t value)
+{
+    std::ostringstream text;
+    text << std::hex << std::setw(16) << std::setfill('0') << value;
+    return text.str();
+}
+
+void TestServices(Fixture& fixture, const std::string& tool)
+{
+    const auto& name = fixture.service_name();
+
+    // No server yet: declared, but down.
+    auto run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, name + "  request test.EchoRequest (application/octet-stream), reply "
+                                       "test.EchoReply (application/octet-stream)  shm domain 77"));
+    assert(Contains(run.output, "  server: down (no heartbeat in 300 ms)"));
+    assert(Contains(run.output, "  servers: producer/producer"));
+    assert(Contains(run.output, "  clients: consumer/consumer"));
+
+    // A server in this process: upper-cases the request, refuses "fail".
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    shm::Options shm_options;
+    shm_options.domain_id = kDomain;
+    assert(shm::RegisterTransport(*context.value(), core::TransportName::Create("shm").value(), shm_options).ok());
+    auto server = service::Server::Create(*context.value(), fixture.Service(), [](const service::Request& request) {
+        std::string text(request.payload.begin(), request.payload.end());
+        if (text == "fail") {
+            return core::Result<transport::ByteBuffer>::FromStatus(core::Status::InvalidArgument("no fail"));
+        }
+        for (auto& c : text) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        return core::Result<transport::ByteBuffer>(transport::ByteBuffer(text.begin(), text.end()));
+    });
+    assert(server.ok());
+    const auto instance = Hex16(server.value()->instance_id());
+
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "  server: up, instance " + instance + ", heartbeat "));
+
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--data", "hi there", "--text"},
+        0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "call " + name + ": server " + instance + ", request 8 B"));
+    assert(Contains(run.output, "reply 8 B in "));
+    assert(Contains(run.output, " ms  HI THERE"));
+
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--hex", "68:69"}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, " ms  48 49"));
+
+    // The handler's error, with its message.
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--data", "fail"}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "invalid_argument: no fail"));
+
+    run = fixture.Run({tool, "service", "call", "/pm_topic_test/nobody", "--system", fixture.system()}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "declares service /pm_topic_test/nobody"));
+    run = fixture.Run({tool, "service", "list"}, 0ms);
+    assert(run.exit.code == 2);
+    assert(Contains(run.output, "needs --system FILE"));
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--hex", "6"}, 0ms);
+    assert(run.exit.code == 2);
+
+    // Stopped: a call fails at once instead of timing out.
+    server.value()->Close();
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(!Contains(run.output, "  server: up"));
+    run = fixture.Run(
+        {tool, "service", "call", name, "--system", fixture.system(), "--data", "x", "--timeout-ms", "500"}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "unavailable: "));
+}
+
 #if !defined(_WIN32)
 void TestListFromSegments(Fixture& fixture, const std::string& tool)
 {
@@ -341,6 +448,7 @@ int main(int argc, char** argv)
     TestHz(fixture, tool);
     TestErrors(fixture, tool);
     TestRecordInfoReplay(fixture, tool);
+    TestServices(fixture, tool);
 #if !defined(_WIN32)
     // Segment headers can only be read on Linux.
     TestListFromSegments(fixture, tool);

@@ -15,15 +15,24 @@
 // their domain from --domain (default 0); FastDDS carries no writer sequence
 // or publish time, so losses and latency are not shown for them, and rates
 // and intervals are by arrival.
+//
+//     puppet_master_topic service list --system system.json
+//     puppet_master_topic service call /map/query --system system.json --data "a b"
+//
+// service list reads each service's presence topic only, so it changes
+// nothing. service call sends one real request through a service::Client, so
+// the server handles it like any other.
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -36,6 +45,8 @@
 
 #include <puppet_master/configuration/configuration.h>
 #include <puppet_master/configuration/system_manifest.h>
+#include <puppet_master/runtime/context.h>
+#include <puppet_master/service/service.h>
 #include <puppet_master/transport/recording.h>
 #include <puppet_master/transport/shm/shm_transport.h>
 #ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
@@ -44,6 +55,8 @@
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
+namespace runtime = puppet_master::runtime;
+namespace service = puppet_master::service;
 namespace shm = puppet_master::transport::shm;
 namespace transport = puppet_master::transport;
 #ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
@@ -97,21 +110,34 @@ int Usage(std::ostream& out)
         << "                  named) at their recorded pace\n"
         << "  --rate X        replay: X times the recorded pace; 0 publishes at once\n"
         << "  info            the topics, message counts, and length of a recording\n"
+        << "       puppet_master_topic service list --system FILE [--domain N] [--timeout-ms N]\n"
+        << "       puppet_master_topic service call <service> --system FILE [--domain N]\n"
+        << "                                        [--data TEXT | --hex HEX] [--timeout-ms N]\n"
+        << "                                        [--bytes N] [--text]\n"
+        << "  service list    the system's services, who serves and calls them, and whether a\n"
+        << "                  server is up, from its heartbeats; listens --timeout-ms (default:\n"
+        << "                  three heartbeat intervals, at least 1 s on FastDDS)\n"
+        << "  service call    send one request, TEXT's bytes, HEX's (\"68 69\"), or none, and print\n"
+        << "                  the reply; fails with the call's status (--timeout-ms, default 2000)\n"
         << "Ctrl+C stops echo, hz, record, and replay.\n";
     return 2;
 }
 
 struct Arguments {
     std::string command;
-    std::vector<std::string> topics;
+    std::string subcommand;  // service: list or call
+    std::vector<std::string> topics;  // service call: the service
     std::string file;  // record: -o; replay, info: the first operand
     std::string system;
     std::optional<core::DomainId> domain;
     std::uint64_t count {0};
     milliseconds timeout {0};
+    bool timeout_set {false};
+    transport::ByteBuffer data;  // service call: the request
     milliseconds window {1000};
     milliseconds duration {0};
     std::uint64_t bytes {32};
+    bool bytes_set {false};
     bool text {false};
     double rate {1.0};
 };
@@ -135,6 +161,30 @@ bool ParseNumber(const std::string& text, std::uint64_t& value)
     return true;
 }
 
+// "68 69", "6869", or "68:69": pairs of hex digits; spaces and colons are
+// ignored.
+bool ParseHex(const std::string& text, transport::ByteBuffer& bytes)
+{
+    std::string digits;
+    for (const char c : text) {
+        if (c == ' ' || c == ':') {
+            continue;
+        }
+        if (!std::isxdigit(static_cast<unsigned char>(c))) {
+            return false;
+        }
+        digits += c;
+    }
+    if (digits.size() % 2 != 0) {
+        return false;
+    }
+    bytes.clear();
+    for (std::size_t index = 0; index < digits.size(); index += 2) {
+        bytes.push_back(static_cast<core::Byte>(std::stoul(digits.substr(index, 2), nullptr, 16)));
+    }
+    return true;
+}
+
 // Returns 0 when the arguments are good, else the exit code.
 int Parse(int argc, char** argv, Arguments& args)
 {
@@ -146,13 +196,23 @@ int Parse(int argc, char** argv, Arguments& args)
         Usage(std::cout);
         return -1;
     }
-    const std::set<std::string> commands {"list", "echo", "hz", "record", "replay", "info"};
+    const std::set<std::string> commands {"list", "echo", "hz", "record", "replay", "info", "service"};
     if (commands.count(args.command) == 0) {
         return Usage(std::cerr);
     }
+    int first = 2;
+    if (args.command == "service") {
+        if (argc < 3 || (std::string(argv[2]) != "list" && std::string(argv[2]) != "call")) {
+            return Usage(std::cerr);
+        }
+        args.subcommand = argv[2];
+        first = 3;
+    }
     const bool echo = args.command == "echo";
     const bool record = args.command == "record";
-    for (int index = 2; index < argc; ++index) {
+    const bool call = args.subcommand == "call";
+    bool has_data = false;
+    for (int index = first; index < argc; ++index) {
         const std::string argument = argv[index];
         const bool has_value = index + 1 < argc;
         std::uint64_t number = 0;
@@ -176,18 +236,33 @@ int Parse(int argc, char** argv, Arguments& args)
                 return 2;
             }
             args.count = number;
-        } else if (argument == "--timeout-ms" && args.command == "echo") {
+        } else if (argument == "--timeout-ms" && (echo || args.command == "service")) {
             if (!numeric("--timeout-ms")) {
                 return 2;
             }
             args.timeout = milliseconds(number);
-        } else if (argument == "--bytes" && args.command == "echo") {
+            args.timeout_set = true;
+        } else if (argument == "--bytes" && (echo || call)) {
             if (!numeric("--bytes")) {
                 return 2;
             }
             args.bytes = number;
-        } else if (argument == "--text" && args.command == "echo") {
+            args.bytes_set = true;
+        } else if (argument == "--text" && (echo || call)) {
             args.text = true;
+        } else if ((argument == "--data" || argument == "--hex") && call && has_value) {
+            if (has_data) {
+                std::cerr << "give --data or --hex once\n";
+                return 2;
+            }
+            has_data = true;
+            const std::string value = argv[++index];
+            if (argument == "--data") {
+                args.data.assign(value.begin(), value.end());
+            } else if (!ParseHex(value, args.data)) {
+                std::cerr << "--hex needs pairs of hex digits, such as \"68 69\"\n";
+                return 2;
+            }
         } else if (argument == "--window-ms" && args.command == "hz") {
             if (!numeric("--window-ms") || number == 0) {
                 return 2;
@@ -206,7 +281,8 @@ int Parse(int argc, char** argv, Arguments& args)
                 return 2;
             }
             ++index;
-        } else if (!argument.empty() && argument[0] != '-' && args.command != "list") {
+        } else if (!argument.empty() && argument[0] != '-' && args.command != "list" &&
+                   args.subcommand != "list") {
             const bool takes_file = args.command == "replay" || args.command == "info";
             if (takes_file && args.file.empty()) {
                 args.file = argument;
@@ -218,6 +294,19 @@ int Parse(int argc, char** argv, Arguments& args)
         } else {
             return Usage(std::cerr);
         }
+    }
+    if (args.command == "service") {
+        if (call && args.topics.size() != 1) {
+            return Usage(std::cerr);
+        }
+        if (args.system.empty()) {
+            std::cerr << "service " << args.subcommand << " needs --system FILE\n";
+            return 2;
+        }
+        if (call && !args.bytes_set) {
+            args.bytes = std::numeric_limits<std::uint64_t>::max();  // a reply is shown whole
+        }
+        return 0;
     }
     const bool one_topic = echo || args.command == "hz";
     if ((one_topic && args.topics.size() != 1) ||
@@ -1269,6 +1358,335 @@ int Info(const Arguments& args)
     return 0;
 }
 
+// --- services -----------------------------------------------------------
+
+// A service the manifest's nodes declare, with what is needed to reach it.
+struct ServiceInfo {
+    explicit ServiceInfo(service::ServiceSpec spec_in) : spec(std::move(spec_in)) {}
+
+    service::ServiceSpec spec;
+    core::DomainId domain {0};
+    // The ring sizes of its topics, from the first node that declares it.
+    shm::Options shm_options;
+    // "node/component".
+    std::set<std::string> servers;
+    std::set<std::string> clients;
+};
+
+using Services = core::Result<std::vector<ServiceInfo>>;
+
+bool SameContract(const service::ServiceSpec& lhs, const service::ServiceSpec& rhs)
+{
+    return lhs.transport == rhs.transport && lhs.request == rhs.request && lhs.reply == rhs.reply &&
+           lhs.queue_depth == rhs.queue_depth && lhs.heartbeat_interval == rhs.heartbeat_interval;
+}
+
+// Every service the manifest's nodes declare, with the deployment's
+// transport settings, and which components serve and call it.
+Services ServicesFromSystem(const Arguments& args)
+{
+    auto manifest = config::LoadSystemManifest(args.system);
+    if (!manifest.ok()) {
+        return Services::FromStatus(manifest.status());
+    }
+    auto nodes = config::LoadSystemNodes(manifest.value());
+    if (!nodes.ok()) {
+        return Services::FromStatus(nodes.status());
+    }
+    std::map<std::string, ServiceInfo> by_name;
+    for (const auto& node : nodes.value()) {
+        auto options = shm::OptionsFromProject(node.project);
+        if (!options.ok()) {
+            return Services::FromStatus(core::Status::Error(
+                options.status().code(), "node " + node.name + ": " + options.status().message()));
+        }
+        std::map<std::string, std::string> names;  // service id -> wire name
+        for (const auto& declared : node.project.services) {
+            auto spec = declared.ToServiceSpec();
+            if (!spec.ok()) {
+                return Services::FromStatus(core::Status::Error(
+                    spec.status().code(), "node " + node.name + ": " + spec.status().message()));
+            }
+            names[declared.id] = declared.name;
+            // As for topics: a FastDDS domain is chosen in code, so it comes
+            // from --domain (default 0).
+            const core::DomainId domain = args.domain ? *args.domain
+                                          : declared.transport == core::TransportKind::kFastDds
+                                              ? 0
+                                              : options.value().domain_id;
+            const auto found = by_name.find(declared.name);
+            if (found == by_name.end()) {
+                ServiceInfo info(std::move(spec).value());
+                info.domain = domain;
+                info.shm_options = options.value();
+                info.shm_options.domain_id = domain;
+                by_name.emplace(declared.name, std::move(info));
+            } else if (!SameContract(found->second.spec, spec.value()) || found->second.domain != domain) {
+                return Services::FromStatus(core::Status::InvalidArgument(
+                    "service " + declared.name + " is declared differently in node " + node.name +
+                    "; run puppet_master_config system validate"));
+            }
+        }
+        for (const auto& component : node.project.components) {
+            for (const auto* ids : {&component.servers, &component.clients}) {
+                for (const auto& id : *ids) {
+                    const auto name = names.find(id);
+                    if (name == names.end()) {
+                        continue;
+                    }
+                    auto& info = by_name.find(name->second)->second;
+                    (ids == &component.servers ? info.servers : info.clients)
+                        .insert(node.name + "/" + component.name);
+                }
+            }
+        }
+    }
+    std::vector<ServiceInfo> services;
+    for (auto& entry : by_name) {
+        services.push_back(std::move(entry.second));
+    }
+    return Services(std::move(services));
+}
+
+std::string TransportText(core::TransportKind kind, core::DomainId domain)
+{
+    if (kind == core::TransportKind::kIpc) {
+        return "shm domain " + std::to_string(domain);
+    }
+    if (kind == core::TransportKind::kFastDds) {
+        return "fastdds domain " + std::to_string(domain);
+    }
+    return core::ToString(kind);
+}
+
+std::string Hex16(std::uint64_t value)
+{
+    std::ostringstream text;
+    text << std::hex << std::setw(16) << std::setfill('0') << value;
+    return text.str();
+}
+
+// A reader of the service's presence topic only: no client, no reply topic.
+core::Result<Subscription> WatchPresence(Transports& transports, const ServiceInfo& info)
+{
+    using ResultType = core::Result<Subscription>;
+    if (!Readable(info.spec.transport)) {
+        return ResultType::FromStatus(core::Status::Unsupported(
+            std::string("it uses the ") + core::ToString(info.spec.transport) + " transport; " + kReadableTransports));
+    }
+    auto endpoints = service::EndpointsFor(info.spec);
+    if (!endpoints.ok()) {
+        return ResultType::FromStatus(endpoints.status());
+    }
+    const auto& presence = endpoints.value().presence;
+    TopicInfo topic;
+    topic.name = presence.topic.name.str();
+    topic.transport = info.spec.transport;
+    topic.descriptor = presence.message;
+    topic.geometry = info.shm_options.ForTopic(topic.name);
+    topic.domain = info.domain;
+    auto owner = transports.For(topic);
+    if (!owner.ok()) {
+        return ResultType::FromStatus(owner.status());
+    }
+    auto reader = owner.value()->CreateReader(presence);
+    if (!reader.ok()) {
+        return ResultType::FromStatus(reader.status());
+    }
+    Subscription subscription;
+    subscription.owner = owner.value();
+    subscription.carried = CarriedBy(topic.transport);
+    subscription.reader = reader.value();
+    return ResultType(std::move(subscription));
+}
+
+// What the presence topic said while the tool listened.
+struct Presence {
+    std::optional<Subscription> subscription;
+    std::string problem;  // why it could not be watched
+    std::uint64_t instance {0};
+    bool goodbye {false};
+    std::optional<Clock::time_point> heard;  // newest heartbeat or goodbye
+};
+
+// Reads the heartbeats that arrived; each is {u64 instance, u64 sequence},
+// little-endian, and sequence 0 is the server's goodbye.
+void Poll(Presence& presence)
+{
+    for (auto message = presence.subscription->reader->Read(); message.ok();
+         message = presence.subscription->reader->Read()) {
+        const auto& payload = message.value().payload;
+        if (payload.size() != 16) {
+            continue;
+        }
+        std::uint64_t instance = 0;
+        std::uint64_t sequence = 0;
+        for (int index = 7; index >= 0; --index) {
+            instance = (instance << 8) | payload[static_cast<std::size_t>(index)];
+            sequence = (sequence << 8) | payload[static_cast<std::size_t>(8 + index)];
+        }
+        presence.instance = instance;
+        presence.goodbye = sequence == 0;
+        presence.heard = Clock::now();
+    }
+}
+
+int ServiceList(const Arguments& args)
+{
+    auto services = ServicesFromSystem(args);
+    if (!services.ok()) {
+        std::cerr << services.status().ToString() << '\n';
+        return 1;
+    }
+    if (services.value().empty()) {
+        std::cout << "no services\n";
+        return 0;
+    }
+
+    // Long enough to see a heartbeat of every live server, and on FastDDS
+    // for discovery first.
+    core::Nanoseconds listen {0};
+    for (const auto& info : services.value()) {
+        listen = std::max(listen, 3 * info.spec.heartbeat_interval);
+        if (info.spec.transport == core::TransportKind::kFastDds) {
+            listen = std::max<core::Nanoseconds>(listen, std::chrono::seconds(1));
+        }
+    }
+    if (args.timeout_set) {
+        listen = args.timeout;
+    }
+
+    Transports transports;
+    std::vector<Presence> presences(services.value().size());
+    for (std::size_t index = 0; index < presences.size(); ++index) {
+        auto watched = WatchPresence(transports, services.value()[index]);
+        if (watched.ok()) {
+            presences[index].subscription = std::move(watched).value();
+        } else {
+            presences[index].problem = watched.status().message();
+        }
+    }
+    const auto deadline = Clock::now() + std::chrono::duration_cast<Clock::duration>(listen);
+    while (!g_stop.load() && Clock::now() < deadline) {
+        bool all_heard = true;
+        for (auto& presence : presences) {
+            if (presence.subscription) {
+                Poll(presence);
+                all_heard = all_heard && presence.heard.has_value();
+            }
+        }
+        if (all_heard) {
+            break;
+        }
+        std::this_thread::sleep_for(milliseconds(10));
+    }
+
+    const auto now = Clock::now();
+    for (std::size_t index = 0; index < presences.size(); ++index) {
+        const auto& info = services.value()[index];
+        const auto& presence = presences[index];
+        std::cout << info.spec.name.str() << "  request " << info.spec.request.ToString() << ", reply "
+                  << info.spec.reply.ToString() << "  " << TransportText(info.spec.transport, info.domain) << '\n';
+        std::cout << "  server: ";
+        if (!presence.subscription) {
+            std::cout << "unknown (" << presence.problem << ")";
+        } else if (!presence.heard) {
+            std::cout << "down (no heartbeat in " << std::chrono::duration_cast<milliseconds>(listen).count()
+                      << " ms)";
+        } else if (presence.goodbye) {
+            std::cout << "stopped (instance " << Hex16(presence.instance) << " said goodbye)";
+        } else {
+            std::cout << "up, instance " << Hex16(presence.instance) << ", heartbeat "
+                      << std::chrono::duration_cast<milliseconds>(now - *presence.heard).count() << " ms ago";
+        }
+        std::cout << '\n';
+        std::cout << "  servers: " << Join(info.servers) << '\n';
+        std::cout << "  clients: " << Join(info.clients) << '\n';
+    }
+    return 0;
+}
+
+int ServiceCall(const Arguments& args)
+{
+    auto services = ServicesFromSystem(args);
+    if (!services.ok()) {
+        std::cerr << services.status().ToString() << '\n';
+        return 1;
+    }
+    const auto& name = args.topics.front();
+    const auto found = std::find_if(services.value().begin(), services.value().end(),
+                                    [&name](const ServiceInfo& info) { return info.spec.name.str() == name; });
+    if (found == services.value().end()) {
+        std::cerr << "not_found: no node of " << args.system << " declares service " << name << '\n';
+        return 1;
+    }
+    const auto& info = *found;
+    if (!Readable(info.spec.transport)) {
+        std::cerr << "unsupported: service " << name << " uses the " << core::ToString(info.spec.transport)
+                  << " transport; " << kReadableTransports << '\n';
+        return 1;
+    }
+
+    // A runtime of its own with the one transport the service runs on, so
+    // the client below is an ordinary one.
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto created = runtime::RuntimeContext::Create(options);
+    if (!created.ok()) {
+        std::cerr << created.status().ToString() << '\n';
+        return 1;
+    }
+    auto& context = *created.value();
+    const auto transport_name = core::TransportName::Create("puppet_master_topic").value();
+    transport::TransportPtr backend;
+    if (info.spec.transport == core::TransportKind::kIpc) {
+        backend = std::make_shared<shm::ShmTransport>(transport_name, info.shm_options);
+    }
+#ifdef PUPPETMASTER_TOPIC_WITH_FASTDDS
+    else {
+        fastdds::Options dds;
+        dds.domain_id = info.domain;
+        dds.participant_name = "puppet_master_topic";
+        backend = std::make_shared<fastdds::FastDdsTransport>(transport_name, dds);
+    }
+#endif
+    auto status = context.RegisterTransport(backend);
+    if (!status.ok()) {
+        std::cerr << status.ToString() << '\n';
+        return 1;
+    }
+
+    auto client = service::Client::Create(context, info.spec);
+    if (!client.ok()) {
+        std::cerr << client.status().ToString() << '\n';
+        return 1;
+    }
+    const auto timeout = args.timeout_set ? args.timeout : milliseconds(2000);
+    const auto started = Clock::now();
+    auto server = client.value()->WaitForService(timeout);
+    if (!server.ok()) {
+        std::cerr << server.status().ToString() << '\n';
+        return 1;
+    }
+    std::cerr << "call " << name << ": server " << Hex16(server.value().instance_id) << ", request "
+              << args.data.size() << " B" << std::endl;
+    const auto left = std::max<Clock::duration>(timeout - (Clock::now() - started), milliseconds(1));
+    const auto sent = Clock::now();
+    auto reply = client.value()->Call(transport::ByteView(args.data),
+                                      std::chrono::duration_cast<core::Nanoseconds>(left));
+    const auto took = Clock::now() - sent;
+    if (!reply.ok()) {
+        std::cerr << reply.status().ToString() << '\n';
+        return 1;
+    }
+    std::cout << "reply " << reply.value().size() << " B in " << std::fixed << std::setprecision(1)
+              << Microseconds(std::chrono::duration_cast<core::Nanoseconds>(took)) / 1000.0 << " ms";
+    std::cout.unsetf(std::ios::floatfield);
+    PrintPayload(reply.value(), args);
+    std::cout << std::endl;
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -1294,6 +1712,9 @@ int main(int argc, char** argv)
     }
     if (args.command == "record") {
         return Record(args);
+    }
+    if (args.command == "service") {
+        return args.subcommand == "list" ? ServiceList(args) : ServiceCall(args);
     }
     return args.command == "replay" ? Replay(args) : Info(args);
 }
