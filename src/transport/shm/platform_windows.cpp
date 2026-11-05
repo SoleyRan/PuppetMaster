@@ -109,10 +109,31 @@ core::Status SharedRegion::Remove(const std::string& /*name*/)
     return core::Status::Ok();
 }
 
-core::Result<std::unique_ptr<SharedRegion>> SharedRegion::OpenReadOnly(const std::string& /*name*/)
+core::Result<std::unique_ptr<SharedRegion>> SharedRegion::OpenReadOnly(const std::string& name)
 {
-    return core::Result<std::unique_ptr<SharedRegion>>::FromStatus(
-        core::Status::Unsupported("shm segment inspection is not supported on Windows"));
+    using ResultType = core::Result<std::unique_ptr<SharedRegion>>;
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, Widen(name).c_str());
+    if (mapping == nullptr) {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+            return ResultType::FromStatus(core::Status::NotFound("no shared region " + name));
+        }
+        return ResultType::FromStatus(core::Status::Unavailable(LastErrorMessage("OpenFileMappingW")));
+    }
+    void* data = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    if (data == nullptr) {
+        auto status = core::Status::Unavailable(LastErrorMessage("MapViewOfFile"));
+        CloseHandle(mapping);
+        return ResultType::FromStatus(std::move(status));
+    }
+    // The view is the whole mapping, rounded up to whole pages.
+    MEMORY_BASIC_INFORMATION info {};
+    if (VirtualQuery(data, &info, sizeof(info)) == 0) {
+        auto status = core::Status::Unavailable(LastErrorMessage("VirtualQuery"));
+        UnmapViewOfFile(data);
+        CloseHandle(mapping);
+        return ResultType::FromStatus(std::move(status));
+    }
+    return ResultType(std::unique_ptr<SharedRegion>(new SharedRegion(data, info.RegionSize, false, mapping)));
 }
 
 core::Result<std::vector<std::string>> SharedRegion::List(std::optional<core::DomainId> /*domain*/)

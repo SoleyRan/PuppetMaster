@@ -203,6 +203,13 @@ shares it with processes started later. The same operations are available
 in C++ as `shm::ListSegments` and `shm::RemoveUnusedSegments`. On Windows they
 return `Unsupported`, since there is nothing left over to clean.
 
+`shm::ReadNewestMessage(domain, endpoint)` returns the newest message of one
+topic, read from its segment the same way: without attaching, so no writer
+or reader notices, and readers created later still start after it. Tools use
+it for the last word of a writer that may have stopped, such as a service's
+final heartbeat or goodbye. On Linux the segment, and so the message, outlive
+their processes; on Windows only while some process has the topic open.
+
 ## Limits
 
 - Same host only. Use the FastDDS adapter across hosts.

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -114,6 +115,17 @@ struct SegmentInspection {
 
 // Maps `name` read-only and reads its header. NotFound if it does not exist.
 core::Result<SegmentInspection> InspectSegment(const std::string& name);
+
+// The header and the newest committed message of a segment, read like
+// InspectSegment: without attaching, so no running process notices.
+struct NewestMessage {
+    SegmentInspection inspection;
+    // None if nothing was written yet, the segment is not valid, or writers
+    // kept overwriting the slot while it was copied.
+    std::optional<Message> message;
+};
+
+core::Result<NewestMessage> ReadNewestInSegment(const std::string& name);
 
 // Result of one reader pass over the ring.
 struct ReadOutcome {

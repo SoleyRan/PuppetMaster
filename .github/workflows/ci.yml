@@ -165,9 +165,12 @@ jobs:
           timeout 300s "$integration/check_version_skew.sh" "$GITHUB_WORKSPACE/json-install" \
             "$GITHUB_WORKSPACE/skew" "$config_tool"
 
+  # Pinned: FastDDS 2.14 does not build with GCC 15 (its headers use
+  # uint8_t without <cstdint>), which ubuntu-latest ships since it moved
+  # past Ubuntu 24.04.
   fastdds:
-    name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})
-    runs-on: ubuntu-latest
+    name: ubuntu-24.04 (FastDDS ${{ matrix.fastdds }})
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -186,12 +189,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasio-dev libtinyxml2-dev libssl-dev ninja-build nlohmann-json3-dev
 
+      # FastDDS links the system's tinyxml2 and OpenSSL, so a cached build
+      # only works on the same OS release with the same library versions.
+      # runner.os alone stays "Linux" when ubuntu-latest moves to a newer
+      # Ubuntu, which once restored a build whose libtinyxml2 was gone.
+      - name: Fingerprint system libraries
+        id: system
+        run: |
+          . /etc/os-release
+          libs=$(dpkg-query -W -f='${Package}=${Version} ' libtinyxml2-dev libssl-dev)
+          echo "$ID $VERSION_ID: $libs"
+          echo "key=$ID-$VERSION_ID-$(echo "$libs" | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
       - name: Cache FastDDS
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: fastdds-${{ runner.os }}-${{ matrix.fastdds }}-${{ matrix.fastcdr }}-v1
+          key: fastdds-${{ steps.system.outputs.key }}-${{ matrix.fastdds }}-${{ matrix.fastcdr }}-v1
 
       - name: Build FastDDS from source
         if: steps.cache-deps.outputs.cache-hit != 'true'

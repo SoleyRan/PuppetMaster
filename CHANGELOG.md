@@ -5,6 +5,29 @@ each minor release may break the API and the ABI: the shared libraries carry
 the minor version in their soname (`libpuppet_master.so.0.4`), and
 `find_package(PuppetMaster 0.4)` accepts only 0.4.x.
 
+## Unreleased
+
+### Added
+
+- **Service commands in the topic tool.** `puppet_master_topic service list
+  --system FILE` shows each service the system declares, who serves and
+  calls it, and whether its server is up, from the presence topic alone.
+  `service call SERVICE --system FILE` sends one request (`--data TEXT` or
+  `--hex HEX`) through an ordinary client and prints the reply, or exits
+  with 1 and the call's status. Both work on shared memory and, when built
+  with it, FastDDS. See [Services](docs/launcher.md#services).
+- `shm::ReadNewestMessage(domain, endpoint)` reads the newest message of a
+  topic from its segment without attaching, so no writer or reader notices.
+  `service list` uses it on shared memory to tell a server that said goodbye
+  (`stopped`) from one whose heartbeats stopped without one (`down`, with
+  its last heartbeat's age), also when the server stopped before the tool
+  started. See [Segment Lifetime](docs/shm-transport.md#segment-lifetime).
+- **Typed service calls.** `service call --field TYPE:VALUE` builds a
+  portable-codec request field by field (`bool`, `i8`-`i64`, `u8`-`u64`,
+  `f32`, `f64`, `string`, with `[]` for a vector or `[N]` for an array), and
+  `--reply-fields TYPE,...` decodes the reply into one line per field. See
+  [Typed Requests](docs/launcher.md#typed-requests).
+
 ## 0.4.0
 
 Rebuild everything that links PuppetMaster: the soname is now

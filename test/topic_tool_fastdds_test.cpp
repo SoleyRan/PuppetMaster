@@ -4,6 +4,7 @@
 //
 //     puppet_master_topic_fastdds_test <path to puppet_master_topic>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -17,12 +18,16 @@
 #include <vector>
 
 #include <puppet_master/configuration/supervisor.h>
+#include <puppet_master/runtime/context.h>
+#include <puppet_master/service/service.h>
 #include <puppet_master/transport/fastdds/fastdds_transport.h>
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace fastdds = puppet_master::transport::fastdds;
 namespace fs = std::filesystem;
+namespace runtime = puppet_master::runtime;
+namespace service = puppet_master::service;
 namespace transport = puppet_master::transport;
 
 using namespace std::chrono_literals;
@@ -60,10 +65,13 @@ public:
         WriteFile(root_ / "share/test_interfaces/topics.json",
             R"({"topics": [{"id": "text", "name": ")" + topic_ +
                 R"(", "message_type": "test.Text", "transport": "fastdds",
-                    "message_policy": {"delivery": "reliable"}}]})");
+                    "message_policy": {"delivery": "reliable"}}],
+                "services": [{"id": "echo", "name": ")" + topic_ + R"(/echo", "transport": "fastdds",
+                              "request_type": "test.EchoRequest", "reply_type": "test.EchoReply"}]})");
         WriteFile(root_ / "share/producer/producer.json", R"({
             "imports": ["test_interfaces/topics.json"],
-            "components": [{"name": "producer", "writers": ["text"], "triggers": [{"kind": "manual"}]}]})");
+            "components": [{"name": "producer", "writers": ["text"], "servers": ["echo"],
+                            "triggers": [{"kind": "manual"}]}]})");
         WriteFile(root_ / "system.json", R"({
             "name": "topic_fastdds_test", "config_paths": ["share"],
             "nodes": [{"name": "producer", "executable": "producer_node", "config": "producer/producer.json"}]})");
@@ -238,6 +246,42 @@ void TestRecordInfoReplay(Fixture& fixture, const std::string& tool)
     }
 }
 
+// A FastDDS service served from this process, seen and called by the tool.
+void TestService(Fixture& fixture, const std::string& tool)
+{
+    const auto name = fixture.topic() + "/echo";
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    fastdds::Options dds;
+    dds.domain_id = kDomain;
+    dds.participant_name = "topic_tool_service_test";
+    assert(fastdds::RegisterTransport(*context.value(), core::TransportName::Create("dds").value(), dds).ok());
+    service::ServiceSpec spec(core::TopicName::Create(name).value());
+    spec.transport = core::TransportKind::kFastDds;
+    spec.request = transport::MessageDescriptor {"test.EchoRequest", "application/octet-stream", 0};
+    spec.reply = transport::MessageDescriptor {"test.EchoReply", "application/octet-stream", 0};
+    auto server = service::Server::Create(*context.value(), spec, [](const service::Request& request) {
+        transport::ByteBuffer reply(request.payload.begin(), request.payload.end());
+        std::reverse(reply.begin(), reply.end());
+        return core::Result<transport::ByteBuffer>(std::move(reply));
+    });
+    assert(server.ok());
+
+    auto run = fixture.Run({tool, "service", "list", "--system", fixture.system(), "--domain", "79"}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, name + "  request test.EchoRequest (application/octet-stream), reply "
+                                       "test.EchoReply (application/octet-stream)  fastdds domain 79"));
+    assert(Contains(run.output, "  server: up, instance "));
+
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--domain", "79", "--data",
+                       "abc", "--text", "--timeout-ms", "5000"},
+        0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, " ms  cba"));
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -253,6 +297,7 @@ int main(int argc, char** argv)
     TestEcho(fixture, tool);
     TestHz(fixture, tool);
     TestRecordInfoReplay(fixture, tool);
+    TestService(fixture, tool);
 
     std::cout << "topic tool FastDDS tests passed\n";
     return 0;

@@ -47,6 +47,7 @@ install(
 if(TARGET PuppetMaster::ShmAdapter)
     add_executable(puppet_master_topic
         puppet_master_topic.cpp
+        portable_fields.cpp
     )
 
     target_link_libraries(puppet_master_topic

@@ -494,6 +494,24 @@ if(PUPPETMASTER_ENABLE_GOODLOG)
     )
 endif()
 
+# The topic tool's field encoder, against PortableCodec. Needs only the core.
+add_executable(puppet_master_portable_fields_test
+    portable_fields_test.cpp
+    ${PROJECT_SOURCE_DIR}/tools/portable_fields.cpp
+)
+
+target_include_directories(puppet_master_portable_fields_test PRIVATE ${PROJECT_SOURCE_DIR}/tools)
+
+target_link_libraries(puppet_master_portable_fields_test
+    PRIVATE
+        PuppetMaster::PuppetMaster
+)
+
+add_test(
+    NAME puppet_master.portable_fields
+    COMMAND puppet_master_portable_fields_test
+)
+
 add_executable(puppet_master_fastdds_policy_mapping_test
     fastdds_policy_mapping_test.cpp
 )

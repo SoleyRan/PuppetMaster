@@ -100,6 +100,17 @@ PUPPET_MASTER_API const char* ToString(SegmentInfo::State state) noexcept;
 PUPPET_MASTER_API core::Result<std::vector<SegmentInfo>> ListSegments(
     std::optional<core::DomainId> domain_id = std::nullopt);
 
+// The newest message written to a topic on this host, read from its segment
+// without attaching, so no running process notices: for tools that want the
+// last word of a writer that may have stopped. Its sequence and source
+// timestamp are the writer's (the steady clock, which every process on the
+// host shares); reception_timestamp is when it was read. Empty if nothing was
+// written yet. NotFound if the topic has no segment, which on Windows means
+// no process has it open; InvalidArgument if the segment carries another
+// message descriptor than `endpoint`.
+PUPPET_MASTER_API core::Result<std::optional<Message>> ReadNewestMessage(
+    core::DomainId domain_id, const EndpointConfig& endpoint);
+
 // Removes the listed segments that no live process uses (kUnused,
 // kUninitialized, kIncompatible) and returns them. Segments in use are never
 // removed. A process that attaches between the check and the removal keeps

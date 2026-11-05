@@ -3,11 +3,16 @@
 //
 //     puppet_master_topic_tool_test <path to puppet_master_topic>
 
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -15,15 +20,78 @@
 #include <vector>
 
 #include <puppet_master/configuration/supervisor.h>
+#include <puppet_master/runtime/context.h>
+#include <puppet_master/service/service.h>
+#include <puppet_master/service/typed_service.h>
+#include <puppet_master/transport/portable_codec.h>
 #include <puppet_master/transport/shm/shm_transport.h>
 
 namespace config = puppet_master::configuration;
 namespace core = puppet_master::core;
 namespace fs = std::filesystem;
+namespace runtime = puppet_master::runtime;
+namespace service = puppet_master::service;
 namespace shm = puppet_master::transport::shm;
 namespace transport = puppet_master::transport;
 
 using namespace std::chrono_literals;
+
+// The typed service's messages, with PortableCodec, as a component would
+// declare them.
+struct PoseQuery {
+    std::string frame;
+    std::uint32_t id {0};
+    std::vector<double> weights;
+};
+
+struct Pose {
+    double x {0};
+    double y {0};
+    std::string frame;
+    std::array<float, 2> covariance {};
+    bool valid {false};
+};
+
+template <>
+struct puppet_master::transport::PortableFields<PoseQuery> {
+    template <typename Message, typename Visitor>
+    static void Visit(Message& query, Visitor&& field)
+    {
+        field(query.frame);
+        field(query.id);
+        field(query.weights);
+    }
+};
+
+template <>
+struct puppet_master::transport::PortableFields<Pose> {
+    template <typename Message, typename Visitor>
+    static void Visit(Message& pose, Visitor&& field)
+    {
+        field(pose.x);
+        field(pose.y);
+        field(pose.frame);
+        field(pose.covariance);
+        field(pose.valid);
+    }
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<PoseQuery> {
+    static constexpr const char* value = "test.PoseQuery";
+    static constexpr std::uint32_t version = 1;
+};
+
+template <>
+struct puppet_master::transport::MessageTypeName<Pose> {
+    static constexpr const char* value = "test.Pose";
+    static constexpr std::uint32_t version = 1;
+};
+
+template <>
+struct puppet_master::transport::Codec<PoseQuery> : puppet_master::transport::PortableCodec<PoseQuery> {};
+template <>
+struct puppet_master::transport::Codec<Pose> : puppet_master::transport::PortableCodec<Pose> {};
 
 namespace {
 
@@ -34,10 +102,14 @@ bool Contains(const std::string& text, const std::string& part)
     return text.find(part) != std::string::npos;
 }
 
+// Without '\r': on Windows the tool's text-mode output ends lines with
+// "\r\n", and the checks below match on "\n".
 std::string ReadFile(const fs::path& path)
 {
     std::ifstream in(path, std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    std::string text(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>{});
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
 }
 
 void WriteFile(const fs::path& path, const std::string& text)
@@ -53,16 +125,25 @@ public:
     Fixture()
         : stamp_(std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())),
           root_(fs::temp_directory_path() / ("pm_topic_tool_" + stamp_)),
-          topic_("/pm_topic_test/text_" + stamp_)
+          topic_("/pm_topic_test/text_" + stamp_),
+          service_("/pm_topic_test/echo_" + stamp_),
+          pose_service_("/pm_topic_test/pose_" + stamp_)
     {
         WriteFile(root_ / "share/test_interfaces/topics.json",
-            R"({"topics": [{"id": "text", "name": ")" + topic_ + R"(", "message_type": "test.Text"}]})");
+            R"({"topics": [{"id": "text", "name": ")" + topic_ + R"(", "message_type": "test.Text"}],
+                "services": [{"id": "echo", "name": ")" + service_ +
+                R"(", "request_type": "test.EchoRequest", "reply_type": "test.EchoReply"},
+                             {"id": "pose", "name": ")" + pose_service_ +
+                R"(", "request_type": "test.PoseQuery", "request_version": 1,
+                              "reply_type": "test.Pose", "reply_version": 1,
+                              "encoding": "application/x-puppetmaster-portable"}]})");
         WriteFile(root_ / "share/producer/producer.json", R"({
             "imports": ["test_interfaces/topics.json"],
-            "components": [{"name": "producer", "writers": ["text"], "triggers": [{"kind": "manual"}]}]})");
+            "components": [{"name": "producer", "writers": ["text"], "servers": ["echo", "pose"],
+                            "triggers": [{"kind": "manual"}]}]})");
         WriteFile(root_ / "share/consumer/consumer.json", R"({
             "imports": ["test_interfaces/topics.json"],
-            "components": [{"name": "consumer", "readers": ["text"],
+            "components": [{"name": "consumer", "readers": ["text"], "clients": ["echo"],
                             "triggers": [{"kind": "data", "data_topics": ["text"]}]}]})");
         WriteFile(root_ / "deploy.json",
             R"({"defaults": {"transport": "shm", "transport_parameters": {"domain_id": 77}},
@@ -104,11 +185,28 @@ public:
 
     std::string File(const std::string& name) const { return (root_ / name).string(); }
 
+    // The echo service as the system declares it.
+    service::ServiceSpec Service() const
+    {
+        service::ServiceSpec spec(core::TopicName::Create(service_).value());
+        spec.transport = core::TransportKind::kIpc;
+        spec.request = transport::MessageDescriptor {"test.EchoRequest", "application/octet-stream", 0};
+        spec.reply = transport::MessageDescriptor {"test.EchoReply", "application/octet-stream", 0};
+        return spec;
+    }
+
+    const std::string& service_name() const noexcept { return service_; }
+    const std::string& pose_service_name() const noexcept { return pose_service_; }
+
     ~Fixture()
     {
         writer_.reset();
         transport_.reset();
         shm::RemoveSegment(kDomain, topic_);
+        for (const auto* name : {&service_, &pose_service_}) {
+            shm::RemoveSegment(kDomain, *name + "/request");
+            shm::RemoveSegment(kDomain, *name + "/presence");
+        }
         std::error_code ignored;
         fs::remove_all(root_, ignored);
     }
@@ -164,6 +262,8 @@ private:
     std::string stamp_;
     fs::path root_;
     std::string topic_;
+    std::string service_;
+    std::string pose_service_;
     std::unique_ptr<shm::ShmTransport> transport_;
     transport::WriterPtr writer_;
     int runs_ {0};
@@ -305,6 +405,192 @@ void TestRecordInfoReplay(Fixture& fixture, const std::string& tool)
     assert(run.exit.code == 2);
 }
 
+std::string Hex16(std::uint64_t value)
+{
+    std::ostringstream text;
+    text << std::hex << std::setw(16) << std::setfill('0') << value;
+    return text.str();
+}
+
+void TestServices(Fixture& fixture, const std::string& tool)
+{
+    const auto& name = fixture.service_name();
+
+    // No server yet: declared, but down.
+    auto run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, name + "  request test.EchoRequest (application/octet-stream), reply "
+                                       "test.EchoReply (application/octet-stream)  shm domain 77"));
+    assert(Contains(run.output, "  server: down (no heartbeat in 300 ms)"));
+    assert(Contains(run.output, "  servers: producer/producer"));
+    assert(Contains(run.output, "  clients: consumer/consumer"));
+
+    // A server in this process: upper-cases the request, refuses "fail".
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    shm::Options shm_options;
+    shm_options.domain_id = kDomain;
+    assert(shm::RegisterTransport(*context.value(), core::TransportName::Create("shm").value(), shm_options).ok());
+    auto server = service::Server::Create(*context.value(), fixture.Service(), [](const service::Request& request) {
+        std::string text(request.payload.begin(), request.payload.end());
+        if (text == "fail") {
+            return core::Result<transport::ByteBuffer>::FromStatus(core::Status::InvalidArgument("no fail"));
+        }
+        for (auto& c : text) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        return core::Result<transport::ByteBuffer>(transport::ByteBuffer(text.begin(), text.end()));
+    });
+    assert(server.ok());
+    const auto instance = Hex16(server.value()->instance_id());
+
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "  server: up, instance " + instance + ", heartbeat "));
+
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--data", "hi there", "--text"},
+        0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "call " + name + ": server " + instance + ", request 8 B"));
+    assert(Contains(run.output, "reply 8 B in "));
+    assert(Contains(run.output, " ms  HI THERE"));
+
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--hex", "68:69"}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, " ms  48 49"));
+
+    // The handler's error, with its message.
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--data", "fail"}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "invalid_argument: no fail"));
+
+    run = fixture.Run({tool, "service", "call", "/pm_topic_test/nobody", "--system", fixture.system()}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "declares service /pm_topic_test/nobody"));
+    run = fixture.Run({tool, "service", "list"}, 0ms);
+    assert(run.exit.code == 2);
+    assert(Contains(run.output, "needs --system FILE"));
+    run = fixture.Run({tool, "service", "call", name, "--system", fixture.system(), "--hex", "6"}, 0ms);
+    assert(run.exit.code == 2);
+
+    // Stopped in order before the tool started: its goodbye is still the
+    // newest presence message, which the tool reads from the segment. A
+    // presence writer kept open keeps the segment alive on Windows too.
+    const auto endpoints = service::EndpointsFor(fixture.Service());
+    assert(endpoints.ok());
+    auto presence = context.value()->CreateWriter(endpoints.value().presence);
+    assert(presence.ok());
+    server.value()->Close();
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output, "  server: stopped (instance " + instance + " said goodbye "));
+    run = fixture.Run(
+        {tool, "service", "call", name, "--system", fixture.system(), "--data", "x", "--timeout-ms", "500"}, 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "unavailable: "));
+
+    // Gone without a goodbye, as after a crash: its last heartbeat, a second
+    // old, is the newest presence message.
+    unsigned char heartbeat[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x08, 5};
+    transport::WriteOptions old;
+    old.source_timestamp = std::chrono::time_point_cast<core::Nanoseconds>(core::SteadyClock::now() - 1s);
+    assert(presence.value()->Write(transport::ByteView::From(heartbeat, sizeof(heartbeat)), old).ok());
+    run = fixture.Run({tool, "service", "list", "--system", fixture.system()}, 0ms);
+    assert(run.exit.success());
+    assert(Contains(run.output,
+        "  server: down (instance 0877665544332211 stopped without a goodbye; last heartbeat "));
+}
+
+// A PortableCodec service: the tool encodes the request from --field values
+// and decodes the reply with --reply-fields, with no C++ types of its own.
+void TestTypedService(Fixture& fixture, const std::string& tool)
+{
+    const auto& name = fixture.pose_service_name();
+    runtime::RuntimeOptions options;
+    options.register_inmemory_transport = false;
+    auto context = runtime::RuntimeContext::Create(options);
+    assert(context.ok());
+    shm::Options shm_options;
+    shm_options.domain_id = kDomain;
+    assert(shm::RegisterTransport(*context.value(), core::TransportName::Create("shm").value(), shm_options).ok());
+    auto server = service::MakeTypedServer<PoseQuery, Pose>(*context.value(),
+        service::TypedServiceSpec<PoseQuery, Pose>(core::TopicName::Create(name).value(), core::TransportKind::kIpc),
+        [](const PoseQuery& query) {
+            if (query.frame == "fail") {
+                return core::Result<Pose>::FromStatus(core::Status::InvalidArgument("no frame fail"));
+            }
+            Pose pose;
+            pose.x = query.id * 1.5;
+            for (const auto weight : query.weights) {
+                pose.y += weight;
+            }
+            pose.frame = query.frame;
+            pose.covariance = {0.25F, -1.0F};
+            pose.valid = !query.frame.empty();
+            return core::Result<Pose>(pose);
+        });
+    assert(server.ok());
+
+    const std::vector<std::string> base {tool, "service", "call", name, "--system", fixture.system()};
+    const auto with = [&base](std::initializer_list<std::string> extra) {
+        auto command = base;
+        command.insert(command.end(), extra);
+        return command;
+    };
+    const std::string reply_fields = "f64,f64,string,f32[2],bool";
+
+    auto run = fixture.Run(with({"--field", "string:map", "--field", "u32:7", "--field", "f64[]:1, 2.5",
+                                 "--reply-fields", reply_fields}),
+        0ms);
+    assert(run.exit.success());
+    // 4 + 3 bytes of string, 4 of u32, 4 + 2 x 8 of f64[].
+    assert(Contains(run.output, "request 31 B"));
+    assert(Contains(run.output, "  1 f64: 10.5\n"));
+    assert(Contains(run.output, "  2 f64: 3.5\n"));
+    assert(Contains(run.output, "  3 string: \"map\"\n"));
+    assert(Contains(run.output, "  4 f32[2]: [0.25, -1]\n"));
+    assert(Contains(run.output, "  5 bool: true\n"));
+
+    // Without --reply-fields the reply is shown as bytes.
+    run = fixture.Run(with({"--field", "string:", "--field", "u32:0", "--field", "f64[]:"}), 0ms);
+    assert(run.exit.success());
+    // 8 + 8 of f64, 4 of an empty string, 2 x 4 of f32, 1 of bool.
+    assert(Contains(run.output, "reply 29 B in "));
+
+    // A reply field list that does not match: the bytes, and a failure.
+    run = fixture.Run(with({"--field", "string:map", "--field", "u32:7", "--field", "f64[]:", "--reply-fields",
+                            "f64,f64"}),
+        0ms);
+    assert(run.exit.code == 1);
+    // A 32-byte reply, of which two f64 take 16.
+    assert(Contains(run.output, "data_loss: 16 bytes left over after 2 fields"));
+
+    // A request missing a field: the server's decode error comes back.
+    run = fixture.Run(with({"--field", "string:map"}), 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "data_loss: test.PoseQuery: portable decoding: message ends inside a field"));
+
+    // The handler's own error.
+    run = fixture.Run(with({"--field", "string:fail", "--field", "u32:1", "--field", "f64[]:"}), 0ms);
+    assert(run.exit.code == 1);
+    assert(Contains(run.output, "invalid_argument: no frame fail"));
+
+    // Bad arguments are refused before anything is sent.
+    for (const auto& bad : std::vector<std::vector<std::string>> {
+             with({"--field", "u8:300"}),
+             with({"--field", "nope"}),
+             with({"--field", "u128:1"}),
+             with({"--data", "x", "--field", "u8:1"}),
+             with({"--field", "u8:1", "--hex", "01"}),
+             with({"--reply-fields", "f64,,bool"}),
+         }) {
+        run = fixture.Run(bad, 0ms);
+        assert(run.exit.code == 2);
+    }
+}
+
 #if !defined(_WIN32)
 void TestListFromSegments(Fixture& fixture, const std::string& tool)
 {
@@ -341,6 +627,8 @@ int main(int argc, char** argv)
     TestHz(fixture, tool);
     TestErrors(fixture, tool);
     TestRecordInfoReplay(fixture, tool);
+    TestServices(fixture, tool);
+    TestTypedService(fixture, tool);
 #if !defined(_WIN32)
     // Segment headers can only be read on Linux.
     TestListFromSegments(fixture, tool);

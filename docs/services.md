@@ -349,6 +349,9 @@ configured request or reply descriptor that differs from the types' codecs,
 naming both versions.
 
 `--describe` lists services and which components serve and call them.
+`puppet_master_topic service list` shows the same for a running system,
+with whether each server is up, and `service call` sends a request from the
+command line; see [Topic Tool](launcher.md#services).
 `validate --system` checks them across processes like topics: the same
 contract (types, versions, encoding, transport) everywhere, exactly one
 serving process, which is how a second server is caught before it runs, and
