@@ -5,7 +5,12 @@ each minor release may break the API and the ABI: the shared libraries carry
 the minor version in their soname (`libpuppet_master.so.0.4`), and
 `find_package(PuppetMaster 0.4)` accepts only 0.4.x.
 
-## Unreleased
+## 0.4.1
+
+No rebuild needed: 0.4.1 only adds a function, so programs built against
+0.4.0 run against it unchanged, and the soname stays
+`libpuppet_master.so.0.4`. The service wire protocol, the shared-memory
+layout, and 0.4 JSON configurations are the same as in 0.4.0.
 
 ### Added
 

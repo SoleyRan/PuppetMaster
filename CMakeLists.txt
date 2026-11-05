@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(PuppetMaster
-    VERSION 0.4.0
+    VERSION 0.4.1
     DESCRIPTION "A C++ real-time middleware runtime for message-driven components and deterministic task scheduling."
     HOMEPAGE_URL "https://github.com/SoleyRan/PuppetMaster"
     LANGUAGES CXX
