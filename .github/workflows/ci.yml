@@ -165,9 +165,12 @@ jobs:
           timeout 300s "$integration/check_version_skew.sh" "$GITHUB_WORKSPACE/json-install" \
             "$GITHUB_WORKSPACE/skew" "$config_tool"
 
+  # Pinned: FastDDS 2.14 does not build with GCC 15 (its headers use
+  # uint8_t without <cstdint>), which ubuntu-latest ships since it moved
+  # past Ubuntu 24.04.
   fastdds:
-    name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})
-    runs-on: ubuntu-latest
+    name: ubuntu-24.04 (FastDDS ${{ matrix.fastdds }})
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
