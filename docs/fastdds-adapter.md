@@ -48,6 +48,23 @@ find_package(PuppetMaster CONFIG REQUIRED)
 target_link_libraries(my_component PRIVATE PuppetMaster::FastDdsAdapter)
 ```
 
+### Windows
+
+The adapter builds and passes its tests with MSVC 2022 against Fast-DDS 3.2.5,
+including the cross-process smoke test. CI does not cover this combination, so
+it is checked by hand. Notes for building Fast-DDS itself on Windows:
+
+- Its bundled asio and tinyxml2 avoid a package manager:
+  `-DTHIRDPARTY_Asio=FORCE -DTHIRDPARTY_TinyXML2=FORCE` (after
+  `git submodule update --init thirdparty/asio thirdparty/tinyxml2`).
+- Fast-DDS compiles with `/WX`, and some of its sources contain non-ASCII
+  characters. On a system code page other than UTF-8 (for example 936), MSVC
+  warns C4819 on them and the build fails. Compile with `/utf-8`, for example
+  by setting `CL=/utf-8` in the environment, which leaves CMake's flags as
+  they are.
+- Put Fast-DDS's `bin` directory on `PATH` before running tests or programs,
+  so its DLLs are found.
+
 ## Scope
 
 The adapter implements the full transport contract over FastDDS 2.x and 3.x:

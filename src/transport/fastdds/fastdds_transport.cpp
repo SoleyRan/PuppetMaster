@@ -109,21 +109,22 @@ struct ReaderState {
 
         void on_data_available(dds::DataReader* reader) override
         {
-            DataAvailableCallback callback;
+            // Not "callback": that would hide ReaderState::callback (MSVC C4458).
+            DataAvailableCallback notify;
             {
                 std::lock_guard<std::mutex> lock(state_.signal_mutex);
                 if (state_.closed) {
                     return;
                 }
                 ++state_.generation;
-                callback = state_.callback;
+                notify = state_.callback;
             }
             state_.cv.notify_all();
-            if (callback) {
+            if (notify) {
                 const auto previous = g_listener_scope;
                 g_listener_scope = ListenerScope {&state_, reader};
                 try {
-                    callback();
+                    notify();
                 } catch (...) {
                     // A throwing callback must not unwind into DDS.
                 }

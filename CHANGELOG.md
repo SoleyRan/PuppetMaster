@@ -5,6 +5,24 @@ each minor release may break the API and the ABI: the shared libraries carry
 the minor version in their soname (`libpuppet_master.so.0.4`), and
 `find_package(PuppetMaster 0.4)` accepts only 0.4.x.
 
+## Unreleased
+
+### Fixed
+
+- `puppet_master_topic` waited too briefly for FastDDS discovery: `replay`
+  2 s for a reader, `service list` 1 s for a server. FastDDS announces a
+  participant 5 times 100 ms apart, then every 3 s, so two that miss each
+  other's first announcements match only up to 3 s later; replay then
+  published to nobody, and service list showed live servers as down. Both
+  now wait up to 5 s, and stop as soon as the peer is there.
+- The FastDDS adapter compiles without warnings on MSVC `/W4` (C4458, a
+  local hiding a member).
+
+### Documentation
+
+- Building the FastDDS adapter on Windows. See
+  [Windows](docs/fastdds-adapter.md#windows).
+
 ## 0.4.1
 
 No rebuild needed: 0.4.1 only adds a function, so programs built against
