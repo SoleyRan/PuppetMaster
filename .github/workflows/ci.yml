@@ -15,7 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -33,7 +33,7 @@ jobs:
     name: ubuntu-latest (benchmarks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPUPPETMASTER_BUILD_BENCHMARKS=ON
@@ -47,7 +47,7 @@ jobs:
       - name: Run
         run: build/bench/puppet_master_transport_bench --json bench-results.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: transport-bench-${{ github.sha }}
           path: bench-results.json
@@ -64,7 +64,7 @@ jobs:
           - sanitizer: tsan
             flags: -fsanitize=thread -g -O1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: |
@@ -89,7 +89,7 @@ jobs:
     name: windows-latest (JSON configuration)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install JSON dependency
         shell: pwsh
@@ -116,7 +116,7 @@ jobs:
     name: ubuntu-latest (JSON configuration)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install JSON dependency
         run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev
@@ -165,24 +165,24 @@ jobs:
           timeout 300s "$integration/check_version_skew.sh" "$GITHUB_WORKSPACE/json-install" \
             "$GITHUB_WORKSPACE/skew" "$config_tool"
 
-  # Pinned: FastDDS 2.14 does not build with GCC 15 (its headers use
-  # uint8_t without <cstdint>), which ubuntu-latest ships since it moved
-  # past Ubuntu 24.04.
+  # The latest patch release of each FastDDS line: 2.14.4 and 3.2.2 do not
+  # build with GCC 15 (their DDSSQLFilter headers use uint8_t without
+  # <cstdint>); 2.14.7 and 3.2.5 include it.
   fastdds:
-    name: ubuntu-24.04 (FastDDS ${{ matrix.fastdds }})
-    runs-on: ubuntu-24.04
+    name: ubuntu-latest (FastDDS ${{ matrix.fastdds }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - fastdds: v2.14.4
+          - fastdds: v2.14.7
             fastcdr: v2.2.5
-          - fastdds: v3.2.2
+          - fastdds: v3.2.5
             fastcdr: v2.3.3
     env:
       DEPS_PREFIX: ${{ github.workspace }}/deps-install
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install system packages
         run: |
@@ -203,7 +203,7 @@ jobs:
 
       - name: Cache FastDDS
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ env.DEPS_PREFIX }}
           key: fastdds-${{ steps.system.outputs.key }}-${{ matrix.fastdds }}-${{ matrix.fastcdr }}-v1
@@ -247,7 +247,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Diagnose FastDDS transport crash
-        if: failure() && matrix.fastdds == 'v3.2.2'
+        if: failure() && startsWith(matrix.fastdds, 'v3.')
         env:
           LD_LIBRARY_PATH: ${{ env.DEPS_PREFIX }}/lib
         run: |
