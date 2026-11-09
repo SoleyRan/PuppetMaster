@@ -119,7 +119,7 @@ int Usage(std::ostream& out)
         << "                                        [--bytes N] [--text]\n"
         << "  service list    the system's services, who serves and calls them, and whether a\n"
         << "                  server is up, from its heartbeats; listens --timeout-ms (default:\n"
-        << "                  three heartbeat intervals, at least 1 s on FastDDS)\n"
+        << "                  three heartbeat intervals, at least 5 s on FastDDS)\n"
         << "  service call    send one request, TEXT's bytes, HEX's (\"68 69\"), or none, and print\n"
         << "                  the reply; fails with the call's status (--timeout-ms, default 2000)\n"
         << "  --field T:V     service call: a request field in PortableCodec's wire order, repeated;\n"
@@ -563,9 +563,12 @@ core::Result<TopicInfo> FindTopic(const Arguments& args, const std::string& name
 // How deep a FastDDS reader of the tool queues: there is no ring to size it
 // by, so enough for a burst between two reads.
 constexpr std::size_t kFastDdsQueueDepth = 256;
-// How long replay waits for a FastDDS writer to reach a reader, before the
-// first message and before closing.
-constexpr auto kFastDdsMatchTimeout = std::chrono::seconds(2);
+// How long the tool waits for FastDDS discovery: for replay's writer to reach
+// a reader, before the first message and before closing, and for service
+// list to hear a server. A participant announces itself 5 times 100 ms apart,
+// then every 3 s, so two that miss each other's first announcements match up
+// to 3 s later. The waits end as soon as the peer is there.
+constexpr auto kFastDdsMatchTimeout = std::chrono::seconds(5);
 
 // The transport a topic is read and written through: a private shm
 // transport per topic, sized to its ring, or one FastDDS participant per
@@ -1648,7 +1651,7 @@ int ServiceList(const Arguments& args)
     for (const auto& info : services.value()) {
         listen = std::max(listen, 3 * info.spec.heartbeat_interval);
         if (info.spec.transport == core::TransportKind::kFastDds) {
-            listen = std::max<core::Nanoseconds>(listen, std::chrono::seconds(1));
+            listen = std::max<core::Nanoseconds>(listen, kFastDdsMatchTimeout);
         }
     }
     if (args.timeout_set) {

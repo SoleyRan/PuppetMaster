@@ -51,9 +51,12 @@ replayed. `--rate 2` replays twice as fast, `--rate 0.5` at half speed, and
 `--rate 0` publishes everything at once. Readers see new sequence numbers and
 publish times, as from any other writer.
 
-On FastDDS, replay waits up to 2 s for a reader to match before a topic's
-first message, so the start is not sent to nobody, and up to 2 s at the end
-for reliable readers to acknowledge the last messages.
+On FastDDS, replay waits up to 5 s for a reader to match before a topic's
+first message, so the start is not sent to nobody, and up to 5 s at the end
+for reliable readers to acknowledge the last messages. Both waits end as soon
+as the reader is there. They exceed FastDDS's 3 s announcement period: two
+participants that miss each other's first announcements match only at the
+next one.
 
 Stop the system's own writers of a topic before replaying it, or readers
 receive both.

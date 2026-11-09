@@ -267,7 +267,8 @@ puppet_master_topic service call /map/query --system system.json --hex "01 00 2a
 
 `service list` reads each service's presence topic only, so it creates no
 client and no reply topic. It listens for three heartbeat intervals (at
-least 1 s on FastDDS, for discovery), or `--timeout-ms N`. When no heartbeat
+least 5 s on FastDDS, for discovery; it stops as soon as every server was
+heard), or `--timeout-ms N`. When no heartbeat
 arrives in that time, on shared memory it reads the last presence message
 left in the topic's segment (`shm::ReadNewestMessage`, without attaching):
 

@@ -41,10 +41,14 @@ bool Contains(const std::string& text, const std::string& part)
     return text.find(part) != std::string::npos;
 }
 
+// Without '\r': on Windows the tool's text-mode output ends lines with
+// "\r\n", and the checks below match on "\n".
 std::string ReadFile(const fs::path& path)
 {
     std::ifstream in(path, std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    std::string text(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>{});
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
 }
 
 void WriteFile(const fs::path& path, const std::string& text)
@@ -192,10 +196,12 @@ void TestEcho(Fixture& fixture, const std::string& tool)
     assert(Contains(run.output, "echo: 3 received (losses are not visible on fastdds)"));
 }
 
+// Longer than FastDDS's 3 s announcement period, so a reader that missed the
+// writer's first announcements still matches and fills a window.
 void TestHz(Fixture& fixture, const std::string& tool)
 {
     const auto run = fixture.Run({tool, "hz", fixture.topic(), "--system", fixture.system(), "--domain", "79",
-                                  "--window-ms", "500", "--duration-ms", "2000"},
+                                  "--window-ms", "500", "--duration-ms", "6000"},
         10ms);
     assert(run.exit.success());
     assert(Contains(run.output, "rate "));
